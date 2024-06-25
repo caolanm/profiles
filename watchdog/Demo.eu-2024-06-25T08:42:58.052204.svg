@@ -1,0 +1,2877 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="518" onload="init(evt)" viewBox="0 0 1200 518" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="518.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Demo.eu Watchdog Profile (2024-06-25T08:42:58.052204)</text>
+<text id="details" x="10.00" y="501" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="501" > </text>
+<g id="frames">
+<g >
+<title>rtl::str::newFromStr_WithLength&lt;_rtl_uString, char16_t&gt; (3 samples, 0.01%)</title><rect x="700.8" y="389" width="0.2" height="15.0" fill="rgb(238,59,36)" rx="2" ry="2" />
+<text  x="703.84" y="399.5" ></text>
+</g>
+<g >
+<title>pdfium::agg::path_storage::allocate_block (2 samples, 0.01%)</title><rect x="1176.0" y="277" width="0.2" height="15.0" fill="rgb(236,119,12)" rx="2" ry="2" />
+<text  x="1179.05" y="287.5" ></text>
+</g>
+<g >
+<title>rtl::str::newFromStr_WithLength&lt;_rtl_uString, char16_t&gt; (2 samples, 0.01%)</title><rect x="534.7" y="405" width="0.2" height="15.0" fill="rgb(214,74,13)" rx="2" ry="2" />
+<text  x="537.75" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="698.7" y="357" width="0.2" height="15.0" fill="rgb(228,30,48)" rx="2" ry="2" />
+<text  x="701.73" y="367.5" ></text>
+</g>
+<g >
+<title>_cairo_spans_compositor_stroke (3 samples, 0.01%)</title><rect x="1169.7" y="389" width="0.1" height="15.0" fill="rgb(248,116,2)" rx="2" ry="2" />
+<text  x="1172.68" y="399.5" ></text>
+</g>
+<g >
+<title>pdfium::CFX_AggDeviceDriver::RenderRasterizer (2 samples, 0.01%)</title><rect x="1182.8" y="437" width="0.1" height="15.0" fill="rgb(221,66,46)" rx="2" ry="2" />
+<text  x="1185.84" y="447.5" ></text>
+</g>
+<g >
+<title>CPDF_DIB::TranslateScanline24bpp (19 samples, 0.08%)</title><rect x="1174.5" y="197" width="1.0" height="15.0" fill="rgb(251,61,23)" rx="2" ry="2" />
+<text  x="1177.47" y="207.5" ></text>
+</g>
+<g >
+<title>syscall (3,820 samples, 17.04%)</title><rect x="705.8" y="405" width="201.1" height="15.0" fill="rgb(251,129,22)" rx="2" ry="2" />
+<text  x="708.79" y="415.5" >syscall</text>
+</g>
+<g >
+<title>cppu::queryDeepNoXInterface (2 samples, 0.01%)</title><rect x="1171.1" y="421" width="0.1" height="15.0" fill="rgb(229,205,17)" rx="2" ry="2" />
+<text  x="1174.10" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (9 samples, 0.04%)</title><rect x="1168.4" y="373" width="0.5" height="15.0" fill="rgb(251,116,41)" rx="2" ry="2" />
+<text  x="1171.42" y="383.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1182.1" y="405" width="0.1" height="15.0" fill="rgb(209,88,1)" rx="2" ry="2" />
+<text  x="1185.05" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_DIB::GetScanline (24 samples, 0.11%)</title><rect x="1174.5" y="213" width="1.2" height="15.0" fill="rgb(229,46,51)" rx="2" ry="2" />
+<text  x="1177.47" y="223.5" ></text>
+</g>
+<g >
+<title>operator new (3 samples, 0.01%)</title><rect x="908.1" y="405" width="0.2" height="15.0" fill="rgb(211,209,39)" rx="2" ry="2" />
+<text  x="911.10" y="415.5" ></text>
+</g>
+<g >
+<title>pdfium::agg::rasterizer_scanline_aa::add_path_transformed&lt;pdfium::agg::conv_stroke&lt;pdfium::agg::path_storage, pdfium::agg::null_markers&gt; &gt; (4 samples, 0.02%)</title><rect x="1176.2" y="277" width="0.2" height="15.0" fill="rgb(206,211,38)" rx="2" ry="2" />
+<text  x="1179.15" y="287.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3,820 samples, 17.04%)</title><rect x="705.8" y="421" width="201.1" height="15.0" fill="rgb(232,50,20)" rx="2" ry="2" />
+<text  x="708.79" y="431.5" >SslStreamSocket::verifyCer..</text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="909.8" y="421" width="0.1" height="15.0" fill="rgb(207,177,20)" rx="2" ry="2" />
+<text  x="912.83" y="431.5" ></text>
+</g>
+<g >
+<title>[libsoftokn3.so] (5 samples, 0.02%)</title><rect x="983.0" y="437" width="0.2" height="15.0" fill="rgb(246,160,20)" rx="2" ry="2" />
+<text  x="985.95" y="447.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1183.4" y="405" width="0.1" height="15.0" fill="rgb(251,94,7)" rx="2" ry="2" />
+<text  x="1186.37" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="698.5" y="389" width="0.1" height="15.0" fill="rgb(234,97,46)" rx="2" ry="2" />
+<text  x="701.47" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1168.3" y="149" width="0.1" height="15.0" fill="rgb(244,118,41)" rx="2" ry="2" />
+<text  x="1171.26" y="159.5" ></text>
+</g>
+<g >
+<title>vcl::bitmap::convertBitmap32To24Plus8 (9 samples, 0.04%)</title><rect x="1181.2" y="421" width="0.5" height="15.0" fill="rgb(225,132,41)" rx="2" ry="2" />
+<text  x="1184.21" y="431.5" ></text>
+</g>
+<g >
+<title>ScFormulaCell::CompileTokenArray (2 samples, 0.01%)</title><rect x="987.8" y="421" width="0.1" height="15.0" fill="rgb(244,172,4)" rx="2" ry="2" />
+<text  x="990.80" y="431.5" ></text>
+</g>
+<g >
+<title>_GLOBAL__sub_I_URI.cpp (5 samples, 0.02%)</title><rect x="320.5" y="389" width="0.3" height="15.0" fill="rgb(225,143,34)" rx="2" ry="2" />
+<text  x="323.49" y="399.5" ></text>
+</g>
+<g >
+<title>xmlXPathNodeCollectAndTest (4 samples, 0.02%)</title><rect x="1173.0" y="341" width="0.2" height="15.0" fill="rgb(239,72,49)" rx="2" ry="2" />
+<text  x="1176.00" y="351.5" ></text>
+</g>
+<g >
+<title>malloc (4 samples, 0.02%)</title><rect x="1172.4" y="421" width="0.2" height="15.0" fill="rgb(250,223,54)" rx="2" ry="2" />
+<text  x="1175.36" y="431.5" ></text>
+</g>
+<g >
+<title>pdfium::(anonymous namespace)::RasterizeStroke (4 samples, 0.02%)</title><rect x="1176.2" y="293" width="0.2" height="15.0" fill="rgb(250,13,39)" rx="2" ry="2" />
+<text  x="1179.15" y="303.5" ></text>
+</g>
+<g >
+<title>ZSTD_loadDictionaryContent (2 samples, 0.01%)</title><rect x="1168.9" y="421" width="0.1" height="15.0" fill="rgb(248,50,11)" rx="2" ry="2" />
+<text  x="1171.89" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1178.8" y="229" width="0.1" height="15.0" fill="rgb(219,193,0)" rx="2" ry="2" />
+<text  x="1181.79" y="239.5" ></text>
+</g>
+<g >
+<title>dp_registry::backend::sfwk::(anonymous namespace)::BackendImpl::bindPackage_ (2 samples, 0.01%)</title><rect x="1171.3" y="421" width="0.1" height="15.0" fill="rgb(210,167,41)" rx="2" ry="2" />
+<text  x="1174.26" y="431.5" ></text>
+</g>
+<g >
+<title>__default_morecore (3 samples, 0.01%)</title><rect x="697.2" y="421" width="0.2" height="15.0" fill="rgb(252,102,5)" rx="2" ry="2" />
+<text  x="700.21" y="431.5" ></text>
+</g>
+<g >
+<title>clip_and_composite (2 samples, 0.01%)</title><rect x="1169.5" y="341" width="0.1" height="15.0" fill="rgb(223,150,15)" rx="2" ry="2" />
+<text  x="1172.52" y="351.5" ></text>
+</g>
+<g >
+<title>CPDF_DIB::TranslateScanline24bppDefaultDecode (42 samples, 0.19%)</title><rect x="1176.7" y="277" width="2.2" height="15.0" fill="rgb(224,224,13)" rx="2" ry="2" />
+<text  x="1179.68" y="287.5" ></text>
+</g>
+<g >
+<title>lcl_AddFormulaGroupBoundaries (2 samples, 0.01%)</title><rect x="1172.2" y="421" width="0.1" height="15.0" fill="rgb(253,64,48)" rx="2" ry="2" />
+<text  x="1175.15" y="431.5" ></text>
+</g>
+<g >
+<title>sd::DrawViewShell::ChangeEditMode (2 samples, 0.01%)</title><rect x="907.3" y="357" width="0.1" height="15.0" fill="rgb(233,65,22)" rx="2" ry="2" />
+<text  x="910.31" y="367.5" ></text>
+</g>
+<g >
+<title>xmlXPathEval (4 samples, 0.02%)</title><rect x="1173.0" y="405" width="0.2" height="15.0" fill="rgb(232,79,0)" rx="2" ry="2" />
+<text  x="1176.00" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="987.3" y="389" width="0.1" height="15.0" fill="rgb(205,229,52)" rx="2" ry="2" />
+<text  x="990.27" y="399.5" ></text>
+</g>
+<g >
+<title>std::basic_stringbuf&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::overflow (5 samples, 0.02%)</title><rect x="320.5" y="421" width="0.3" height="15.0" fill="rgb(220,176,29)" rx="2" ry="2" />
+<text  x="323.49" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1168.9" y="405" width="0.1" height="15.0" fill="rgb(241,211,38)" rx="2" ry="2" />
+<text  x="1171.89" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (10 samples, 0.04%)</title><rect x="645.6" y="389" width="0.5" height="15.0" fill="rgb(242,119,46)" rx="2" ry="2" />
+<text  x="648.56" y="399.5" ></text>
+</g>
+<g >
+<title>CPDF_PageImageCache::StartGetCachedBitmap (2 samples, 0.01%)</title><rect x="1175.8" y="197" width="0.1" height="15.0" fill="rgb(224,228,35)" rx="2" ry="2" />
+<text  x="1178.79" y="207.5" ></text>
+</g>
+<g >
+<title>CPDF_StreamContentParser::Parse (3 samples, 0.01%)</title><rect x="644.8" y="245" width="0.1" height="15.0" fill="rgb(217,47,28)" rx="2" ry="2" />
+<text  x="647.77" y="255.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1182.4" y="405" width="0.1" height="15.0" fill="rgb(242,87,45)" rx="2" ry="2" />
+<text  x="1185.42" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="644.1" y="405" width="0.2" height="15.0" fill="rgb(241,97,9)" rx="2" ry="2" />
+<text  x="647.14" y="415.5" ></text>
+</g>
+<g >
+<title>ycck_cmyk_convert (7 samples, 0.03%)</title><rect x="699.3" y="421" width="0.4" height="15.0" fill="rgb(252,155,26)" rx="2" ry="2" />
+<text  x="702.31" y="431.5" ></text>
+</g>
+<g >
+<title>ScTable::CopyRowHidden (29 samples, 0.13%)</title><rect x="647.0" y="421" width="1.6" height="15.0" fill="rgb(251,117,35)" rx="2" ry="2" />
+<text  x="650.04" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (1,232 samples, 5.50%)</title><rect x="910.5" y="389" width="64.9" height="15.0" fill="rgb(226,69,2)" rx="2" ry="2" />
+<text  x="913.52" y="399.5" >syscall</text>
+</g>
+<g >
+<title>sd::DrawViewShell::Activate (2 samples, 0.01%)</title><rect x="907.3" y="405" width="0.1" height="15.0" fill="rgb(227,50,48)" rx="2" ry="2" />
+<text  x="910.31" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_RenderStatus::RenderSingleObject (4 samples, 0.02%)</title><rect x="1175.8" y="293" width="0.2" height="15.0" fill="rgb(228,23,38)" rx="2" ry="2" />
+<text  x="1178.79" y="303.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="975.7" y="421" width="0.1" height="15.0" fill="rgb(216,127,33)" rx="2" ry="2" />
+<text  x="978.74" y="431.5" ></text>
+</g>
+<g >
+<title>com::sun::star::i18n::Transliteration::create (2 samples, 0.01%)</title><rect x="907.6" y="421" width="0.1" height="15.0" fill="rgb(253,189,46)" rx="2" ry="2" />
+<text  x="910.57" y="431.5" ></text>
+</g>
+<g >
+<title>operator new (4 samples, 0.02%)</title><rect x="320.0" y="405" width="0.2" height="15.0" fill="rgb(208,185,29)" rx="2" ry="2" />
+<text  x="322.96" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (13 samples, 0.06%)</title><rect x="1174.5" y="133" width="0.7" height="15.0" fill="rgb(216,27,4)" rx="2" ry="2" />
+<text  x="1177.47" y="143.5" ></text>
+</g>
+<g >
+<title>uno_type_sequence_construct (4 samples, 0.02%)</title><rect x="975.5" y="421" width="0.2" height="15.0" fill="rgb(208,103,29)" rx="2" ry="2" />
+<text  x="978.48" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="10.4" y="421" width="0.1" height="15.0" fill="rgb(212,57,21)" rx="2" ry="2" />
+<text  x="13.37" y="431.5" ></text>
+</g>
+<g >
+<title>chart::ChartView::impl_createDiagramAndContent (2 samples, 0.01%)</title><rect x="1179.2" y="357" width="0.1" height="15.0" fill="rgb(218,150,7)" rx="2" ry="2" />
+<text  x="1182.21" y="367.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="10.5" y="421" width="0.2" height="15.0" fill="rgb(239,42,17)" rx="2" ry="2" />
+<text  x="13.47" y="431.5" ></text>
+</g>
+<g >
+<title>xmlParseDocument (5 samples, 0.02%)</title><rect x="1172.7" y="389" width="0.2" height="15.0" fill="rgb(237,140,19)" rx="2" ry="2" />
+<text  x="1175.68" y="399.5" ></text>
+</g>
+<g >
+<title>opj_thread_pool_submit_job (2 samples, 0.01%)</title><rect x="1174.2" y="85" width="0.1" height="15.0" fill="rgb(218,1,14)" rx="2" ry="2" />
+<text  x="1177.21" y="95.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="984.8" y="373" width="0.2" height="15.0" fill="rgb(222,8,32)" rx="2" ry="2" />
+<text  x="987.80" y="383.5" ></text>
+</g>
+<g >
+<title>xmlMalloc (2 samples, 0.01%)</title><rect x="1183.6" y="437" width="0.1" height="15.0" fill="rgb(231,15,47)" rx="2" ry="2" />
+<text  x="1186.58" y="447.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (23 samples, 0.10%)</title><rect x="983.6" y="421" width="1.2" height="15.0" fill="rgb(228,143,36)" rx="2" ry="2" />
+<text  x="986.59" y="431.5" ></text>
+</g>
+<g >
+<title>LanguageTag::getFallbackStrings (2 samples, 0.01%)</title><rect x="1170.4" y="405" width="0.1" height="15.0" fill="rgb(239,44,11)" rx="2" ry="2" />
+<text  x="1173.36" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1172.0" y="389" width="0.1" height="15.0" fill="rgb(223,185,52)" rx="2" ry="2" />
+<text  x="1175.00" y="399.5" ></text>
+</g>
+<g >
+<title>operator new (3 samples, 0.01%)</title><rect x="10.7" y="405" width="0.1" height="15.0" fill="rgb(232,116,41)" rx="2" ry="2" />
+<text  x="13.68" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (8 samples, 0.04%)</title><rect x="705.4" y="405" width="0.4" height="15.0" fill="rgb(215,208,8)" rx="2" ry="2" />
+<text  x="708.37" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="697.6" y="389" width="0.2" height="15.0" fill="rgb(225,183,25)" rx="2" ry="2" />
+<text  x="700.63" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1174.2" y="53" width="0.1" height="15.0" fill="rgb(247,146,37)" rx="2" ry="2" />
+<text  x="1177.21" y="63.5" ></text>
+</g>
+<g >
+<title>opj_t1_clbl_decode_processor (2 samples, 0.01%)</title><rect x="1174.2" y="69" width="0.1" height="15.0" fill="rgb(222,145,2)" rx="2" ry="2" />
+<text  x="1177.21" y="79.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="986.0" y="405" width="0.1" height="15.0" fill="rgb(219,216,48)" rx="2" ry="2" />
+<text  x="989.01" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_Path::AppendPoint (3 samples, 0.01%)</title><rect x="644.6" y="309" width="0.2" height="15.0" fill="rgb(229,219,1)" rx="2" ry="2" />
+<text  x="647.62" y="319.5" ></text>
+</g>
+<g >
+<title>LanguageTag::convertToLanguageType (2 samples, 0.01%)</title><rect x="1179.8" y="405" width="0.1" height="15.0" fill="rgb(216,158,50)" rx="2" ry="2" />
+<text  x="1182.84" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="614.5" y="405" width="0.1" height="15.0" fill="rgb(217,20,0)" rx="2" ry="2" />
+<text  x="617.45" y="415.5" ></text>
+</g>
+<g >
+<title>_cairo_compositor_stroke_impl (3 samples, 0.01%)</title><rect x="1169.7" y="405" width="0.1" height="15.0" fill="rgb(233,219,35)" rx="2" ry="2" />
+<text  x="1172.68" y="415.5" ></text>
+</g>
+<g >
+<title>rtl::str::newFromStr_WithLength&lt;_rtl_uString, char16_t&gt; (3 samples, 0.01%)</title><rect x="987.4" y="389" width="0.2" height="15.0" fill="rgb(211,107,6)" rx="2" ry="2" />
+<text  x="990.43" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="697.0" y="405" width="0.2" height="15.0" fill="rgb(227,156,50)" rx="2" ry="2" />
+<text  x="700.05" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1182.4" y="389" width="0.1" height="15.0" fill="rgb(222,185,47)" rx="2" ry="2" />
+<text  x="1185.42" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1168.9" y="389" width="0.1" height="15.0" fill="rgb(238,193,52)" rx="2" ry="2" />
+<text  x="1171.89" y="399.5" ></text>
+</g>
+<g >
+<title>FontMetricData::ImplInitTextLineSize (2 samples, 0.01%)</title><rect x="986.2" y="421" width="0.1" height="15.0" fill="rgb(239,7,36)" rx="2" ry="2" />
+<text  x="989.17" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="1174.3" y="181" width="0.2" height="15.0" fill="rgb(211,153,20)" rx="2" ry="2" />
+<text  x="1177.31" y="191.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (6 samples, 0.03%)</title><rect x="1182.5" y="421" width="0.3" height="15.0" fill="rgb(205,114,9)" rx="2" ry="2" />
+<text  x="1185.52" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="986.2" y="389" width="0.1" height="15.0" fill="rgb(245,148,13)" rx="2" ry="2" />
+<text  x="989.17" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown] (77 samples, 0.34%)</title><rect x="1185.9" y="437" width="4.1" height="15.0" fill="rgb(227,188,52)" rx="2" ry="2" />
+<text  x="1188.95" y="447.5" ></text>
+</g>
+<g >
+<title>ScCompiler::NextNewToken (3 samples, 0.01%)</title><rect x="987.4" y="405" width="0.2" height="15.0" fill="rgb(215,10,4)" rx="2" ry="2" />
+<text  x="990.43" y="415.5" ></text>
+</g>
+<g >
+<title>CStretchEngine::Continue (43 samples, 0.19%)</title><rect x="1176.7" y="341" width="2.2" height="15.0" fill="rgb(227,5,33)" rx="2" ry="2" />
+<text  x="1179.68" y="351.5" ></text>
+</g>
+<g >
+<title>_cairo_tor_scan_converter_generate (3 samples, 0.01%)</title><rect x="1169.7" y="357" width="0.1" height="15.0" fill="rgb(251,190,41)" rx="2" ry="2" />
+<text  x="1172.68" y="367.5" ></text>
+</g>
+<g >
+<title>FPDF_LoadPage (12 samples, 0.05%)</title><rect x="644.6" y="405" width="0.6" height="15.0" fill="rgb(243,202,33)" rx="2" ry="2" />
+<text  x="647.62" y="415.5" ></text>
+</g>
+<g >
+<title>[[stack]] (5,876 samples, 26.21%)</title><rect x="10.8" y="437" width="309.4" height="15.0" fill="rgb(251,176,4)" rx="2" ry="2" />
+<text  x="13.84" y="447.5" >[[stack]]</text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (133 samples, 0.59%)</title><rect x="975.8" y="421" width="7.0" height="15.0" fill="rgb(238,103,41)" rx="2" ry="2" />
+<text  x="978.85" y="431.5" ></text>
+</g>
+<g >
+<title>osl_acquireMutex (6 samples, 0.03%)</title><rect x="1180.0" y="405" width="0.3" height="15.0" fill="rgb(221,102,13)" rx="2" ry="2" />
+<text  x="1183.00" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="643.4" y="389" width="0.2" height="15.0" fill="rgb(252,69,41)" rx="2" ry="2" />
+<text  x="646.40" y="399.5" ></text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::GetNamespaceURL (2 samples, 0.01%)</title><rect x="1179.1" y="421" width="0.1" height="15.0" fill="rgb(225,189,46)" rx="2" ry="2" />
+<text  x="1182.05" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (13 samples, 0.06%)</title><rect x="1178.1" y="261" width="0.7" height="15.0" fill="rgb(236,28,25)" rx="2" ry="2" />
+<text  x="1181.10" y="271.5" ></text>
+</g>
+<g >
+<title>ScCompiler::NextNewToken (3 samples, 0.01%)</title><rect x="700.8" y="405" width="0.2" height="15.0" fill="rgb(210,2,21)" rx="2" ry="2" />
+<text  x="703.84" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="699.1" y="405" width="0.2" height="15.0" fill="rgb(249,100,42)" rx="2" ry="2" />
+<text  x="702.10" y="415.5" ></text>
+</g>
+<g >
+<title>_cairo_surface_show_text_glyphs (2 samples, 0.01%)</title><rect x="1169.5" y="405" width="0.1" height="15.0" fill="rgb(227,93,5)" rx="2" ry="2" />
+<text  x="1172.52" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (7 samples, 0.03%)</title><rect x="699.3" y="389" width="0.4" height="15.0" fill="rgb(239,67,14)" rx="2" ry="2" />
+<text  x="702.31" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (7 samples, 0.03%)</title><rect x="10.0" y="405" width="0.4" height="15.0" fill="rgb(220,61,51)" rx="2" ry="2" />
+<text  x="13.00" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="320.0" y="389" width="0.2" height="15.0" fill="rgb(237,63,30)" rx="2" ry="2" />
+<text  x="322.96" y="399.5" ></text>
+</g>
+<g >
+<title>CFX_GlyphCache::LoadGlyphBitmap (4 samples, 0.02%)</title><rect x="1176.5" y="261" width="0.2" height="15.0" fill="rgb(210,189,45)" rx="2" ry="2" />
+<text  x="1179.47" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="988.5" y="389" width="0.1" height="15.0" fill="rgb(221,90,20)" rx="2" ry="2" />
+<text  x="991.48" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="1170.8" y="405" width="0.2" height="15.0" fill="rgb(215,162,29)" rx="2" ry="2" />
+<text  x="1173.84" y="415.5" ></text>
+</g>
+<g >
+<title>CPDFSDK_RenderPageWithContext (90 samples, 0.40%)</title><rect x="1174.2" y="389" width="4.7" height="15.0" fill="rgb(225,128,15)" rx="2" ry="2" />
+<text  x="1177.21" y="399.5" ></text>
+</g>
+<g >
+<title>ScMatrix::ValidColRow (2 samples, 0.01%)</title><rect x="988.5" y="421" width="0.1" height="15.0" fill="rgb(215,214,54)" rx="2" ry="2" />
+<text  x="991.48" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (521 samples, 2.32%)</title><rect x="614.8" y="405" width="27.4" height="15.0" fill="rgb(254,16,34)" rx="2" ry="2" />
+<text  x="617.82" y="415.5" >s..</text>
+</g>
+<g >
+<title>CStretchEngine::ContinueStretchHorz (43 samples, 0.19%)</title><rect x="1176.7" y="325" width="2.2" height="15.0" fill="rgb(211,164,26)" rx="2" ry="2" />
+<text  x="1179.68" y="335.5" ></text>
+</g>
+<g >
+<title>cppu::_copyConstructAny (6 samples, 0.03%)</title><rect x="1180.0" y="373" width="0.3" height="15.0" fill="rgb(205,193,18)" rx="2" ry="2" />
+<text  x="1183.00" y="383.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;replentry*, std::allocator&lt;replentry*&gt; &gt;::_M_realloc_insert&lt;replentry* const&amp;&gt; (3 samples, 0.01%)</title><rect x="699.1" y="421" width="0.2" height="15.0" fill="rgb(228,166,3)" rx="2" ry="2" />
+<text  x="702.10" y="431.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (4 samples, 0.02%)</title><rect x="698.7" y="373" width="0.2" height="15.0" fill="rgb(237,208,38)" rx="2" ry="2" />
+<text  x="701.73" y="383.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="908.1" y="389" width="0.2" height="15.0" fill="rgb(251,67,24)" rx="2" ry="2" />
+<text  x="911.10" y="399.5" ></text>
+</g>
+<g >
+<title>CFX_DIBBase::ClipToInternal (2 samples, 0.01%)</title><rect x="1175.8" y="133" width="0.1" height="15.0" fill="rgb(254,0,36)" rx="2" ry="2" />
+<text  x="1178.79" y="143.5" ></text>
+</g>
+<g >
+<title>osl_acquireMutex (6 samples, 0.03%)</title><rect x="1182.5" y="437" width="0.3" height="15.0" fill="rgb(207,34,9)" rx="2" ry="2" />
+<text  x="1185.52" y="447.5" ></text>
+</g>
+<g >
+<title>xstandard (2 samples, 0.01%)</title><rect x="1183.7" y="437" width="0.1" height="15.0" fill="rgb(230,46,42)" rx="2" ry="2" />
+<text  x="1186.68" y="447.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="534.3" y="421" width="0.1" height="15.0" fill="rgb(224,124,54)" rx="2" ry="2" />
+<text  x="537.27" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_RenderStatus::ProcessForm (4 samples, 0.02%)</title><rect x="1175.8" y="325" width="0.2" height="15.0" fill="rgb(219,37,52)" rx="2" ry="2" />
+<text  x="1178.79" y="335.5" ></text>
+</g>
+<g >
+<title>cppu::_copyConstructAnyFromData (3 samples, 0.01%)</title><rect x="697.6" y="421" width="0.2" height="15.0" fill="rgb(238,158,52)" rx="2" ry="2" />
+<text  x="700.63" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1173.1" y="261" width="0.1" height="15.0" fill="rgb(251,129,38)" rx="2" ry="2" />
+<text  x="1176.10" y="271.5" ></text>
+</g>
+<g >
+<title>mdds::mtv::soa::multi_type_vector&lt;sc::BroadcasterTraits&gt;::set_cell_to_empty_block&lt;SvtBroadcaster*&gt; (2 samples, 0.01%)</title><rect x="1182.4" y="437" width="0.1" height="15.0" fill="rgb(253,212,17)" rx="2" ry="2" />
+<text  x="1185.42" y="447.5" ></text>
+</g>
+<g >
+<title>sep_upsample (2 samples, 0.01%)</title><rect x="1178.8" y="261" width="0.1" height="15.0" fill="rgb(205,44,24)" rx="2" ry="2" />
+<text  x="1181.79" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="534.7" y="373" width="0.2" height="15.0" fill="rgb(235,192,35)" rx="2" ry="2" />
+<text  x="537.75" y="383.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="983.2" y="405" width="0.1" height="15.0" fill="rgb(225,72,1)" rx="2" ry="2" />
+<text  x="986.22" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="909.0" y="405" width="0.2" height="15.0" fill="rgb(219,119,14)" rx="2" ry="2" />
+<text  x="912.04" y="415.5" ></text>
+</g>
+<g >
+<title>xmlXPathRegisterAllFunctions (2 samples, 0.01%)</title><rect x="613.1" y="389" width="0.1" height="15.0" fill="rgb(222,140,31)" rx="2" ry="2" />
+<text  x="616.08" y="399.5" ></text>
+</g>
+<g >
+<title>ManifestReader::readManifestSequence (13 samples, 0.06%)</title><rect x="699.9" y="421" width="0.7" height="15.0" fill="rgb(252,194,6)" rx="2" ry="2" />
+<text  x="702.89" y="431.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;hb_feature_t, std::allocator&lt;hb_feature_t&gt; &gt;::emplace_back&lt;hb_feature_t&gt; (2 samples, 0.01%)</title><rect x="1180.4" y="421" width="0.1" height="15.0" fill="rgb(216,54,24)" rx="2" ry="2" />
+<text  x="1183.37" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="987.9" y="389" width="0.2" height="15.0" fill="rgb(224,18,20)" rx="2" ry="2" />
+<text  x="990.90" y="399.5" ></text>
+</g>
+<g >
+<title>std::__merge_adaptive&lt;_FcPattern**, long, _FcPattern**, __gnu_cxx::__ops::_Iter_comp_iter&lt;(anonymous namespace)::SortFont&gt; &gt; (2 samples, 0.01%)</title><rect x="1179.6" y="421" width="0.1" height="15.0" fill="rgb(238,64,53)" rx="2" ry="2" />
+<text  x="1182.58" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (1,480 samples, 6.60%)</title><rect x="535.0" y="421" width="77.9" height="15.0" fill="rgb(241,8,0)" rx="2" ry="2" />
+<text  x="538.01" y="431.5" >syscall</text>
+</g>
+<g >
+<title>CFX_RenderDevice::DrawNormalText (4 samples, 0.02%)</title><rect x="1176.5" y="293" width="0.2" height="15.0" fill="rgb(226,138,22)" rx="2" ry="2" />
+<text  x="1179.47" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (5 samples, 0.02%)</title><rect x="983.0" y="405" width="0.2" height="15.0" fill="rgb(253,96,2)" rx="2" ry="2" />
+<text  x="985.95" y="415.5" ></text>
+</g>
+<g >
+<title>[liblocaledata_others.so] (2 samples, 0.01%)</title><rect x="909.8" y="437" width="0.1" height="15.0" fill="rgb(244,193,3)" rx="2" ry="2" />
+<text  x="912.83" y="447.5" ></text>
+</g>
+<g >
+<title>LanguageTag::getImpl (2 samples, 0.01%)</title><rect x="1179.8" y="373" width="0.1" height="15.0" fill="rgb(220,70,5)" rx="2" ry="2" />
+<text  x="1182.84" y="383.5" ></text>
+</g>
+<g >
+<title>xmlXPathCompOpEval (4 samples, 0.02%)</title><rect x="1173.0" y="373" width="0.2" height="15.0" fill="rgb(222,131,31)" rx="2" ry="2" />
+<text  x="1176.00" y="383.5" ></text>
+</g>
+<g >
+<title>CPDF_DIB::StartLoadDIBBase (2 samples, 0.01%)</title><rect x="1174.2" y="261" width="0.1" height="15.0" fill="rgb(219,8,37)" rx="2" ry="2" />
+<text  x="1177.21" y="271.5" ></text>
+</g>
+<g >
+<title>osl_readFile (4 samples, 0.02%)</title><rect x="975.5" y="389" width="0.2" height="15.0" fill="rgb(246,147,46)" rx="2" ry="2" />
+<text  x="978.48" y="399.5" ></text>
+</g>
+<g >
+<title>com::sun::star::beans::detail::thePropertyValueType::operator (2 samples, 0.01%)</title><rect x="1170.2" y="421" width="0.1" height="15.0" fill="rgb(206,145,54)" rx="2" ry="2" />
+<text  x="1173.21" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_DIB::TranslateScanline24bppDefaultDecode (2 samples, 0.01%)</title><rect x="1175.8" y="85" width="0.1" height="15.0" fill="rgb(207,73,46)" rx="2" ry="2" />
+<text  x="1178.79" y="95.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="697.6" y="405" width="0.2" height="15.0" fill="rgb(252,144,25)" rx="2" ry="2" />
+<text  x="700.63" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (522 samples, 2.33%)</title><rect x="614.8" y="421" width="27.4" height="15.0" fill="rgb(220,104,18)" rx="2" ry="2" />
+<text  x="617.77" y="431.5" >S..</text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1175.8" y="53" width="0.1" height="15.0" fill="rgb(239,196,11)" rx="2" ry="2" />
+<text  x="1178.79" y="63.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::replace (2 samples, 0.01%)</title><rect x="531.6" y="421" width="0.1" height="15.0" fill="rgb(223,100,41)" rx="2" ry="2" />
+<text  x="534.59" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="614.7" y="405" width="0.1" height="15.0" fill="rgb(235,222,15)" rx="2" ry="2" />
+<text  x="617.66" y="415.5" ></text>
+</g>
+<g >
+<title>ScColumn::HasDataAt (3 samples, 0.01%)</title><rect x="987.9" y="405" width="0.2" height="15.0" fill="rgb(235,133,31)" rx="2" ry="2" />
+<text  x="990.90" y="415.5" ></text>
+</g>
+<g >
+<title>ScPatternAttr::IsVisibleEqual (14 samples, 0.06%)</title><rect x="613.7" y="421" width="0.8" height="15.0" fill="rgb(232,109,49)" rx="2" ry="2" />
+<text  x="616.71" y="431.5" ></text>
+</g>
+<g >
+<title>CFX_DIBBase::Realize (2 samples, 0.01%)</title><rect x="1168.3" y="229" width="0.1" height="15.0" fill="rgb(221,145,43)" rx="2" ry="2" />
+<text  x="1171.26" y="239.5" ></text>
+</g>
+<g >
+<title>xmlXPathNewContext (2 samples, 0.01%)</title><rect x="613.1" y="405" width="0.1" height="15.0" fill="rgb(228,200,22)" rx="2" ry="2" />
+<text  x="616.08" y="415.5" ></text>
+</g>
+<g >
+<title>_int_malloc (2 samples, 0.01%)</title><rect x="983.4" y="389" width="0.1" height="15.0" fill="rgb(227,201,46)" rx="2" ry="2" />
+<text  x="986.37" y="399.5" ></text>
+</g>
+<g >
+<title>CPDF_DIB::TranslateScanline24bpp (42 samples, 0.19%)</title><rect x="1176.7" y="293" width="2.2" height="15.0" fill="rgb(221,143,15)" rx="2" ry="2" />
+<text  x="1179.68" y="303.5" ></text>
+</g>
+<g >
+<title>CPDF_DeviceCS::TranslateImageLine (27 samples, 0.12%)</title><rect x="1176.7" y="261" width="1.4" height="15.0" fill="rgb(245,216,16)" rx="2" ry="2" />
+<text  x="1179.68" y="271.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="534.9" y="421" width="0.1" height="15.0" fill="rgb(218,222,43)" rx="2" ry="2" />
+<text  x="537.85" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (5 samples, 0.02%)</title><rect x="1175.2" y="165" width="0.2" height="15.0" fill="rgb(222,154,27)" rx="2" ry="2" />
+<text  x="1178.15" y="175.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="642.7" y="373" width="0.2" height="15.0" fill="rgb(224,224,21)" rx="2" ry="2" />
+<text  x="645.72" y="383.5" ></text>
+</g>
+<g >
+<title>VirtualDevice::ImplInitVirDev (2 samples, 0.01%)</title><rect x="1168.3" y="421" width="0.1" height="15.0" fill="rgb(215,197,28)" rx="2" ry="2" />
+<text  x="1171.26" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (5 samples, 0.02%)</title><rect x="908.4" y="389" width="0.3" height="15.0" fill="rgb(229,171,35)" rx="2" ry="2" />
+<text  x="911.41" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1168.3" y="133" width="0.1" height="15.0" fill="rgb(246,174,41)" rx="2" ry="2" />
+<text  x="1171.26" y="143.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (9 samples, 0.04%)</title><rect x="1168.4" y="389" width="0.5" height="15.0" fill="rgb(233,127,36)" rx="2" ry="2" />
+<text  x="1171.42" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1176.0" y="245" width="0.2" height="15.0" fill="rgb(218,43,33)" rx="2" ry="2" />
+<text  x="1179.05" y="255.5" ></text>
+</g>
+<g >
+<title>Poco::SHA1Engine::updateImpl (29 samples, 0.13%)</title><rect x="1184.2" y="421" width="1.5" height="15.0" fill="rgb(207,96,25)" rx="2" ry="2" />
+<text  x="1187.16" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (9 samples, 0.04%)</title><rect x="1181.2" y="405" width="0.5" height="15.0" fill="rgb(244,18,9)" rx="2" ry="2" />
+<text  x="1184.21" y="415.5" ></text>
+</g>
+<g >
+<title>ZCodec::ZCodec (2 samples, 0.01%)</title><rect x="907.1" y="421" width="0.2" height="15.0" fill="rgb(243,171,52)" rx="2" ry="2" />
+<text  x="910.15" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="1175.5" y="117" width="0.2" height="15.0" fill="rgb(232,117,47)" rx="2" ry="2" />
+<text  x="1178.47" y="127.5" ></text>
+</g>
+<g >
+<title>ZCodec::ZCodec (9 samples, 0.04%)</title><rect x="1168.4" y="421" width="0.5" height="15.0" fill="rgb(237,39,5)" rx="2" ry="2" />
+<text  x="1171.42" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (27 samples, 0.12%)</title><rect x="1176.7" y="229" width="1.4" height="15.0" fill="rgb(231,118,25)" rx="2" ry="2" />
+<text  x="1179.68" y="239.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1176.4" y="245" width="0.1" height="15.0" fill="rgb(215,117,50)" rx="2" ry="2" />
+<text  x="1179.37" y="255.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="534.9" y="405" width="0.1" height="15.0" fill="rgb(234,71,0)" rx="2" ry="2" />
+<text  x="537.85" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (3,999 samples, 17.84%)</title><rect x="320.8" y="405" width="210.5" height="15.0" fill="rgb(234,23,10)" rx="2" ry="2" />
+<text  x="323.75" y="415.5" >syscall</text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (5,870 samples, 26.19%)</title><rect x="10.8" y="421" width="309.1" height="15.0" fill="rgb(221,12,37)" rx="2" ry="2" />
+<text  x="13.84" y="431.5" >SslStreamSocket::verifyCertificate</text>
+</g>
+<g >
+<title>[anon] (34 samples, 0.15%)</title><rect x="1184.2" y="437" width="1.7" height="15.0" fill="rgb(244,112,2)" rx="2" ry="2" />
+<text  x="1187.16" y="447.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1172.2" y="405" width="0.1" height="15.0" fill="rgb(210,3,49)" rx="2" ry="2" />
+<text  x="1175.15" y="415.5" ></text>
+</g>
+<g >
+<title>CONF_str_reasons (9 samples, 0.04%)</title><rect x="533.6" y="437" width="0.5" height="15.0" fill="rgb(238,125,34)" rx="2" ry="2" />
+<text  x="536.64" y="447.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="987.1" y="389" width="0.1" height="15.0" fill="rgb(212,76,45)" rx="2" ry="2" />
+<text  x="990.06" y="399.5" ></text>
+</g>
+<g >
+<title>oox::xls::(anonymous namespace)::processSheetFormulaCells (4 samples, 0.02%)</title><rect x="1173.2" y="421" width="0.2" height="15.0" fill="rgb(205,69,42)" rx="2" ry="2" />
+<text  x="1176.21" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1175.8" y="69" width="0.1" height="15.0" fill="rgb(228,103,49)" rx="2" ry="2" />
+<text  x="1178.79" y="79.5" ></text>
+</g>
+<g >
+<title>CPDF_RenderStatus::ContinueSingleObject (90 samples, 0.40%)</title><rect x="1174.2" y="357" width="4.7" height="15.0" fill="rgb(242,219,20)" rx="2" ry="2" />
+<text  x="1177.21" y="367.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (1,480 samples, 6.60%)</title><rect x="535.0" y="437" width="77.9" height="15.0" fill="rgb(217,191,33)" rx="2" ry="2" />
+<text  x="538.01" y="447.5" >SslStream..</text>
+</g>
+<g >
+<title>ConvDicList::queryConversions (2 samples, 0.01%)</title><rect x="986.0" y="421" width="0.1" height="15.0" fill="rgb(254,215,43)" rx="2" ry="2" />
+<text  x="989.01" y="431.5" ></text>
+</g>
+<g >
+<title>operator new (3 samples, 0.01%)</title><rect x="642.7" y="405" width="0.2" height="15.0" fill="rgb(224,225,16)" rx="2" ry="2" />
+<text  x="645.72" y="415.5" ></text>
+</g>
+<g >
+<title>[[heap]] (617 samples, 2.75%)</title><rect x="613.0" y="437" width="32.5" height="15.0" fill="rgb(209,52,19)" rx="2" ry="2" />
+<text  x="615.98" y="447.5" >[[..</text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="987.8" y="389" width="0.1" height="15.0" fill="rgb(234,112,27)" rx="2" ry="2" />
+<text  x="990.80" y="399.5" ></text>
+</g>
+<g >
+<title>[libz.so.1.2.11] (2 samples, 0.01%)</title><rect x="1180.9" y="373" width="0.1" height="15.0" fill="rgb(232,218,22)" rx="2" ry="2" />
+<text  x="1183.89" y="383.5" ></text>
+</g>
+<g >
+<title>ext_nid_list (37 samples, 0.17%)</title><rect x="531.7" y="437" width="1.9" height="15.0" fill="rgb(253,88,48)" rx="2" ry="2" />
+<text  x="534.70" y="447.5" ></text>
+</g>
+<g >
+<title>inflate (4 samples, 0.02%)</title><rect x="1175.5" y="149" width="0.2" height="15.0" fill="rgb(219,203,44)" rx="2" ry="2" />
+<text  x="1178.47" y="159.5" ></text>
+</g>
+<g >
+<title>CPDF_PageImageCache::StartGetCachedBitmap (29 samples, 0.13%)</title><rect x="1174.2" y="293" width="1.5" height="15.0" fill="rgb(223,59,24)" rx="2" ry="2" />
+<text  x="1177.21" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (8 samples, 0.04%)</title><rect x="533.7" y="405" width="0.4" height="15.0" fill="rgb(221,42,27)" rx="2" ry="2" />
+<text  x="536.70" y="415.5" ></text>
+</g>
+<g >
+<title>all (22,415 samples, 100%)</title><rect x="10.0" y="469" width="1180.0" height="15.0" fill="rgb(214,52,1)" rx="2" ry="2" />
+<text  x="13.00" y="479.5" ></text>
+</g>
+<g >
+<title>ScPatternAttr::IsVisibleEqual (8 samples, 0.04%)</title><rect x="705.4" y="421" width="0.4" height="15.0" fill="rgb(253,13,22)" rx="2" ry="2" />
+<text  x="708.37" y="431.5" ></text>
+</g>
+<g >
+<title>std::__basic_file&lt;char&gt;::xsputn_2 (29 samples, 0.13%)</title><rect x="1184.2" y="373" width="1.5" height="15.0" fill="rgb(231,200,50)" rx="2" ry="2" />
+<text  x="1187.16" y="383.5" ></text>
+</g>
+<g >
+<title>syscall (7 samples, 0.03%)</title><rect x="986.4" y="389" width="0.4" height="15.0" fill="rgb(224,188,12)" rx="2" ry="2" />
+<text  x="989.43" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="987.8" y="373" width="0.1" height="15.0" fill="rgb(222,48,8)" rx="2" ry="2" />
+<text  x="990.80" y="383.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="643.4" y="405" width="0.2" height="15.0" fill="rgb(245,4,1)" rx="2" ry="2" />
+<text  x="646.40" y="415.5" ></text>
+</g>
+<g >
+<title>ScFormulaCell::InterpretFormulaGroupThreading (3 samples, 0.01%)</title><rect x="987.9" y="421" width="0.2" height="15.0" fill="rgb(232,154,37)" rx="2" ry="2" />
+<text  x="990.90" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_DIB::GetScanline (2 samples, 0.01%)</title><rect x="1168.3" y="197" width="0.1" height="15.0" fill="rgb(242,68,28)" rx="2" ry="2" />
+<text  x="1171.26" y="207.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1172.0" y="405" width="0.1" height="15.0" fill="rgb(227,68,14)" rx="2" ry="2" />
+<text  x="1175.00" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="614.5" y="389" width="0.1" height="15.0" fill="rgb(217,217,29)" rx="2" ry="2" />
+<text  x="617.45" y="399.5" ></text>
+</g>
+<g >
+<title>xmlHashAddEntry2 (2 samples, 0.01%)</title><rect x="613.1" y="373" width="0.1" height="15.0" fill="rgb(213,25,54)" rx="2" ry="2" />
+<text  x="616.08" y="383.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="699.1" y="389" width="0.2" height="15.0" fill="rgb(248,48,11)" rx="2" ry="2" />
+<text  x="702.10" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="1170.8" y="389" width="0.2" height="15.0" fill="rgb(225,72,29)" rx="2" ry="2" />
+<text  x="1173.84" y="399.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;rtl::OUString, std::pair&lt;rtl::OUString const, std::unique_ptr&lt;psp::PPDKey, std::default_delete&lt;psp::PPDKey&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;rtl::OUString const, std::unique_ptr&lt;psp::PPDKey, std::default_delete&lt;psp::PPDKey&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;rtl::OUString&gt;, std::hash&lt;rtl::OUString&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt;, true&gt;::operator[] (12 samples, 0.05%)</title><rect x="644.6" y="421" width="0.6" height="15.0" fill="rgb(233,126,1)" rx="2" ry="2" />
+<text  x="647.62" y="431.5" ></text>
+</g>
+<g >
+<title>fxcodec::ScanlineDecoder::GetScanline (2 samples, 0.01%)</title><rect x="1168.3" y="181" width="0.1" height="15.0" fill="rgb(228,192,11)" rx="2" ry="2" />
+<text  x="1171.26" y="191.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1170.0" y="405" width="0.2" height="15.0" fill="rgb(221,138,21)" rx="2" ry="2" />
+<text  x="1173.05" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1183.7" y="421" width="0.1" height="15.0" fill="rgb(235,56,39)" rx="2" ry="2" />
+<text  x="1186.68" y="431.5" ></text>
+</g>
+<g >
+<title>[anon] (3,977 samples, 17.74%)</title><rect x="699.7" y="437" width="209.3" height="15.0" fill="rgb(233,11,28)" rx="2" ry="2" />
+<text  x="702.68" y="447.5" >[anon]</text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="907.6" y="405" width="0.1" height="15.0" fill="rgb(231,9,26)" rx="2" ry="2" />
+<text  x="910.57" y="415.5" ></text>
+</g>
+<g >
+<title>configmgr::Access::queryInterface (4 samples, 0.02%)</title><rect x="1170.5" y="421" width="0.2" height="15.0" fill="rgb(219,89,5)" rx="2" ry="2" />
+<text  x="1173.47" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="320.2" y="405" width="0.1" height="15.0" fill="rgb(233,69,24)" rx="2" ry="2" />
+<text  x="323.17" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1169.4" y="389" width="0.1" height="15.0" fill="rgb(250,207,32)" rx="2" ry="2" />
+<text  x="1172.42" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (7 samples, 0.03%)</title><rect x="986.4" y="405" width="0.4" height="15.0" fill="rgb(242,31,1)" rx="2" ry="2" />
+<text  x="989.43" y="415.5" ></text>
+</g>
+<g >
+<title>composite_glyphs (2 samples, 0.01%)</title><rect x="1169.5" y="325" width="0.1" height="15.0" fill="rgb(245,102,46)" rx="2" ry="2" />
+<text  x="1172.52" y="335.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="975.5" y="373" width="0.2" height="15.0" fill="rgb(244,165,31)" rx="2" ry="2" />
+<text  x="978.48" y="383.5" ></text>
+</g>
+<g >
+<title>CPDF_StreamContentParser::Handle_ExecuteXObject (4 samples, 0.02%)</title><rect x="644.8" y="325" width="0.2" height="15.0" fill="rgb(219,186,10)" rx="2" ry="2" />
+<text  x="647.77" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="988.6" y="389" width="0.2" height="15.0" fill="rgb(236,218,26)" rx="2" ry="2" />
+<text  x="991.59" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="989.2" y="405" width="0.1" height="15.0" fill="rgb(249,159,0)" rx="2" ry="2" />
+<text  x="992.17" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (27 samples, 0.12%)</title><rect x="1176.7" y="245" width="1.4" height="15.0" fill="rgb(252,195,34)" rx="2" ry="2" />
+<text  x="1179.68" y="255.5" ></text>
+</g>
+<g >
+<title>configmgr::Access::queryInterface (2 samples, 0.01%)</title><rect x="697.5" y="421" width="0.1" height="15.0" fill="rgb(246,25,43)" rx="2" ry="2" />
+<text  x="700.52" y="431.5" ></text>
+</g>
+<g >
+<title>kitbroker (12,350 samples, 55.10%)</title><rect x="533.6" y="453" width="650.2" height="15.0" fill="rgb(234,165,27)" rx="2" ry="2" />
+<text  x="536.64" y="463.5" >kitbroker</text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="646.4" y="405" width="0.1" height="15.0" fill="rgb(235,174,38)" rx="2" ry="2" />
+<text  x="649.35" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="1174.3" y="197" width="0.2" height="15.0" fill="rgb(219,24,37)" rx="2" ry="2" />
+<text  x="1177.31" y="207.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="1179.3" y="389" width="0.2" height="15.0" fill="rgb(213,33,32)" rx="2" ry="2" />
+<text  x="1182.31" y="399.5" ></text>
+</g>
+<g >
+<title>chart::ChartView::impl_updateView (2 samples, 0.01%)</title><rect x="1179.2" y="405" width="0.1" height="15.0" fill="rgb(226,127,41)" rx="2" ry="2" />
+<text  x="1182.21" y="415.5" ></text>
+</g>
+<g >
+<title>_cairo_compositor_glyphs (2 samples, 0.01%)</title><rect x="1169.5" y="373" width="0.1" height="15.0" fill="rgb(244,204,25)" rx="2" ry="2" />
+<text  x="1172.52" y="383.5" ></text>
+</g>
+<g >
+<title>oox::xls::WorkbookGlobals::~WorkbookGlobals (4 samples, 0.02%)</title><rect x="698.7" y="405" width="0.2" height="15.0" fill="rgb(210,194,2)" rx="2" ry="2" />
+<text  x="701.73" y="415.5" ></text>
+</g>
+<g >
+<title>_GLOBAL__sub_I_URI.cpp (3 samples, 0.01%)</title><rect x="642.7" y="421" width="0.2" height="15.0" fill="rgb(227,68,36)" rx="2" ry="2" />
+<text  x="645.72" y="431.5" ></text>
+</g>
+<g >
+<title>chart::ChartView::createShapes (2 samples, 0.01%)</title><rect x="1179.2" y="389" width="0.1" height="15.0" fill="rgb(239,183,31)" rx="2" ry="2" />
+<text  x="1182.21" y="399.5" ></text>
+</g>
+<g >
+<title>opj_j2k_decode_tile (2 samples, 0.01%)</title><rect x="1174.2" y="133" width="0.1" height="15.0" fill="rgb(220,17,31)" rx="2" ry="2" />
+<text  x="1177.21" y="143.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="989.1" y="389" width="0.1" height="15.0" fill="rgb(218,104,9)" rx="2" ry="2" />
+<text  x="992.06" y="399.5" ></text>
+</g>
+<g >
+<title>chart::ChartView::createShapes2D (2 samples, 0.01%)</title><rect x="1179.2" y="373" width="0.1" height="15.0" fill="rgb(218,19,0)" rx="2" ry="2" />
+<text  x="1182.21" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,007 samples, 17.88%)</title><rect x="320.8" y="437" width="210.9" height="15.0" fill="rgb(251,114,27)" rx="2" ry="2" />
+<text  x="323.75" y="447.5" >[unknown]</text>
+</g>
+<g >
+<title>xmlParseElementEnd (2 samples, 0.01%)</title><rect x="1172.7" y="341" width="0.1" height="15.0" fill="rgb(218,112,22)" rx="2" ry="2" />
+<text  x="1175.73" y="351.5" ></text>
+</g>
+<g >
+<title>[libc-2.27.so] (10 samples, 0.04%)</title><rect x="909.2" y="437" width="0.5" height="15.0" fill="rgb(210,224,49)" rx="2" ry="2" />
+<text  x="912.20" y="447.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="697.5" y="389" width="0.1" height="15.0" fill="rgb(206,169,24)" rx="2" ry="2" />
+<text  x="700.52" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="975.7" y="405" width="0.1" height="15.0" fill="rgb(251,12,54)" rx="2" ry="2" />
+<text  x="978.74" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="987.3" y="405" width="0.1" height="15.0" fill="rgb(213,20,45)" rx="2" ry="2" />
+<text  x="990.27" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_RenderStatus::ProcessPath (9 samples, 0.04%)</title><rect x="1176.0" y="325" width="0.5" height="15.0" fill="rgb(244,46,42)" rx="2" ry="2" />
+<text  x="1179.00" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="701.3" y="389" width="0.1" height="15.0" fill="rgb(237,182,53)" rx="2" ry="2" />
+<text  x="704.31" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="985.8" y="405" width="0.2" height="15.0" fill="rgb(218,209,29)" rx="2" ry="2" />
+<text  x="988.80" y="415.5" ></text>
+</g>
+<g >
+<title>CPDFSDK_RenderPageWithContext (2 samples, 0.01%)</title><rect x="1168.3" y="373" width="0.1" height="15.0" fill="rgb(207,33,36)" rx="2" ry="2" />
+<text  x="1171.26" y="383.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="645.0" y="325" width="0.2" height="15.0" fill="rgb(250,8,17)" rx="2" ry="2" />
+<text  x="648.04" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (34 samples, 0.15%)</title><rect x="1188.2" y="405" width="1.8" height="15.0" fill="rgb(230,94,14)" rx="2" ry="2" />
+<text  x="1191.21" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_ImageLoader::Start (2 samples, 0.01%)</title><rect x="1168.3" y="293" width="0.1" height="15.0" fill="rgb(237,178,9)" rx="2" ry="2" />
+<text  x="1171.26" y="303.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="700.8" y="373" width="0.2" height="15.0" fill="rgb(210,17,37)" rx="2" ry="2" />
+<text  x="703.84" y="383.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1173.1" y="245" width="0.1" height="15.0" fill="rgb(231,116,22)" rx="2" ry="2" />
+<text  x="1176.10" y="255.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;SvcInfo, std::allocator&lt;SvcInfo&gt; &gt;::_M_realloc_insert&lt;SvcInfo&gt; (9 samples, 0.04%)</title><rect x="1179.8" y="421" width="0.5" height="15.0" fill="rgb(233,73,35)" rx="2" ry="2" />
+<text  x="1182.84" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (32 samples, 0.14%)</title><rect x="532.0" y="405" width="1.6" height="15.0" fill="rgb(254,143,50)" rx="2" ry="2" />
+<text  x="534.96" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="613.5" y="405" width="0.2" height="15.0" fill="rgb(229,183,23)" rx="2" ry="2" />
+<text  x="616.50" y="415.5" ></text>
+</g>
+<g >
+<title>cppu::WeakImplHelper_query (6 samples, 0.03%)</title><rect x="1180.0" y="389" width="0.3" height="15.0" fill="rgb(207,196,22)" rx="2" ry="2" />
+<text  x="1183.00" y="399.5" ></text>
+</g>
+<g >
+<title>realloc (3 samples, 0.01%)</title><rect x="983.3" y="421" width="0.2" height="15.0" fill="rgb(234,20,10)" rx="2" ry="2" />
+<text  x="986.32" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (10 samples, 0.04%)</title><rect x="645.6" y="373" width="0.5" height="15.0" fill="rgb(224,69,10)" rx="2" ry="2" />
+<text  x="648.56" y="383.5" ></text>
+</g>
+<g >
+<title>CPDF_ContentParser::Parse (3 samples, 0.01%)</title><rect x="644.8" y="261" width="0.1" height="15.0" fill="rgb(238,229,32)" rx="2" ry="2" />
+<text  x="647.77" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="646.4" y="389" width="0.1" height="15.0" fill="rgb(246,222,20)" rx="2" ry="2" />
+<text  x="649.35" y="399.5" ></text>
+</g>
+<g >
+<title>ScMatrixImpl::MergeDoubleArrayMultiply (4 samples, 0.02%)</title><rect x="988.6" y="421" width="0.2" height="15.0" fill="rgb(246,75,37)" rx="2" ry="2" />
+<text  x="991.59" y="431.5" ></text>
+</g>
+<g >
+<title>xmlXPathCompOpEvalToBoolean (4 samples, 0.02%)</title><rect x="1173.0" y="309" width="0.2" height="15.0" fill="rgb(226,120,15)" rx="2" ry="2" />
+<text  x="1176.00" y="319.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="613.5" y="389" width="0.2" height="15.0" fill="rgb(211,123,5)" rx="2" ry="2" />
+<text  x="616.50" y="399.5" ></text>
+</g>
+<g >
+<title>xmlXPathCompOpEval (4 samples, 0.02%)</title><rect x="1173.0" y="293" width="0.2" height="15.0" fill="rgb(221,65,37)" rx="2" ry="2" />
+<text  x="1176.00" y="303.5" ></text>
+</g>
+<g >
+<title>StreamSocket::parseHeader (29 samples, 0.13%)</title><rect x="1184.2" y="357" width="1.5" height="15.0" fill="rgb(228,161,44)" rx="2" ry="2" />
+<text  x="1187.16" y="367.5" ></text>
+</g>
+<g >
+<title>CFX_DIBBase::Realize (2 samples, 0.01%)</title><rect x="1175.8" y="149" width="0.1" height="15.0" fill="rgb(251,45,44)" rx="2" ry="2" />
+<text  x="1178.79" y="159.5" ></text>
+</g>
+<g >
+<title>syscall (8 samples, 0.04%)</title><rect x="705.4" y="389" width="0.4" height="15.0" fill="rgb(237,37,39)" rx="2" ry="2" />
+<text  x="708.37" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (5 samples, 0.02%)</title><rect x="983.0" y="421" width="0.2" height="15.0" fill="rgb(232,200,31)" rx="2" ry="2" />
+<text  x="985.95" y="431.5" ></text>
+</g>
+<g >
+<title>sd::DrawViewShell::ReadFrameViewData (2 samples, 0.01%)</title><rect x="907.3" y="373" width="0.1" height="15.0" fill="rgb(226,36,26)" rx="2" ry="2" />
+<text  x="910.31" y="383.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (13 samples, 0.06%)</title><rect x="699.9" y="357" width="0.7" height="15.0" fill="rgb(224,170,16)" rx="2" ry="2" />
+<text  x="702.89" y="367.5" ></text>
+</g>
+<g >
+<title>_cairo_gstate_show_text_glyphs (2 samples, 0.01%)</title><rect x="1169.5" y="421" width="0.1" height="15.0" fill="rgb(234,162,27)" rx="2" ry="2" />
+<text  x="1172.52" y="431.5" ></text>
+</g>
+<g >
+<title>ScCompiler::HandleTableRef (3 samples, 0.01%)</title><rect x="987.4" y="421" width="0.2" height="15.0" fill="rgb(242,61,50)" rx="2" ry="2" />
+<text  x="990.43" y="431.5" ></text>
+</g>
+<g >
+<title>DOM::CSAXDocumentBuilder::startUnknownElement (3 samples, 0.01%)</title><rect x="613.1" y="421" width="0.1" height="15.0" fill="rgb(234,83,43)" rx="2" ry="2" />
+<text  x="616.08" y="431.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (2 samples, 0.01%)</title><rect x="1170.0" y="421" width="0.2" height="15.0" fill="rgb(239,155,31)" rx="2" ry="2" />
+<text  x="1173.05" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (5 samples, 0.02%)</title><rect x="531.3" y="389" width="0.3" height="15.0" fill="rgb(208,168,19)" rx="2" ry="2" />
+<text  x="534.33" y="399.5" ></text>
+</g>
+<g >
+<title>[libsclo.so] (5 samples, 0.02%)</title><rect x="1169.2" y="421" width="0.2" height="15.0" fill="rgb(211,199,4)" rx="2" ry="2" />
+<text  x="1172.15" y="431.5" ></text>
+</g>
+<g >
+<title>LanguageTag::getLanguageType (2 samples, 0.01%)</title><rect x="1179.8" y="389" width="0.1" height="15.0" fill="rgb(225,173,40)" rx="2" ry="2" />
+<text  x="1182.84" y="399.5" ></text>
+</g>
+<g >
+<title>ScColumn::GetOptimalHeight (3 samples, 0.01%)</title><rect x="987.3" y="421" width="0.1" height="15.0" fill="rgb(234,116,44)" rx="2" ry="2" />
+<text  x="990.27" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (29 samples, 0.13%)</title><rect x="647.0" y="405" width="1.6" height="15.0" fill="rgb(243,202,16)" rx="2" ry="2" />
+<text  x="650.04" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_ImageRenderer::Start (2 samples, 0.01%)</title><rect x="1168.3" y="325" width="0.1" height="15.0" fill="rgb(249,7,20)" rx="2" ry="2" />
+<text  x="1171.26" y="335.5" ></text>
+</g>
+<g >
+<title>OutputDevice::LogicToLogic (2 samples, 0.01%)</title><rect x="987.1" y="421" width="0.1" height="15.0" fill="rgb(208,158,22)" rx="2" ry="2" />
+<text  x="990.06" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_ImageRenderer::StartLoadDIBBase (2 samples, 0.01%)</title><rect x="1175.8" y="229" width="0.1" height="15.0" fill="rgb(253,215,25)" rx="2" ry="2" />
+<text  x="1178.79" y="239.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="10.4" y="437" width="0.1" height="15.0" fill="rgb(212,118,8)" rx="2" ry="2" />
+<text  x="13.37" y="447.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="987.1" y="405" width="0.1" height="15.0" fill="rgb(238,5,33)" rx="2" ry="2" />
+<text  x="990.06" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1178.8" y="245" width="0.1" height="15.0" fill="rgb(248,123,20)" rx="2" ry="2" />
+<text  x="1181.79" y="255.5" ></text>
+</g>
+<g >
+<title>_int_realloc (3 samples, 0.01%)</title><rect x="983.3" y="405" width="0.2" height="15.0" fill="rgb(246,217,2)" rx="2" ry="2" />
+<text  x="986.32" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="1176.2" y="213" width="0.2" height="15.0" fill="rgb(253,2,48)" rx="2" ry="2" />
+<text  x="1179.15" y="223.5" ></text>
+</g>
+<g >
+<title>CFX_Font::LoadGlyphBitmap (4 samples, 0.02%)</title><rect x="1176.5" y="277" width="0.2" height="15.0" fill="rgb(218,203,32)" rx="2" ry="2" />
+<text  x="1179.47" y="287.5" ></text>
+</g>
+<g >
+<title>CFX_DIBitmap::Create (3 samples, 0.01%)</title><rect x="1174.3" y="213" width="0.2" height="15.0" fill="rgb(235,218,50)" rx="2" ry="2" />
+<text  x="1177.31" y="223.5" ></text>
+</g>
+<g >
+<title>cppu::detail::ImplClassData&lt;cppu::ImplInheritanceHelper&lt;(anonymous namespace)::PublishableDescription, com::sun::star::reflection::XInterfaceTypeDescription2&gt;, com::sun::star::reflection::XInterfaceTypeDescription2&gt;::operator (2 samples, 0.01%)</title><rect x="1182.1" y="437" width="0.1" height="15.0" fill="rgb(244,51,4)" rx="2" ry="2" />
+<text  x="1185.05" y="447.5" ></text>
+</g>
+<g >
+<title>CPDF_DIB::TranslateScanline24bpp (2 samples, 0.01%)</title><rect x="1175.8" y="101" width="0.1" height="15.0" fill="rgb(231,150,47)" rx="2" ry="2" />
+<text  x="1178.79" y="111.5" ></text>
+</g>
+<g >
+<title>[libsqlite3.so] (5 samples, 0.02%)</title><rect x="983.2" y="437" width="0.3" height="15.0" fill="rgb(208,139,17)" rx="2" ry="2" />
+<text  x="986.22" y="447.5" ></text>
+</g>
+<g >
+<title>SvMemoryStream::ReAllocateMemory (3 samples, 0.01%)</title><rect x="984.8" y="421" width="0.2" height="15.0" fill="rgb(225,3,0)" rx="2" ry="2" />
+<text  x="987.80" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="320.0" y="373" width="0.2" height="15.0" fill="rgb(247,66,36)" rx="2" ry="2" />
+<text  x="322.96" y="383.5" ></text>
+</g>
+<g >
+<title>CPDF_PageImageCache::Entry::ContinueGetCachedBitmap (27 samples, 0.12%)</title><rect x="1174.3" y="261" width="1.4" height="15.0" fill="rgb(230,216,50)" rx="2" ry="2" />
+<text  x="1177.31" y="271.5" ></text>
+</g>
+<g >
+<title>Poco::Net::MessageHeader::decodeRFC2047 (43 samples, 0.19%)</title><rect x="1185.9" y="421" width="2.3" height="15.0" fill="rgb(209,153,45)" rx="2" ry="2" />
+<text  x="1188.95" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (6 samples, 0.03%)</title><rect x="1182.5" y="405" width="0.3" height="15.0" fill="rgb(225,78,6)" rx="2" ry="2" />
+<text  x="1185.52" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="988.6" y="405" width="0.2" height="15.0" fill="rgb(234,208,10)" rx="2" ry="2" />
+<text  x="991.59" y="415.5" ></text>
+</g>
+<g >
+<title>sdr::properties::TextProperties::ForceStyleToHardAttributes (2 samples, 0.01%)</title><rect x="1179.2" y="421" width="0.1" height="15.0" fill="rgb(217,0,8)" rx="2" ry="2" />
+<text  x="1182.21" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1169.4" y="405" width="0.1" height="15.0" fill="rgb(225,157,8)" rx="2" ry="2" />
+<text  x="1172.42" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_ContentParser::Continue (3 samples, 0.01%)</title><rect x="644.8" y="277" width="0.1" height="15.0" fill="rgb(244,179,21)" rx="2" ry="2" />
+<text  x="647.77" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (5 samples, 0.02%)</title><rect x="531.7" y="389" width="0.3" height="15.0" fill="rgb(243,143,7)" rx="2" ry="2" />
+<text  x="534.70" y="399.5" ></text>
+</g>
+<g >
+<title>_int_malloc (13 samples, 0.06%)</title><rect x="699.9" y="373" width="0.7" height="15.0" fill="rgb(227,24,32)" rx="2" ry="2" />
+<text  x="702.89" y="383.5" ></text>
+</g>
+<g >
+<title>CPDF_RenderStatus::ContinueSingleObject (2 samples, 0.01%)</title><rect x="1168.3" y="341" width="0.1" height="15.0" fill="rgb(233,13,10)" rx="2" ry="2" />
+<text  x="1171.26" y="351.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="989.1" y="405" width="0.1" height="15.0" fill="rgb(228,17,54)" rx="2" ry="2" />
+<text  x="992.06" y="415.5" ></text>
+</g>
+<g >
+<title>osl_writeFile (9 samples, 0.04%)</title><rect x="1168.4" y="405" width="0.5" height="15.0" fill="rgb(240,9,3)" rx="2" ry="2" />
+<text  x="1171.42" y="415.5" ></text>
+</g>
+<g >
+<title>ScMatrix::ValidColRow (2 samples, 0.01%)</title><rect x="701.3" y="421" width="0.1" height="15.0" fill="rgb(232,30,18)" rx="2" ry="2" />
+<text  x="704.31" y="431.5" ></text>
+</g>
+<g >
+<title>StreamSocket::parseHeader (7 samples, 0.03%)</title><rect x="1183.8" y="437" width="0.4" height="15.0" fill="rgb(219,181,11)" rx="2" ry="2" />
+<text  x="1186.79" y="447.5" ></text>
+</g>
+<g >
+<title>xmlParseContentInternal (3 samples, 0.01%)</title><rect x="1172.7" y="357" width="0.2" height="15.0" fill="rgb(245,186,46)" rx="2" ry="2" />
+<text  x="1175.73" y="367.5" ></text>
+</g>
+<g >
+<title>xmlXPathEqualValues (2 samples, 0.01%)</title><rect x="1173.1" y="277" width="0.1" height="15.0" fill="rgb(246,195,53)" rx="2" ry="2" />
+<text  x="1176.10" y="287.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (5 samples, 0.02%)</title><rect x="908.4" y="405" width="0.3" height="15.0" fill="rgb(219,49,30)" rx="2" ry="2" />
+<text  x="911.41" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="983.2" y="421" width="0.1" height="15.0" fill="rgb(218,83,28)" rx="2" ry="2" />
+<text  x="986.22" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_RenderStatus::RenderObjectList (4 samples, 0.02%)</title><rect x="1175.8" y="309" width="0.2" height="15.0" fill="rgb(210,12,20)" rx="2" ry="2" />
+<text  x="1178.79" y="319.5" ></text>
+</g>
+<g >
+<title>oox::xls::FormulaBuffer::~FormulaBuffer (4 samples, 0.02%)</title><rect x="698.7" y="389" width="0.2" height="15.0" fill="rgb(206,155,15)" rx="2" ry="2" />
+<text  x="701.73" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="1169.7" y="325" width="0.1" height="15.0" fill="rgb(211,205,41)" rx="2" ry="2" />
+<text  x="1172.68" y="335.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (5 samples, 0.02%)</title><rect x="531.7" y="405" width="0.3" height="15.0" fill="rgb(240,51,4)" rx="2" ry="2" />
+<text  x="534.70" y="415.5" ></text>
+</g>
+<g >
+<title>std::ostream::write (29 samples, 0.13%)</title><rect x="1184.2" y="405" width="1.5" height="15.0" fill="rgb(232,52,20)" rx="2" ry="2" />
+<text  x="1187.16" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="1172.4" y="405" width="0.2" height="15.0" fill="rgb(242,43,34)" rx="2" ry="2" />
+<text  x="1175.42" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="320.3" y="421" width="0.2" height="15.0" fill="rgb(211,15,31)" rx="2" ry="2" />
+<text  x="323.28" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_StreamContentParser::AddPathObject (3 samples, 0.01%)</title><rect x="644.6" y="325" width="0.2" height="15.0" fill="rgb(224,218,42)" rx="2" ry="2" />
+<text  x="647.62" y="335.5" ></text>
+</g>
+<g >
+<title>pdfium::agg::outline_aa::~outline_aa (2 samples, 0.01%)</title><rect x="1176.4" y="293" width="0.1" height="15.0" fill="rgb(219,195,31)" rx="2" ry="2" />
+<text  x="1179.37" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="984.8" y="357" width="0.2" height="15.0" fill="rgb(217,111,10)" rx="2" ry="2" />
+<text  x="987.80" y="367.5" ></text>
+</g>
+<g >
+<title>CStretchEngine::WeightTable::CalculateWeights (7 samples, 0.03%)</title><rect x="985.3" y="421" width="0.3" height="15.0" fill="rgb(254,151,53)" rx="2" ry="2" />
+<text  x="988.27" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="989.3" y="389" width="0.1" height="15.0" fill="rgb(209,109,13)" rx="2" ry="2" />
+<text  x="992.27" y="399.5" ></text>
+</g>
+<g >
+<title>OutputDevice::LogicToPixel (2 samples, 0.01%)</title><rect x="646.4" y="421" width="0.1" height="15.0" fill="rgb(224,70,18)" rx="2" ry="2" />
+<text  x="649.35" y="431.5" ></text>
+</g>
+<g >
+<title>BitmapReadAccess::GetPixelForN32BitTcBgra (2 samples, 0.01%)</title><rect x="985.1" y="421" width="0.1" height="15.0" fill="rgb(240,67,51)" rx="2" ry="2" />
+<text  x="988.06" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (9 samples, 0.04%)</title><rect x="642.2" y="405" width="0.5" height="15.0" fill="rgb(232,168,24)" rx="2" ry="2" />
+<text  x="645.25" y="415.5" ></text>
+</g>
+<g >
+<title>xmlDoRead (5 samples, 0.02%)</title><rect x="1172.7" y="405" width="0.2" height="15.0" fill="rgb(235,196,47)" rx="2" ry="2" />
+<text  x="1175.68" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3,999 samples, 17.84%)</title><rect x="320.8" y="421" width="210.5" height="15.0" fill="rgb(234,43,29)" rx="2" ry="2" />
+<text  x="323.75" y="431.5" >SslStreamSocket::verifyCert..</text>
+</g>
+<g >
+<title>vtable for ScAutoFormatFieldObj (2 samples, 0.01%)</title><rect x="1183.4" y="437" width="0.1" height="15.0" fill="rgb(241,60,36)" rx="2" ry="2" />
+<text  x="1186.37" y="447.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="613.1" y="325" width="0.1" height="15.0" fill="rgb(244,63,12)" rx="2" ry="2" />
+<text  x="616.08" y="335.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="644.3" y="405" width="0.2" height="15.0" fill="rgb(223,65,12)" rx="2" ry="2" />
+<text  x="647.30" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="613.1" y="341" width="0.1" height="15.0" fill="rgb(233,88,42)" rx="2" ry="2" />
+<text  x="616.08" y="351.5" ></text>
+</g>
+<g >
+<title>StreamSocket::parseHeader (5 samples, 0.02%)</title><rect x="1185.7" y="421" width="0.2" height="15.0" fill="rgb(236,10,6)" rx="2" ry="2" />
+<text  x="1188.68" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="534.7" y="389" width="0.2" height="15.0" fill="rgb(253,112,12)" rx="2" ry="2" />
+<text  x="537.75" y="399.5" ></text>
+</g>
+<g >
+<title>TT_Load_Glyph (2 samples, 0.01%)</title><rect x="1176.5" y="197" width="0.1" height="15.0" fill="rgb(214,53,24)" rx="2" ry="2" />
+<text  x="1179.47" y="207.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (28 samples, 0.12%)</title><rect x="701.4" y="405" width="1.5" height="15.0" fill="rgb(206,103,37)" rx="2" ry="2" />
+<text  x="704.42" y="415.5" ></text>
+</g>
+<g >
+<title>load_truetype_glyph (2 samples, 0.01%)</title><rect x="1176.5" y="181" width="0.1" height="15.0" fill="rgb(227,85,2)" rx="2" ry="2" />
+<text  x="1179.47" y="191.5" ></text>
+</g>
+<g >
+<title>inflateInit2_ (13 samples, 0.06%)</title><rect x="699.9" y="405" width="0.7" height="15.0" fill="rgb(210,200,50)" rx="2" ry="2" />
+<text  x="702.89" y="415.5" ></text>
+</g>
+<g >
+<title>ScCompiler::HandleTableRef (3 samples, 0.01%)</title><rect x="700.8" y="421" width="0.2" height="15.0" fill="rgb(225,75,21)" rx="2" ry="2" />
+<text  x="703.84" y="431.5" ></text>
+</g>
+<g >
+<title>_cairo_image_surface_stroke (3 samples, 0.01%)</title><rect x="1169.7" y="421" width="0.1" height="15.0" fill="rgb(242,51,52)" rx="2" ry="2" />
+<text  x="1172.68" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_ProgressiveRenderer::Continue (90 samples, 0.40%)</title><rect x="1174.2" y="373" width="4.7" height="15.0" fill="rgb(246,209,36)" rx="2" ry="2" />
+<text  x="1177.21" y="383.5" ></text>
+</g>
+<g >
+<title>mdds::mtv::soa::multi_type_vector&lt;sc::BroadcasterTraits&gt;::set_cell_to_empty_block&lt;SvtBroadcaster*&gt; (2 samples, 0.01%)</title><rect x="1182.4" y="421" width="0.1" height="15.0" fill="rgb(230,13,4)" rx="2" ry="2" />
+<text  x="1185.42" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1180.9" y="341" width="0.1" height="15.0" fill="rgb(253,80,9)" rx="2" ry="2" />
+<text  x="1183.89" y="351.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="534.5" y="421" width="0.2" height="15.0" fill="rgb(254,160,7)" rx="2" ry="2" />
+<text  x="537.54" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_PageImageCache::Entry::StartGetCachedBitmap (29 samples, 0.13%)</title><rect x="1174.2" y="277" width="1.5" height="15.0" fill="rgb(232,73,33)" rx="2" ry="2" />
+<text  x="1177.21" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="983.4" y="357" width="0.1" height="15.0" fill="rgb(208,114,34)" rx="2" ry="2" />
+<text  x="986.37" y="367.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (7 samples, 0.03%)</title><rect x="985.3" y="405" width="0.3" height="15.0" fill="rgb(228,102,13)" rx="2" ry="2" />
+<text  x="988.27" y="415.5" ></text>
+</g>
+<g >
+<title>std::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::basic_string (5 samples, 0.02%)</title><rect x="320.5" y="405" width="0.3" height="15.0" fill="rgb(249,162,53)" rx="2" ry="2" />
+<text  x="323.49" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1171.1" y="405" width="0.1" height="15.0" fill="rgb(237,201,4)" rx="2" ry="2" />
+<text  x="1174.10" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_DIB::TranslateScanline24bppDefaultDecode (19 samples, 0.08%)</title><rect x="1174.5" y="181" width="1.0" height="15.0" fill="rgb(207,163,41)" rx="2" ry="2" />
+<text  x="1177.47" y="191.5" ></text>
+</g>
+<g >
+<title>syscall (43 samples, 0.19%)</title><rect x="1185.9" y="389" width="2.3" height="15.0" fill="rgb(251,150,30)" rx="2" ry="2" />
+<text  x="1188.95" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="989.3" y="405" width="0.1" height="15.0" fill="rgb(211,119,33)" rx="2" ry="2" />
+<text  x="992.27" y="415.5" ></text>
+</g>
+<g >
+<title>[libpixman-1.so.0] (2 samples, 0.01%)</title><rect x="975.7" y="437" width="0.1" height="15.0" fill="rgb(228,108,11)" rx="2" ry="2" />
+<text  x="978.74" y="447.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (5 samples, 0.02%)</title><rect x="320.5" y="357" width="0.3" height="15.0" fill="rgb(206,142,28)" rx="2" ry="2" />
+<text  x="323.49" y="367.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="1179.3" y="405" width="0.2" height="15.0" fill="rgb(240,66,31)" rx="2" ry="2" />
+<text  x="1182.31" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1172.7" y="309" width="0.1" height="15.0" fill="rgb(205,45,28)" rx="2" ry="2" />
+<text  x="1175.73" y="319.5" ></text>
+</g>
+<g >
+<title>[coolforkit] (9 samples, 0.04%)</title><rect x="320.3" y="437" width="0.5" height="15.0" fill="rgb(237,26,1)" rx="2" ry="2" />
+<text  x="323.28" y="447.5" ></text>
+</g>
+<g >
+<title>cppu::queryDeepNoXInterface (4 samples, 0.02%)</title><rect x="643.4" y="421" width="0.2" height="15.0" fill="rgb(207,180,39)" rx="2" ry="2" />
+<text  x="646.40" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_TextRenderer::DrawNormalText (4 samples, 0.02%)</title><rect x="1176.5" y="309" width="0.2" height="15.0" fill="rgb(213,43,10)" rx="2" ry="2" />
+<text  x="1179.47" y="319.5" ></text>
+</g>
+<g >
+<title>CPDF_PageImageCache::Entry::ContinueGetCachedBitmap (2 samples, 0.01%)</title><rect x="1168.3" y="245" width="0.1" height="15.0" fill="rgb(235,72,17)" rx="2" ry="2" />
+<text  x="1171.26" y="255.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="644.3" y="389" width="0.2" height="15.0" fill="rgb(234,18,31)" rx="2" ry="2" />
+<text  x="647.30" y="399.5" ></text>
+</g>
+<g >
+<title>pdfium::CFX_AggDeviceDriver::DrawPath (2 samples, 0.01%)</title><rect x="1175.9" y="245" width="0.1" height="15.0" fill="rgb(239,83,11)" rx="2" ry="2" />
+<text  x="1178.89" y="255.5" ></text>
+</g>
+<g >
+<title>CPDF_ImageRenderer::Start (2 samples, 0.01%)</title><rect x="1175.8" y="245" width="0.1" height="15.0" fill="rgb(236,224,23)" rx="2" ry="2" />
+<text  x="1178.79" y="255.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (1,232 samples, 5.50%)</title><rect x="910.5" y="405" width="64.9" height="15.0" fill="rgb(217,118,21)" rx="2" ry="2" />
+<text  x="913.52" y="415.5" >SslStre..</text>
+</g>
+<g >
+<title>opj_tcd_decode_tile (2 samples, 0.01%)</title><rect x="1174.2" y="117" width="0.1" height="15.0" fill="rgb(210,188,39)" rx="2" ry="2" />
+<text  x="1177.21" y="127.5" ></text>
+</g>
+<g >
+<title>[[stack]] (1,030 samples, 4.60%)</title><rect x="645.5" y="437" width="54.2" height="15.0" fill="rgb(245,103,14)" rx="2" ry="2" />
+<text  x="648.46" y="447.5" >[[sta..</text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="320.3" y="405" width="0.2" height="15.0" fill="rgb(232,37,35)" rx="2" ry="2" />
+<text  x="323.28" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_StreamContentParser::AddPathObject (2 samples, 0.01%)</title><rect x="644.8" y="229" width="0.1" height="15.0" fill="rgb(221,212,54)" rx="2" ry="2" />
+<text  x="647.77" y="239.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="989.2" y="389" width="0.1" height="15.0" fill="rgb(254,198,7)" rx="2" ry="2" />
+<text  x="992.17" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="642.7" y="389" width="0.2" height="15.0" fill="rgb(218,53,0)" rx="2" ry="2" />
+<text  x="645.72" y="399.5" ></text>
+</g>
+<g >
+<title>malloc (13 samples, 0.06%)</title><rect x="699.9" y="389" width="0.7" height="15.0" fill="rgb(252,0,42)" rx="2" ry="2" />
+<text  x="702.89" y="399.5" ></text>
+</g>
+<g >
+<title>[libmergedlo.so] (2 samples, 0.01%)</title><rect x="1169.0" y="421" width="0.2" height="15.0" fill="rgb(247,97,25)" rx="2" ry="2" />
+<text  x="1172.05" y="431.5" ></text>
+</g>
+<g >
+<title>FPDF_RenderPageBitmap (90 samples, 0.40%)</title><rect x="1174.2" y="405" width="4.7" height="15.0" fill="rgb(228,188,23)" rx="2" ry="2" />
+<text  x="1177.21" y="415.5" ></text>
+</g>
+<g >
+<title>Util::JsonToMap (5 samples, 0.02%)</title><rect x="531.3" y="421" width="0.3" height="15.0" fill="rgb(215,17,2)" rx="2" ry="2" />
+<text  x="534.33" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1169.0" y="405" width="0.2" height="15.0" fill="rgb(234,204,22)" rx="2" ry="2" />
+<text  x="1172.05" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="698.5" y="405" width="0.1" height="15.0" fill="rgb(235,64,50)" rx="2" ry="2" />
+<text  x="701.47" y="415.5" ></text>
+</g>
+<g >
+<title>FileUtil::updateTimestamps (5 samples, 0.02%)</title><rect x="531.7" y="421" width="0.3" height="15.0" fill="rgb(228,182,35)" rx="2" ry="2" />
+<text  x="534.70" y="431.5" ></text>
+</g>
+<g >
+<title>ScDocument::HasSelectedBlockMatrixFragment (3 samples, 0.01%)</title><rect x="613.5" y="421" width="0.2" height="15.0" fill="rgb(208,210,34)" rx="2" ry="2" />
+<text  x="616.50" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="10.7" y="389" width="0.1" height="15.0" fill="rgb(253,3,7)" rx="2" ry="2" />
+<text  x="13.68" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (5 samples, 0.02%)</title><rect x="1185.7" y="405" width="0.2" height="15.0" fill="rgb(238,156,35)" rx="2" ry="2" />
+<text  x="1188.68" y="415.5" ></text>
+</g>
+<g >
+<title>xmlXPathRunEval (4 samples, 0.02%)</title><rect x="1173.0" y="389" width="0.2" height="15.0" fill="rgb(254,67,28)" rx="2" ry="2" />
+<text  x="1176.00" y="399.5" ></text>
+</g>
+<g >
+<title>ScMatrixImpl::GetDoubleWithStringConversion (28 samples, 0.12%)</title><rect x="701.4" y="421" width="1.5" height="15.0" fill="rgb(205,8,45)" rx="2" ry="2" />
+<text  x="704.42" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="697.0" y="389" width="0.2" height="15.0" fill="rgb(217,103,47)" rx="2" ry="2" />
+<text  x="700.05" y="399.5" ></text>
+</g>
+<g >
+<title>vtable for ScAccessibleEditControlObject (2 samples, 0.01%)</title><rect x="1183.3" y="437" width="0.1" height="15.0" fill="rgb(217,104,17)" rx="2" ry="2" />
+<text  x="1186.26" y="447.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="697.2" y="389" width="0.2" height="15.0" fill="rgb(212,206,12)" rx="2" ry="2" />
+<text  x="700.21" y="399.5" ></text>
+</g>
+<g >
+<title>deflate (2 samples, 0.01%)</title><rect x="1180.9" y="389" width="0.1" height="15.0" fill="rgb(213,139,14)" rx="2" ry="2" />
+<text  x="1183.89" y="399.5" ></text>
+</g>
+<g >
+<title>configmgr::Access::initDisposeBroadcaster (2 samples, 0.01%)</title><rect x="1170.4" y="421" width="0.1" height="15.0" fill="rgb(242,96,13)" rx="2" ry="2" />
+<text  x="1173.36" y="431.5" ></text>
+</g>
+<g >
+<title>opj_j2k_decode (2 samples, 0.01%)</title><rect x="1174.2" y="181" width="0.1" height="15.0" fill="rgb(243,202,14)" rx="2" ry="2" />
+<text  x="1177.21" y="191.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="319.9" y="405" width="0.1" height="15.0" fill="rgb(231,27,48)" rx="2" ry="2" />
+<text  x="322.86" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_PageImageCache::StartGetCachedBitmap (2 samples, 0.01%)</title><rect x="1168.3" y="277" width="0.1" height="15.0" fill="rgb(236,47,32)" rx="2" ry="2" />
+<text  x="1171.26" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="10.7" y="373" width="0.1" height="15.0" fill="rgb(239,164,6)" rx="2" ry="2" />
+<text  x="13.68" y="383.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (2 samples, 0.01%)</title><rect x="1176.4" y="277" width="0.1" height="15.0" fill="rgb(223,157,38)" rx="2" ry="2" />
+<text  x="1179.37" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="644.1" y="389" width="0.2" height="15.0" fill="rgb(227,117,9)" rx="2" ry="2" />
+<text  x="647.14" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (5,870 samples, 26.19%)</title><rect x="10.8" y="405" width="309.1" height="15.0" fill="rgb(254,229,51)" rx="2" ry="2" />
+<text  x="13.84" y="415.5" >syscall</text>
+</g>
+<g >
+<title>CPDF_StreamContentParser::Parse (12 samples, 0.05%)</title><rect x="644.6" y="341" width="0.6" height="15.0" fill="rgb(211,184,3)" rx="2" ry="2" />
+<text  x="647.62" y="351.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::CreateLines (4 samples, 0.02%)</title><rect x="534.2" y="437" width="0.2" height="15.0" fill="rgb(222,14,42)" rx="2" ry="2" />
+<text  x="537.22" y="447.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_base&lt; (4 samples, 0.02%)</title><rect x="698.7" y="421" width="0.2" height="15.0" fill="rgb(239,70,48)" rx="2" ry="2" />
+<text  x="701.73" y="431.5" ></text>
+</g>
+<g >
+<title>fxcodec::ScanlineDecoder::GetScanline (5 samples, 0.02%)</title><rect x="1175.5" y="197" width="0.2" height="15.0" fill="rgb(247,164,39)" rx="2" ry="2" />
+<text  x="1178.47" y="207.5" ></text>
+</g>
+<g >
+<title>deflate (1,232 samples, 5.50%)</title><rect x="910.5" y="421" width="64.9" height="15.0" fill="rgb(242,11,31)" rx="2" ry="2" />
+<text  x="913.52" y="431.5" >deflate</text>
+</g>
+<g >
+<title>syscall (5 samples, 0.02%)</title><rect x="1175.2" y="149" width="0.2" height="15.0" fill="rgb(236,33,0)" rx="2" ry="2" />
+<text  x="1178.15" y="159.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="986.0" y="389" width="0.1" height="15.0" fill="rgb(207,195,42)" rx="2" ry="2" />
+<text  x="989.01" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="645.0" y="309" width="0.2" height="15.0" fill="rgb(226,202,19)" rx="2" ry="2" />
+<text  x="648.04" y="319.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="1170.5" y="389" width="0.2" height="15.0" fill="rgb(249,71,34)" rx="2" ry="2" />
+<text  x="1173.47" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="534.3" y="405" width="0.1" height="15.0" fill="rgb(240,166,31)" rx="2" ry="2" />
+<text  x="537.27" y="415.5" ></text>
+</g>
+<g >
+<title>opj_t1_decode_cblks (2 samples, 0.01%)</title><rect x="1174.2" y="101" width="0.1" height="15.0" fill="rgb(252,88,39)" rx="2" ry="2" />
+<text  x="1177.21" y="111.5" ></text>
+</g>
+<g >
+<title>CFX_DIBBase::ClipToInternal (27 samples, 0.12%)</title><rect x="1174.3" y="229" width="1.4" height="15.0" fill="rgb(216,13,38)" rx="2" ry="2" />
+<text  x="1177.31" y="239.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1176.4" y="261" width="0.1" height="15.0" fill="rgb(223,218,21)" rx="2" ry="2" />
+<text  x="1179.37" y="271.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="985.1" y="405" width="0.1" height="15.0" fill="rgb(247,183,38)" rx="2" ry="2" />
+<text  x="988.06" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="1169.7" y="341" width="0.1" height="15.0" fill="rgb(221,96,13)" rx="2" ry="2" />
+<text  x="1172.68" y="351.5" ></text>
+</g>
+<g >
+<title>HeadlessSalSystem::ShowNativeDialog (10 samples, 0.04%)</title><rect x="645.6" y="421" width="0.5" height="15.0" fill="rgb(223,6,43)" rx="2" ry="2" />
+<text  x="648.56" y="431.5" ></text>
+</g>
+<g >
+<title>operator new (5 samples, 0.02%)</title><rect x="320.5" y="373" width="0.3" height="15.0" fill="rgb(205,156,36)" rx="2" ry="2" />
+<text  x="323.49" y="383.5" ></text>
+</g>
+<g >
+<title>syscall (9 samples, 0.04%)</title><rect x="910.0" y="405" width="0.5" height="15.0" fill="rgb(215,187,23)" rx="2" ry="2" />
+<text  x="912.99" y="415.5" ></text>
+</g>
+<g >
+<title>com::sun::star::beans::cppu_detail_getUnoType (2 samples, 0.01%)</title><rect x="907.5" y="421" width="0.1" height="15.0" fill="rgb(213,155,27)" rx="2" ry="2" />
+<text  x="910.46" y="431.5" ></text>
+</g>
+<g >
+<title>vcl::PDFWriterImpl::PDFWriterImpl (2 samples, 0.01%)</title><rect x="1180.9" y="421" width="0.1" height="15.0" fill="rgb(244,163,7)" rx="2" ry="2" />
+<text  x="1183.89" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="988.5" y="405" width="0.1" height="15.0" fill="rgb(230,97,34)" rx="2" ry="2" />
+<text  x="991.48" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (10 samples, 0.04%)</title><rect x="909.2" y="421" width="0.5" height="15.0" fill="rgb(229,65,52)" rx="2" ry="2" />
+<text  x="912.20" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (915 samples, 4.08%)</title><rect x="648.7" y="421" width="48.1" height="15.0" fill="rgb(239,126,32)" rx="2" ry="2" />
+<text  x="651.67" y="431.5" >SslS..</text>
+</g>
+<g >
+<title>[libuno_sal.so.3] (27 samples, 0.12%)</title><rect x="983.6" y="437" width="1.4" height="15.0" fill="rgb(249,151,39)" rx="2" ry="2" />
+<text  x="986.59" y="447.5" ></text>
+</g>
+<g >
+<title>syscall (9 samples, 0.04%)</title><rect x="642.2" y="389" width="0.5" height="15.0" fill="rgb(223,132,33)" rx="2" ry="2" />
+<text  x="645.25" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="1176.2" y="229" width="0.2" height="15.0" fill="rgb(229,153,47)" rx="2" ry="2" />
+<text  x="1179.15" y="239.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (5 samples, 0.02%)</title><rect x="531.3" y="405" width="0.3" height="15.0" fill="rgb(230,31,50)" rx="2" ry="2" />
+<text  x="534.33" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="986.2" y="405" width="0.1" height="15.0" fill="rgb(236,4,1)" rx="2" ry="2" />
+<text  x="989.17" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (45 samples, 0.20%)</title><rect x="702.9" y="389" width="2.4" height="15.0" fill="rgb(228,87,38)" rx="2" ry="2" />
+<text  x="705.89" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1182.1" y="421" width="0.1" height="15.0" fill="rgb(235,1,16)" rx="2" ry="2" />
+<text  x="1185.05" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="1173.2" y="405" width="0.2" height="15.0" fill="rgb(235,29,7)" rx="2" ry="2" />
+<text  x="1176.21" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="985.1" y="389" width="0.1" height="15.0" fill="rgb(235,120,30)" rx="2" ry="2" />
+<text  x="988.06" y="399.5" ></text>
+</g>
+<g >
+<title>CPDF_PageObjectHolder::ContinueParse (3 samples, 0.01%)</title><rect x="644.8" y="293" width="0.1" height="15.0" fill="rgb(247,10,14)" rx="2" ry="2" />
+<text  x="647.77" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (10 samples, 0.04%)</title><rect x="909.2" y="405" width="0.5" height="15.0" fill="rgb(239,13,16)" rx="2" ry="2" />
+<text  x="912.20" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1174.2" y="37" width="0.1" height="15.0" fill="rgb(233,107,10)" rx="2" ry="2" />
+<text  x="1177.21" y="47.5" ></text>
+</g>
+<g >
+<title>sc::ColumnSpanSet::scan (3 samples, 0.01%)</title><rect x="908.1" y="421" width="0.2" height="15.0" fill="rgb(253,16,54)" rx="2" ry="2" />
+<text  x="911.10" y="431.5" ></text>
+</g>
+<g >
+<title>fileaccess::getParentName (4 samples, 0.02%)</title><rect x="975.5" y="405" width="0.2" height="15.0" fill="rgb(220,133,16)" rx="2" ry="2" />
+<text  x="978.48" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="531.6" y="389" width="0.1" height="15.0" fill="rgb(253,60,51)" rx="2" ry="2" />
+<text  x="534.59" y="399.5" ></text>
+</g>
+<g >
+<title>configmgr::Access::getSupportedServiceNames (5 samples, 0.02%)</title><rect x="1173.9" y="405" width="0.3" height="15.0" fill="rgb(232,117,46)" rx="2" ry="2" />
+<text  x="1176.89" y="415.5" ></text>
+</g>
+<g >
+<title>ScTable::TransposeClip (3 samples, 0.01%)</title><rect x="534.9" y="437" width="0.1" height="15.0" fill="rgb(232,31,19)" rx="2" ry="2" />
+<text  x="537.85" y="447.5" ></text>
+</g>
+<g >
+<title>StreamSocket::parseHeader (43 samples, 0.19%)</title><rect x="1185.9" y="405" width="2.3" height="15.0" fill="rgb(223,145,43)" rx="2" ry="2" />
+<text  x="1188.95" y="415.5" ></text>
+</g>
+<g >
+<title>pdfium::internal::CallocOrDie2D (2 samples, 0.01%)</title><rect x="1176.0" y="261" width="0.2" height="15.0" fill="rgb(231,80,54)" rx="2" ry="2" />
+<text  x="1179.05" y="271.5" ></text>
+</g>
+<g >
+<title>CFX_DIBBase::ClipToInternal (2 samples, 0.01%)</title><rect x="1168.3" y="213" width="0.1" height="15.0" fill="rgb(208,68,42)" rx="2" ry="2" />
+<text  x="1171.26" y="223.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="1175.5" y="133" width="0.2" height="15.0" fill="rgb(245,184,50)" rx="2" ry="2" />
+<text  x="1178.47" y="143.5" ></text>
+</g>
+<g >
+<title>configmgr::Access::initDisposeBroadcaster (3 samples, 0.01%)</title><rect x="643.1" y="421" width="0.2" height="15.0" fill="rgb(205,192,33)" rx="2" ry="2" />
+<text  x="646.14" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_PageObjectHolder::ContinueParse (12 samples, 0.05%)</title><rect x="644.6" y="389" width="0.6" height="15.0" fill="rgb(249,60,42)" rx="2" ry="2" />
+<text  x="647.62" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1183.4" y="421" width="0.1" height="15.0" fill="rgb(222,142,8)" rx="2" ry="2" />
+<text  x="1186.37" y="431.5" ></text>
+</g>
+<g >
+<title>non-virtual thunk to DOM::CComment::getNextSibling (5 samples, 0.02%)</title><rect x="1172.7" y="421" width="0.2" height="15.0" fill="rgb(208,101,47)" rx="2" ry="2" />
+<text  x="1175.68" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (7 samples, 0.03%)</title><rect x="699.3" y="405" width="0.4" height="15.0" fill="rgb(242,115,35)" rx="2" ry="2" />
+<text  x="702.31" y="415.5" ></text>
+</g>
+<g >
+<title>ContentNode::checkAndDeleteEmptyAttribs (4 samples, 0.02%)</title><rect x="985.8" y="421" width="0.2" height="15.0" fill="rgb(227,127,15)" rx="2" ry="2" />
+<text  x="988.80" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (5 samples, 0.02%)</title><rect x="1169.2" y="405" width="0.2" height="15.0" fill="rgb(229,111,35)" rx="2" ry="2" />
+<text  x="1172.15" y="415.5" ></text>
+</g>
+<g >
+<title>StreamSocket::parseHeader (34 samples, 0.15%)</title><rect x="1188.2" y="421" width="1.8" height="15.0" fill="rgb(250,105,2)" rx="2" ry="2" />
+<text  x="1191.21" y="431.5" ></text>
+</g>
+<g >
+<title>xmlHashUpdateInternal (2 samples, 0.01%)</title><rect x="613.1" y="357" width="0.1" height="15.0" fill="rgb(242,50,52)" rx="2" ry="2" />
+<text  x="616.08" y="367.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="1172.4" y="389" width="0.2" height="15.0" fill="rgb(225,196,24)" rx="2" ry="2" />
+<text  x="1175.42" y="399.5" ></text>
+</g>
+<g >
+<title>CPDF_RenderStatus::ProcessObjectNoClip (4 samples, 0.02%)</title><rect x="1175.8" y="277" width="0.2" height="15.0" fill="rgb(248,84,3)" rx="2" ry="2" />
+<text  x="1178.79" y="287.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1183.3" y="421" width="0.1" height="15.0" fill="rgb(216,141,21)" rx="2" ry="2" />
+<text  x="1186.26" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (133 samples, 0.59%)</title><rect x="975.8" y="405" width="7.0" height="15.0" fill="rgb(240,61,48)" rx="2" ry="2" />
+<text  x="978.85" y="415.5" ></text>
+</g>
+<g >
+<title>ScTable::SetRowHeightRange (2 samples, 0.01%)</title><rect x="989.2" y="421" width="0.1" height="15.0" fill="rgb(212,14,20)" rx="2" ry="2" />
+<text  x="992.17" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1171.1" y="389" width="0.1" height="15.0" fill="rgb(214,150,22)" rx="2" ry="2" />
+<text  x="1174.10" y="399.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,738 samples, 16.68%)</title><rect x="985.0" y="437" width="196.8" height="15.0" fill="rgb(231,15,7)" rx="2" ry="2" />
+<text  x="988.01" y="447.5" >[unknown]</text>
+</g>
+<g >
+<title>CPDF_RenderStatus::ProcessObjectNoClip (17 samples, 0.08%)</title><rect x="1175.8" y="341" width="0.9" height="15.0" fill="rgb(229,159,11)" rx="2" ry="2" />
+<text  x="1178.79" y="351.5" ></text>
+</g>
+<g >
+<title>CFX_GlyphCache::RenderGlyph (4 samples, 0.02%)</title><rect x="1176.5" y="229" width="0.2" height="15.0" fill="rgb(210,26,34)" rx="2" ry="2" />
+<text  x="1179.47" y="239.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="705.3" y="389" width="0.1" height="15.0" fill="rgb(206,155,11)" rx="2" ry="2" />
+<text  x="708.26" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (23 samples, 0.10%)</title><rect x="983.6" y="405" width="1.2" height="15.0" fill="rgb(211,74,10)" rx="2" ry="2" />
+<text  x="986.59" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (3,384 samples, 15.10%)</title><rect x="989.7" y="405" width="178.1" height="15.0" fill="rgb(205,194,33)" rx="2" ry="2" />
+<text  x="992.69" y="415.5" >syscall</text>
+</g>
+<g >
+<title>opj_j2k_decode_tiles (2 samples, 0.01%)</title><rect x="1174.2" y="149" width="0.1" height="15.0" fill="rgb(212,85,8)" rx="2" ry="2" />
+<text  x="1177.21" y="159.5" ></text>
+</g>
+<g >
+<title>i18npool::NumToTextAIUFullWidth_ja_JP::~NumToTextAIUFullWidth_ja_JP (2 samples, 0.01%)</title><rect x="1172.0" y="421" width="0.1" height="15.0" fill="rgb(225,178,51)" rx="2" ry="2" />
+<text  x="1175.00" y="431.5" ></text>
+</g>
+<g >
+<title>osl_releaseMutex (5 samples, 0.02%)</title><rect x="1173.9" y="421" width="0.3" height="15.0" fill="rgb(230,80,1)" rx="2" ry="2" />
+<text  x="1176.89" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (6 samples, 0.03%)</title><rect x="1180.0" y="341" width="0.3" height="15.0" fill="rgb(235,104,53)" rx="2" ry="2" />
+<text  x="1183.00" y="351.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (10 samples, 0.04%)</title><rect x="645.6" y="405" width="0.5" height="15.0" fill="rgb(224,142,42)" rx="2" ry="2" />
+<text  x="648.56" y="415.5" ></text>
+</g>
+<g >
+<title>psp::PPDParser::PPDParser (2 samples, 0.01%)</title><rect x="1168.3" y="405" width="0.1" height="15.0" fill="rgb(210,154,25)" rx="2" ry="2" />
+<text  x="1171.26" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_DIB::LoadJpxBitmap (2 samples, 0.01%)</title><rect x="1174.2" y="229" width="0.1" height="15.0" fill="rgb(233,45,47)" rx="2" ry="2" />
+<text  x="1177.21" y="239.5" ></text>
+</g>
+<g >
+<title>ScPatternAttr::IsVisibleEqual (3 samples, 0.01%)</title><rect x="646.9" y="421" width="0.1" height="15.0" fill="rgb(248,150,5)" rx="2" ry="2" />
+<text  x="649.88" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_StreamContentParser::AddForm (3 samples, 0.01%)</title><rect x="644.8" y="309" width="0.1" height="15.0" fill="rgb(208,82,40)" rx="2" ry="2" />
+<text  x="647.77" y="319.5" ></text>
+</g>
+<g >
+<title>syscall (7 samples, 0.03%)</title><rect x="1183.8" y="421" width="0.4" height="15.0" fill="rgb(223,154,19)" rx="2" ry="2" />
+<text  x="1186.79" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="907.6" y="389" width="0.1" height="15.0" fill="rgb(222,210,50)" rx="2" ry="2" />
+<text  x="910.57" y="399.5" ></text>
+</g>
+<g >
+<title>_GLOBAL__sub_I_URI.cpp (3 samples, 0.01%)</title><rect x="10.7" y="421" width="0.1" height="15.0" fill="rgb(250,151,22)" rx="2" ry="2" />
+<text  x="13.68" y="431.5" ></text>
+</g>
+<g >
+<title>[libz.so.1.2.11] (3 samples, 0.01%)</title><rect x="984.8" y="389" width="0.2" height="15.0" fill="rgb(222,164,19)" rx="2" ry="2" />
+<text  x="987.80" y="399.5" ></text>
+</g>
+<g >
+<title>__memset_avx2_unaligned_erms (2 samples, 0.01%)</title><rect x="1169.4" y="421" width="0.1" height="15.0" fill="rgb(251,22,12)" rx="2" ry="2" />
+<text  x="1172.42" y="431.5" ></text>
+</g>
+<g >
+<title>osl_writeFile (2 samples, 0.01%)</title><rect x="907.1" y="405" width="0.2" height="15.0" fill="rgb(232,180,15)" rx="2" ry="2" />
+<text  x="910.15" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (9 samples, 0.04%)</title><rect x="910.0" y="421" width="0.5" height="15.0" fill="rgb(242,148,53)" rx="2" ry="2" />
+<text  x="912.99" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="907.1" y="373" width="0.2" height="15.0" fill="rgb(228,149,46)" rx="2" ry="2" />
+<text  x="910.15" y="383.5" ></text>
+</g>
+<g >
+<title>syscall (7 samples, 0.03%)</title><rect x="988.1" y="389" width="0.4" height="15.0" fill="rgb(252,74,54)" rx="2" ry="2" />
+<text  x="991.11" y="399.5" ></text>
+</g>
+<g >
+<title>sal_detail_log_report (3 samples, 0.01%)</title><rect x="644.3" y="421" width="0.2" height="15.0" fill="rgb(206,96,36)" rx="2" ry="2" />
+<text  x="647.30" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="644.5" y="389" width="0.1" height="15.0" fill="rgb(251,126,22)" rx="2" ry="2" />
+<text  x="647.51" y="399.5" ></text>
+</g>
+<g >
+<title>opj_j2k_exec (2 samples, 0.01%)</title><rect x="1174.2" y="165" width="0.1" height="15.0" fill="rgb(244,98,18)" rx="2" ry="2" />
+<text  x="1177.21" y="175.5" ></text>
+</g>
+<g >
+<title>ScColumn::GetOptimalColWidth (4 samples, 0.02%)</title><rect x="534.5" y="437" width="0.2" height="15.0" fill="rgb(231,73,5)" rx="2" ry="2" />
+<text  x="537.54" y="447.5" ></text>
+</g>
+<g >
+<title>[libmergedlo.so] (1,249 samples, 5.57%)</title><rect x="909.9" y="437" width="65.8" height="15.0" fill="rgb(211,155,36)" rx="2" ry="2" />
+<text  x="912.94" y="447.5" >[libmer..</text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="907.1" y="389" width="0.2" height="15.0" fill="rgb(234,127,38)" rx="2" ry="2" />
+<text  x="910.15" y="399.5" ></text>
+</g>
+<g >
+<title>_cairo_image_surface_glyphs (2 samples, 0.01%)</title><rect x="1169.5" y="389" width="0.1" height="15.0" fill="rgb(211,87,22)" rx="2" ry="2" />
+<text  x="1172.52" y="399.5" ></text>
+</g>
+<g >
+<title>xmlXPathNodeSetFilter (4 samples, 0.02%)</title><rect x="1173.0" y="325" width="0.2" height="15.0" fill="rgb(250,229,16)" rx="2" ry="2" />
+<text  x="1176.00" y="335.5" ></text>
+</g>
+<g >
+<title>CONF_str_reasons (7 samples, 0.03%)</title><rect x="10.0" y="437" width="0.4" height="15.0" fill="rgb(247,140,5)" rx="2" ry="2" />
+<text  x="13.00" y="447.5" ></text>
+</g>
+<g >
+<title>pdfium::(anonymous namespace)::BuildAggPath (3 samples, 0.01%)</title><rect x="1176.0" y="293" width="0.2" height="15.0" fill="rgb(248,84,27)" rx="2" ry="2" />
+<text  x="1179.00" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="975.5" y="357" width="0.2" height="15.0" fill="rgb(225,100,49)" rx="2" ry="2" />
+<text  x="978.48" y="367.5" ></text>
+</g>
+<g >
+<title>syscall (7 samples, 0.03%)</title><rect x="1173.4" y="389" width="0.4" height="15.0" fill="rgb(208,0,0)" rx="2" ry="2" />
+<text  x="1176.42" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (5 samples, 0.02%)</title><rect x="320.5" y="341" width="0.3" height="15.0" fill="rgb(254,204,36)" rx="2" ry="2" />
+<text  x="323.49" y="351.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3,384 samples, 15.10%)</title><rect x="989.7" y="421" width="178.1" height="15.0" fill="rgb(232,123,44)" rx="2" ry="2" />
+<text  x="992.69" y="431.5" >SslStreamSocket::verify..</text>
+</g>
+<g >
+<title>ScInterpreter::Interpret (2 samples, 0.01%)</title><rect x="987.8" y="405" width="0.1" height="15.0" fill="rgb(250,224,22)" rx="2" ry="2" />
+<text  x="990.80" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (14 samples, 0.06%)</title><rect x="613.7" y="389" width="0.8" height="15.0" fill="rgb(247,117,23)" rx="2" ry="2" />
+<text  x="616.71" y="399.5" ></text>
+</g>
+<g >
+<title>[coolforkit] (3 samples, 0.01%)</title><rect x="909.0" y="437" width="0.2" height="15.0" fill="rgb(241,229,52)" rx="2" ry="2" />
+<text  x="912.04" y="447.5" ></text>
+</g>
+<g >
+<title>fxcodec::(anonymous namespace)::FlateOutput (4 samples, 0.02%)</title><rect x="1175.5" y="165" width="0.2" height="15.0" fill="rgb(238,61,30)" rx="2" ry="2" />
+<text  x="1178.47" y="175.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="987.9" y="373" width="0.2" height="15.0" fill="rgb(230,87,46)" rx="2" ry="2" />
+<text  x="990.90" y="383.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="908.1" y="373" width="0.2" height="15.0" fill="rgb(250,36,26)" rx="2" ry="2" />
+<text  x="911.10" y="383.5" ></text>
+</g>
+<g >
+<title>CPDF_ImageRenderer::StartLoadDIBBase (2 samples, 0.01%)</title><rect x="1168.3" y="309" width="0.1" height="15.0" fill="rgb(239,212,41)" rx="2" ry="2" />
+<text  x="1171.26" y="319.5" ></text>
+</g>
+<g >
+<title>[[heap]] (7 samples, 0.03%)</title><rect x="10.5" y="437" width="0.3" height="15.0" fill="rgb(240,184,46)" rx="2" ry="2" />
+<text  x="13.47" y="447.5" ></text>
+</g>
+<g >
+<title>syscall (29 samples, 0.13%)</title><rect x="1184.2" y="341" width="1.5" height="15.0" fill="rgb(210,209,33)" rx="2" ry="2" />
+<text  x="1187.16" y="351.5" ></text>
+</g>
+<g >
+<title>SfxDispatcher::ExecutePopup (2 samples, 0.01%)</title><rect x="614.7" y="421" width="0.1" height="15.0" fill="rgb(215,58,31)" rx="2" ry="2" />
+<text  x="617.66" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (5 samples, 0.02%)</title><rect x="1173.9" y="373" width="0.3" height="15.0" fill="rgb(253,21,49)" rx="2" ry="2" />
+<text  x="1176.89" y="383.5" ></text>
+</g>
+<g >
+<title>deflate (3 samples, 0.01%)</title><rect x="984.8" y="405" width="0.2" height="15.0" fill="rgb(215,113,8)" rx="2" ry="2" />
+<text  x="987.80" y="415.5" ></text>
+</g>
+<g >
+<title>CFX_DIBBase::Realize (27 samples, 0.12%)</title><rect x="1174.3" y="245" width="1.4" height="15.0" fill="rgb(223,222,16)" rx="2" ry="2" />
+<text  x="1177.31" y="255.5" ></text>
+</g>
+<g >
+<title>prepare_for_pass (2 samples, 0.01%)</title><rect x="698.5" y="421" width="0.1" height="15.0" fill="rgb(248,216,23)" rx="2" ry="2" />
+<text  x="701.47" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1183.7" y="405" width="0.1" height="15.0" fill="rgb(224,92,14)" rx="2" ry="2" />
+<text  x="1186.68" y="415.5" ></text>
+</g>
+<g >
+<title>ScTable::TransposeClip (2 samples, 0.01%)</title><rect x="614.5" y="421" width="0.1" height="15.0" fill="rgb(220,129,28)" rx="2" ry="2" />
+<text  x="617.45" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_ContentParser::Continue (12 samples, 0.05%)</title><rect x="644.6" y="373" width="0.6" height="15.0" fill="rgb(216,224,17)" rx="2" ry="2" />
+<text  x="647.62" y="383.5" ></text>
+</g>
+<g >
+<title>pdfium::CFX_AggDeviceDriver::DrawPath (9 samples, 0.04%)</title><rect x="1176.0" y="309" width="0.5" height="15.0" fill="rgb(248,225,12)" rx="2" ry="2" />
+<text  x="1179.00" y="319.5" ></text>
+</g>
+<g >
+<title>websrv_poll (118 samples, 0.53%)</title><rect x="1183.8" y="453" width="6.2" height="15.0" fill="rgb(227,195,39)" rx="2" ry="2" />
+<text  x="1186.79" y="463.5" ></text>
+</g>
+<g >
+<title>pthread_once@plt (3 samples, 0.01%)</title><rect x="644.1" y="421" width="0.2" height="15.0" fill="rgb(251,179,6)" rx="2" ry="2" />
+<text  x="647.14" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_ImageRenderer::StartLoadDIBBase (29 samples, 0.13%)</title><rect x="1174.2" y="325" width="1.5" height="15.0" fill="rgb(253,137,21)" rx="2" ry="2" />
+<text  x="1177.21" y="335.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="531.6" y="405" width="0.1" height="15.0" fill="rgb(219,136,30)" rx="2" ry="2" />
+<text  x="534.59" y="415.5" ></text>
+</g>
+<g >
+<title>ImplFastBitmapBlending (7 samples, 0.03%)</title><rect x="986.4" y="421" width="0.4" height="15.0" fill="rgb(218,60,17)" rx="2" ry="2" />
+<text  x="989.43" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1183.3" y="405" width="0.1" height="15.0" fill="rgb(232,136,14)" rx="2" ry="2" />
+<text  x="1186.26" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (14 samples, 0.06%)</title><rect x="613.7" y="405" width="0.8" height="15.0" fill="rgb(227,122,27)" rx="2" ry="2" />
+<text  x="616.71" y="415.5" ></text>
+</g>
+<g >
+<title>[libsclo.so] (133 samples, 0.59%)</title><rect x="975.8" y="437" width="7.0" height="15.0" fill="rgb(211,1,54)" rx="2" ry="2" />
+<text  x="978.85" y="447.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1176.0" y="229" width="0.2" height="15.0" fill="rgb(235,35,41)" rx="2" ry="2" />
+<text  x="1179.05" y="239.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;rtl::OUString, std::pair&lt;rtl::OUString const, unsigned int&gt;, std::allocator&lt;std::pair&lt;rtl::OUString const, unsigned int&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;rtl::OUString&gt;, std::hash&lt;rtl::OUString&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, false&gt; &gt;::_M_insert_multi_node (2 samples, 0.01%)</title><rect x="644.5" y="421" width="0.1" height="15.0" fill="rgb(252,102,3)" rx="2" ry="2" />
+<text  x="647.51" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="1173.2" y="389" width="0.2" height="15.0" fill="rgb(215,222,7)" rx="2" ry="2" />
+<text  x="1176.21" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (28 samples, 0.12%)</title><rect x="701.4" y="389" width="1.5" height="15.0" fill="rgb(239,166,51)" rx="2" ry="2" />
+<text  x="704.42" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="705.3" y="405" width="0.1" height="15.0" fill="rgb(252,4,11)" rx="2" ry="2" />
+<text  x="708.26" y="415.5" ></text>
+</g>
+<g >
+<title>ScCompiler::HandleTableRef (2 samples, 0.01%)</title><rect x="534.7" y="437" width="0.2" height="15.0" fill="rgb(227,19,44)" rx="2" ry="2" />
+<text  x="537.75" y="447.5" ></text>
+</g>
+<g >
+<title>_cairo_traps_compositor_glyphs (2 samples, 0.01%)</title><rect x="1169.5" y="357" width="0.1" height="15.0" fill="rgb(224,34,47)" rx="2" ry="2" />
+<text  x="1172.52" y="367.5" ></text>
+</g>
+<g >
+<title>oox::xls::SheetDataBuffer::finalizeImport (7 samples, 0.03%)</title><rect x="1173.4" y="421" width="0.4" height="15.0" fill="rgb(220,216,12)" rx="2" ry="2" />
+<text  x="1176.42" y="431.5" ></text>
+</g>
+<g >
+<title>cppu::_copyConstructAnyFromData (4 samples, 0.02%)</title><rect x="1170.8" y="421" width="0.2" height="15.0" fill="rgb(207,176,35)" rx="2" ry="2" />
+<text  x="1173.84" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="614.7" y="389" width="0.1" height="15.0" fill="rgb(209,45,0)" rx="2" ry="2" />
+<text  x="617.66" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (5 samples, 0.02%)</title><rect x="1169.2" y="389" width="0.2" height="15.0" fill="rgb(240,140,47)" rx="2" ry="2" />
+<text  x="1172.15" y="399.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;AreaListenerKey, std::pair&lt;AreaListenerKey const, sc::FormulaGroupAreaListener&gt;, std::_Select1st&lt;std::pair&lt;AreaListenerKey const, sc::FormulaGroupAreaListener&gt; &gt;, std::less&lt;AreaListenerKey&gt;, std::allocator&lt;std::pair&lt;AreaListenerKey const, sc::FormulaGroupAreaListener&gt; &gt; &gt;::_M_erase (5 samples, 0.02%)</title><rect x="908.4" y="421" width="0.3" height="15.0" fill="rgb(244,45,16)" rx="2" ry="2" />
+<text  x="911.41" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (6 samples, 0.03%)</title><rect x="1180.0" y="357" width="0.3" height="15.0" fill="rgb(225,147,28)" rx="2" ry="2" />
+<text  x="1183.00" y="367.5" ></text>
+</g>
+<g >
+<title>CPDF_PageImageCache::Entry::ContinueGetCachedBitmap (2 samples, 0.01%)</title><rect x="1175.8" y="165" width="0.1" height="15.0" fill="rgb(208,59,27)" rx="2" ry="2" />
+<text  x="1178.79" y="175.5" ></text>
+</g>
+<g >
+<title>CPDF_DIB::GetScanline (43 samples, 0.19%)</title><rect x="1176.7" y="309" width="2.2" height="15.0" fill="rgb(215,91,33)" rx="2" ry="2" />
+<text  x="1179.68" y="319.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="319.9" y="389" width="0.1" height="15.0" fill="rgb(239,218,19)" rx="2" ry="2" />
+<text  x="322.86" y="399.5" ></text>
+</g>
+<g >
+<title>CPDF_RenderStatus::ProcessImage (2 samples, 0.01%)</title><rect x="1175.8" y="261" width="0.1" height="15.0" fill="rgb(251,79,50)" rx="2" ry="2" />
+<text  x="1178.79" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1169.0" y="389" width="0.2" height="15.0" fill="rgb(221,193,46)" rx="2" ry="2" />
+<text  x="1172.05" y="399.5" ></text>
+</g>
+<g >
+<title>fxcodec::(anonymous namespace)::FlatePredictorScanlineDecoder::GetNextLine (4 samples, 0.02%)</title><rect x="1175.5" y="181" width="0.2" height="15.0" fill="rgb(218,165,39)" rx="2" ry="2" />
+<text  x="1178.47" y="191.5" ></text>
+</g>
+<g >
+<title>formula::lcl_fillNativeSymbols (2 samples, 0.01%)</title><rect x="1171.7" y="421" width="0.1" height="15.0" fill="rgb(213,34,39)" rx="2" ry="2" />
+<text  x="1174.73" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (4 samples, 0.02%)</title><rect x="1170.5" y="405" width="0.2" height="15.0" fill="rgb(221,222,13)" rx="2" ry="2" />
+<text  x="1173.47" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (915 samples, 4.08%)</title><rect x="648.7" y="405" width="48.1" height="15.0" fill="rgb(214,30,16)" rx="2" ry="2" />
+<text  x="651.67" y="415.5" >sysc..</text>
+</g>
+<g >
+<title>ScMatrixImpl::MergeDoubleArrayMultiply (2 samples, 0.01%)</title><rect x="705.3" y="421" width="0.1" height="15.0" fill="rgb(234,6,34)" rx="2" ry="2" />
+<text  x="708.26" y="431.5" ></text>
+</g>
+<g >
+<title>xmlXPathCompOpEval (4 samples, 0.02%)</title><rect x="1173.0" y="357" width="0.2" height="15.0" fill="rgb(220,28,32)" rx="2" ry="2" />
+<text  x="1176.00" y="367.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (45 samples, 0.20%)</title><rect x="702.9" y="405" width="2.4" height="15.0" fill="rgb(246,143,8)" rx="2" ry="2" />
+<text  x="705.89" y="415.5" ></text>
+</g>
+<g >
+<title>non-virtual thunk to cppu::WeakImplHelper&lt;com::sun::star::xml::dom::XSAXDocumentBuilder2, com::sun::star::lang::XServiceInfo&gt;::acquire (4 samples, 0.02%)</title><rect x="1173.0" y="421" width="0.2" height="15.0" fill="rgb(236,37,43)" rx="2" ry="2" />
+<text  x="1176.00" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (7 samples, 0.03%)</title><rect x="10.0" y="421" width="0.4" height="15.0" fill="rgb(244,90,15)" rx="2" ry="2" />
+<text  x="13.00" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="534.5" y="405" width="0.2" height="15.0" fill="rgb(252,146,21)" rx="2" ry="2" />
+<text  x="537.54" y="415.5" ></text>
+</g>
+<g >
+<title>FT_Load_Glyph (3 samples, 0.01%)</title><rect x="1176.5" y="213" width="0.1" height="15.0" fill="rgb(229,142,38)" rx="2" ry="2" />
+<text  x="1179.47" y="223.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="646.9" y="405" width="0.1" height="15.0" fill="rgb(248,102,29)" rx="2" ry="2" />
+<text  x="649.88" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="698.7" y="341" width="0.2" height="15.0" fill="rgb(218,95,6)" rx="2" ry="2" />
+<text  x="701.73" y="351.5" ></text>
+</g>
+<g >
+<title>WebSocketHandler::wsRequest (3 samples, 0.01%)</title><rect x="697.0" y="421" width="0.2" height="15.0" fill="rgb(214,172,24)" rx="2" ry="2" />
+<text  x="700.05" y="431.5" ></text>
+</g>
+<g >
+<title>fxcodec::CJPX_Decoder::StartDecode (2 samples, 0.01%)</title><rect x="1174.2" y="213" width="0.1" height="15.0" fill="rgb(212,220,11)" rx="2" ry="2" />
+<text  x="1177.21" y="223.5" ></text>
+</g>
+<g >
+<title>forkit (9,947 samples, 44.38%)</title><rect x="10.0" y="453" width="523.6" height="15.0" fill="rgb(232,85,49)" rx="2" ry="2" />
+<text  x="13.00" y="463.5" >forkit</text>
+</g>
+<g >
+<title>syscall (9 samples, 0.04%)</title><rect x="1181.2" y="389" width="0.5" height="15.0" fill="rgb(215,75,29)" rx="2" ry="2" />
+<text  x="1184.21" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="643.9" y="405" width="0.1" height="15.0" fill="rgb(205,6,4)" rx="2" ry="2" />
+<text  x="646.88" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="10.5" y="405" width="0.2" height="15.0" fill="rgb(218,158,10)" rx="2" ry="2" />
+<text  x="13.47" y="415.5" ></text>
+</g>
+<g >
+<title>sd::ViewShell::Activate (2 samples, 0.01%)</title><rect x="907.3" y="389" width="0.1" height="15.0" fill="rgb(223,55,39)" rx="2" ry="2" />
+<text  x="910.31" y="399.5" ></text>
+</g>
+<g >
+<title>CPDF_RenderStatus::ProcessPath (2 samples, 0.01%)</title><rect x="1175.9" y="261" width="0.1" height="15.0" fill="rgb(226,41,9)" rx="2" ry="2" />
+<text  x="1178.89" y="271.5" ></text>
+</g>
+<g >
+<title>pdfium::agg::vcgen_stroke::add_vertex (4 samples, 0.02%)</title><rect x="1176.2" y="261" width="0.2" height="15.0" fill="rgb(233,200,27)" rx="2" ry="2" />
+<text  x="1179.15" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (29 samples, 0.13%)</title><rect x="647.0" y="389" width="1.6" height="15.0" fill="rgb(213,214,42)" rx="2" ry="2" />
+<text  x="650.04" y="399.5" ></text>
+</g>
+<g >
+<title>CPDF_ProgressiveRenderer::Continue (2 samples, 0.01%)</title><rect x="1168.3" y="357" width="0.1" height="15.0" fill="rgb(221,24,13)" rx="2" ry="2" />
+<text  x="1171.26" y="367.5" ></text>
+</g>
+<g >
+<title>ScInterpreter::Init (2 samples, 0.01%)</title><rect x="701.2" y="421" width="0.1" height="15.0" fill="rgb(235,53,38)" rx="2" ry="2" />
+<text  x="704.21" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="320.2" y="421" width="0.1" height="15.0" fill="rgb(231,101,22)" rx="2" ry="2" />
+<text  x="323.17" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="987.4" y="357" width="0.2" height="15.0" fill="rgb(223,100,29)" rx="2" ry="2" />
+<text  x="990.43" y="367.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="983.4" y="373" width="0.1" height="15.0" fill="rgb(225,221,16)" rx="2" ry="2" />
+<text  x="986.37" y="383.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (8 samples, 0.04%)</title><rect x="533.7" y="421" width="0.4" height="15.0" fill="rgb(251,220,3)" rx="2" ry="2" />
+<text  x="536.70" y="431.5" ></text>
+</g>
+<g >
+<title>boost::property_tree::basic_ptree&lt;std::string, std::string, std::less&lt;std::string&gt; &gt;::get_value&lt;std::string, boost::property_tree::id_translator&lt;std::string&gt; &gt; (2 samples, 0.01%)</title><rect x="907.3" y="421" width="0.1" height="15.0" fill="rgb(237,16,15)" rx="2" ry="2" />
+<text  x="910.31" y="431.5" ></text>
+</g>
+<g >
+<title>_GLOBAL__sub_I_URI.cpp (6 samples, 0.03%)</title><rect x="319.9" y="421" width="0.3" height="15.0" fill="rgb(238,156,34)" rx="2" ry="2" />
+<text  x="322.86" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_DeviceCS::TranslateImageLine (13 samples, 0.06%)</title><rect x="1174.5" y="165" width="0.7" height="15.0" fill="rgb(216,165,17)" rx="2" ry="2" />
+<text  x="1177.47" y="175.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="644.8" y="197" width="0.1" height="15.0" fill="rgb(221,97,40)" rx="2" ry="2" />
+<text  x="647.77" y="207.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;char16_t const*, std::pair&lt;char16_t const* const, _typelib_TypeDescriptionReference*&gt;, std::allocator&lt;std::pair&lt;char16_t const* const, _typelib_TypeDescriptionReference*&gt; &gt;, std::__detail::_Select1st, (anonymous namespace)::equalStr_Impl, (anonymous namespace)::hashStr_Impl, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt; &gt;::_M_find_before_node (4 samples, 0.02%)</title><rect x="1179.3" y="421" width="0.2" height="15.0" fill="rgb(229,36,43)" rx="2" ry="2" />
+<text  x="1182.31" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="644.5" y="405" width="0.1" height="15.0" fill="rgb(231,103,26)" rx="2" ry="2" />
+<text  x="647.51" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="646.9" y="389" width="0.1" height="15.0" fill="rgb(225,32,13)" rx="2" ry="2" />
+<text  x="649.88" y="399.5" ></text>
+</g>
+<g >
+<title>fxcodec::(anonymous namespace)::FlatePredictorScanlineDecoder::GetNextLine (2 samples, 0.01%)</title><rect x="1168.3" y="165" width="0.1" height="15.0" fill="rgb(231,159,40)" rx="2" ry="2" />
+<text  x="1171.26" y="175.5" ></text>
+</g>
+<g >
+<title>std::basic_filebuf&lt;char, std::char_traits&lt;char&gt; &gt;::xsputn (29 samples, 0.13%)</title><rect x="1184.2" y="389" width="1.5" height="15.0" fill="rgb(207,21,44)" rx="2" ry="2" />
+<text  x="1187.16" y="399.5" ></text>
+</g>
+<g >
+<title>CPDF_DIB::CreateDecoder (2 samples, 0.01%)</title><rect x="1174.2" y="245" width="0.1" height="15.0" fill="rgb(246,15,53)" rx="2" ry="2" />
+<text  x="1177.21" y="255.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="644.8" y="213" width="0.1" height="15.0" fill="rgb(254,24,34)" rx="2" ry="2" />
+<text  x="647.77" y="223.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (7 samples, 0.03%)</title><rect x="988.1" y="405" width="0.4" height="15.0" fill="rgb(229,228,0)" rx="2" ry="2" />
+<text  x="991.11" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="643.9" y="389" width="0.1" height="15.0" fill="rgb(221,107,49)" rx="2" ry="2" />
+<text  x="646.88" y="399.5" ></text>
+</g>
+<g >
+<title>SvMemoryStream::ReAllocateMemory (2 samples, 0.01%)</title><rect x="1180.9" y="405" width="0.1" height="15.0" fill="rgb(236,162,19)" rx="2" ry="2" />
+<text  x="1183.89" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_ImageRenderer::Start (30 samples, 0.13%)</title><rect x="1174.2" y="341" width="1.6" height="15.0" fill="rgb(209,157,4)" rx="2" ry="2" />
+<text  x="1177.21" y="351.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1172.7" y="325" width="0.1" height="15.0" fill="rgb(223,87,13)" rx="2" ry="2" />
+<text  x="1175.73" y="335.5" ></text>
+</g>
+<g >
+<title>CPDF_ImageLoader::Start (2 samples, 0.01%)</title><rect x="1175.8" y="213" width="0.1" height="15.0" fill="rgb(253,162,20)" rx="2" ry="2" />
+<text  x="1178.79" y="223.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="987.4" y="373" width="0.2" height="15.0" fill="rgb(237,174,4)" rx="2" ry="2" />
+<text  x="990.43" y="383.5" ></text>
+</g>
+<g >
+<title>ScTable::UpdatePageBreaks (2 samples, 0.01%)</title><rect x="989.3" y="421" width="0.1" height="15.0" fill="rgb(243,131,2)" rx="2" ry="2" />
+<text  x="992.27" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="909.0" y="421" width="0.2" height="15.0" fill="rgb(238,85,9)" rx="2" ry="2" />
+<text  x="912.04" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (3 samples, 0.01%)</title><rect x="697.2" y="405" width="0.2" height="15.0" fill="rgb(211,50,29)" rx="2" ry="2" />
+<text  x="700.21" y="415.5" ></text>
+</g>
+<g >
+<title>formula::FormulaCompiler::InitSymbolsEnglishXL (2 samples, 0.01%)</title><rect x="1171.7" y="405" width="0.1" height="15.0" fill="rgb(206,9,42)" rx="2" ry="2" />
+<text  x="1174.73" y="415.5" ></text>
+</g>
+<g >
+<title>ScInterpreter::PushSingleRef (7 samples, 0.03%)</title><rect x="988.1" y="421" width="0.4" height="15.0" fill="rgb(206,185,20)" rx="2" ry="2" />
+<text  x="991.11" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (13 samples, 0.06%)</title><rect x="699.9" y="341" width="0.7" height="15.0" fill="rgb(217,16,27)" rx="2" ry="2" />
+<text  x="702.89" y="351.5" ></text>
+</g>
+<g >
+<title>pdfium::agg::vertex_sequence&lt;pdfium::agg::vertex_dist_cmd, 6u&gt;::add (4 samples, 0.02%)</title><rect x="1176.2" y="245" width="0.2" height="15.0" fill="rgb(235,16,20)" rx="2" ry="2" />
+<text  x="1179.15" y="255.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (7 samples, 0.03%)</title><rect x="1173.4" y="405" width="0.4" height="15.0" fill="rgb(207,144,36)" rx="2" ry="2" />
+<text  x="1176.42" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.02%)</title><rect x="985.8" y="389" width="0.2" height="15.0" fill="rgb(211,96,34)" rx="2" ry="2" />
+<text  x="988.80" y="399.5" ></text>
+</g>
+<g >
+<title>psp::PPDParser::PPDParser (90 samples, 0.40%)</title><rect x="1174.2" y="421" width="4.7" height="15.0" fill="rgb(211,102,40)" rx="2" ry="2" />
+<text  x="1177.21" y="431.5" ></text>
+</g>
+<g >
+<title>ScCompiler::NextNewToken (2 samples, 0.01%)</title><rect x="534.7" y="421" width="0.2" height="15.0" fill="rgb(218,227,2)" rx="2" ry="2" />
+<text  x="537.75" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1170.0" y="389" width="0.2" height="15.0" fill="rgb(207,114,26)" rx="2" ry="2" />
+<text  x="1173.05" y="399.5" ></text>
+</g>
+<g >
+<title>CFX_GlyphCache::LookUpGlyphBitmap (4 samples, 0.02%)</title><rect x="1176.5" y="245" width="0.2" height="15.0" fill="rgb(220,47,8)" rx="2" ry="2" />
+<text  x="1179.47" y="255.5" ></text>
+</g>
+<g >
+<title>init_phonet_hash (2 samples, 0.01%)</title><rect x="643.9" y="421" width="0.1" height="15.0" fill="rgb(228,192,46)" rx="2" ry="2" />
+<text  x="646.88" y="431.5" ></text>
+</g>
+<g >
+<title>CPDF_ContentParser::Parse (12 samples, 0.05%)</title><rect x="644.6" y="357" width="0.6" height="15.0" fill="rgb(222,196,45)" rx="2" ry="2" />
+<text  x="647.62" y="367.5" ></text>
+</g>
+<g >
+<title>ScTable::SetColHidden (2 samples, 0.01%)</title><rect x="989.1" y="421" width="0.1" height="15.0" fill="rgb(236,173,18)" rx="2" ry="2" />
+<text  x="992.06" y="431.5" ></text>
+</g>
+<g >
+<title>composite_polygon (3 samples, 0.01%)</title><rect x="1169.7" y="373" width="0.1" height="15.0" fill="rgb(215,10,49)" rx="2" ry="2" />
+<text  x="1172.68" y="383.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="1172.2" y="389" width="0.1" height="15.0" fill="rgb(212,112,10)" rx="2" ry="2" />
+<text  x="1175.15" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (7 samples, 0.03%)</title><rect x="985.3" y="389" width="0.3" height="15.0" fill="rgb(252,167,40)" rx="2" ry="2" />
+<text  x="988.27" y="399.5" ></text>
+</g>
+<g >
+<title>xmlParseElement (5 samples, 0.02%)</title><rect x="1172.7" y="373" width="0.2" height="15.0" fill="rgb(240,2,3)" rx="2" ry="2" />
+<text  x="1175.68" y="383.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (13 samples, 0.06%)</title><rect x="1174.5" y="149" width="0.7" height="15.0" fill="rgb(243,171,15)" rx="2" ry="2" />
+<text  x="1177.47" y="159.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.01%)</title><rect x="700.8" y="357" width="0.2" height="15.0" fill="rgb(246,174,17)" rx="2" ry="2" />
+<text  x="703.84" y="367.5" ></text>
+</g>
+<g >
+<title>[libsclo.so] (9 samples, 0.04%)</title><rect x="642.2" y="421" width="0.5" height="15.0" fill="rgb(245,77,26)" rx="2" ry="2" />
+<text  x="645.25" y="431.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (32 samples, 0.14%)</title><rect x="532.0" y="421" width="1.6" height="15.0" fill="rgb(208,154,35)" rx="2" ry="2" />
+<text  x="534.96" y="431.5" ></text>
+</g>
+<g >
+<title>ScMatrixImpl::GetString (45 samples, 0.20%)</title><rect x="702.9" y="421" width="2.4" height="15.0" fill="rgb(206,23,8)" rx="2" ry="2" />
+<text  x="705.89" y="431.5" ></text>
+</g>
+<g >
+<title>opj_jp2_decode (2 samples, 0.01%)</title><rect x="1174.2" y="197" width="0.1" height="15.0" fill="rgb(246,163,27)" rx="2" ry="2" />
+<text  x="1177.21" y="207.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (5 samples, 0.02%)</title><rect x="1173.9" y="389" width="0.3" height="15.0" fill="rgb(237,191,45)" rx="2" ry="2" />
+<text  x="1176.89" y="399.5" ></text>
+</g>
+<g >
+<title>[anon] (2 samples, 0.01%)</title><rect x="320.2" y="437" width="0.1" height="15.0" fill="rgb(213,194,33)" rx="2" ry="2" />
+<text  x="323.17" y="447.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="697.5" y="405" width="0.1" height="15.0" fill="rgb(223,66,50)" rx="2" ry="2" />
+<text  x="700.52" y="415.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="1180.9" y="357" width="0.1" height="15.0" fill="rgb(205,83,33)" rx="2" ry="2" />
+<text  x="1183.89" y="367.5" ></text>
+</g>
+<g >
+<title>LanguageTag::getFallbackStrings (2 samples, 0.01%)</title><rect x="643.2" y="405" width="0.1" height="15.0" fill="rgb(250,222,37)" rx="2" ry="2" />
+<text  x="646.19" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_PageImageCache::Entry::StartGetCachedBitmap (2 samples, 0.01%)</title><rect x="1168.3" y="261" width="0.1" height="15.0" fill="rgb(245,51,42)" rx="2" ry="2" />
+<text  x="1171.26" y="271.5" ></text>
+</g>
+<g >
+<title>CPDF_DIB::GetScanline (2 samples, 0.01%)</title><rect x="1175.8" y="117" width="0.1" height="15.0" fill="rgb(206,219,7)" rx="2" ry="2" />
+<text  x="1178.79" y="127.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.01%)</title><rect x="909.8" y="405" width="0.1" height="15.0" fill="rgb(228,185,54)" rx="2" ry="2" />
+<text  x="912.83" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_RenderStatus::ProcessText (4 samples, 0.02%)</title><rect x="1176.5" y="325" width="0.2" height="15.0" fill="rgb(224,97,19)" rx="2" ry="2" />
+<text  x="1179.47" y="335.5" ></text>
+</g>
+<g >
+<title>CPDF_ImageLoader::Start (29 samples, 0.13%)</title><rect x="1174.2" y="309" width="1.5" height="15.0" fill="rgb(208,5,41)" rx="2" ry="2" />
+<text  x="1177.21" y="319.5" ></text>
+</g>
+<g >
+<title>FPDF_RenderPageBitmap (2 samples, 0.01%)</title><rect x="1168.3" y="389" width="0.1" height="15.0" fill="rgb(254,135,42)" rx="2" ry="2" />
+<text  x="1171.26" y="399.5" ></text>
+</g>
+<g >
+<title>SslStreamSocket::verifyCertificate (2 samples, 0.01%)</title><rect x="701.3" y="405" width="0.1" height="15.0" fill="rgb(242,162,34)" rx="2" ry="2" />
+<text  x="704.31" y="415.5" ></text>
+</g>
+<g >
+<title>CPDF_PageImageCache::Entry::StartGetCachedBitmap (2 samples, 0.01%)</title><rect x="1175.8" y="181" width="0.1" height="15.0" fill="rgb(221,21,21)" rx="2" ry="2" />
+<text  x="1178.79" y="191.5" ></text>
+</g>
+<g >
+<title>syscall (13 samples, 0.06%)</title><rect x="1178.1" y="245" width="0.7" height="15.0" fill="rgb(245,174,42)" rx="2" ry="2" />
+<text  x="1181.10" y="255.5" ></text>
+</g>
+</g>
+</svg>
