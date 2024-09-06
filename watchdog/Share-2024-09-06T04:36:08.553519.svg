@@ -1,0 +1,1729 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="1110" onload="init(evt)" viewBox="0 0 1200 1110" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="1110.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Share Watchdog Profile (2024-09-06T04:36:08.553519)</text>
+<text id="details" x="10.00" y="1093" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="1093" > </text>
+<g id="frames">
+<g >
+<title>syscall (3 samples, 13.04%)</title><rect x="882.2" y="453" width="153.9" height="15.0" fill="rgb(208,65,20)" rx="2" ry="2" />
+<text  x="885.17" y="463.5" >syscall</text>
+</g>
+<g >
+<title>__cxa_throw (3 samples, 13.04%)</title><rect x="625.7" y="677" width="153.9" height="15.0" fill="rgb(240,96,32)" rx="2" ry="2" />
+<text  x="628.65" y="687.5" >__cxa_throw</text>
+</g>
+<g >
+<title>dlopen@GLIBC_2.2.5 (3 samples, 13.04%)</title><rect x="882.2" y="693" width="153.9" height="15.0" fill="rgb(217,100,4)" rx="2" ry="2" />
+<text  x="885.17" y="703.5" >dlopen@GLIBC_2.2.5</text>
+</g>
+<g >
+<title>soffice_main (1 samples, 4.35%)</title><rect x="830.9" y="965" width="51.3" height="15.0" fill="rgb(230,155,48)" rx="2" ry="2" />
+<text  x="833.87" y="975.5" >soffi..</text>
+</g>
+<g >
+<title>cppuhelper::ServiceManager::Data::Implementation::createInstanceWithArguments (3 samples, 13.04%)</title><rect x="625.7" y="789" width="153.9" height="15.0" fill="rgb(207,53,21)" rx="2" ry="2" />
+<text  x="628.65" y="799.5" >cppuhelper::Service..</text>
+</g>
+<g >
+<title>GetTextArray (1 samples, 4.35%)</title><rect x="523.0" y="693" width="51.3" height="15.0" fill="rgb(215,81,3)" rx="2" ry="2" />
+<text  x="526.04" y="703.5" >GetTe..</text>
+</g>
+<g >
+<title>syscall (1 samples, 4.35%)</title><rect x="420.4" y="773" width="51.3" height="15.0" fill="rgb(215,109,43)" rx="2" ry="2" />
+<text  x="423.43" y="783.5" >syscall</text>
+</g>
+<g >
+<title>ScGridWindow::DrawContent (2 samples, 8.70%)</title><rect x="369.1" y="933" width="102.6" height="15.0" fill="rgb(222,189,43)" rx="2" ry="2" />
+<text  x="372.13" y="943.5" >ScGridWindow..</text>
+</g>
+<g >
+<title>VclGrid::calculateRequisitionForSpacings (1 samples, 4.35%)</title><rect x="574.3" y="501" width="51.4" height="15.0" fill="rgb(241,83,53)" rx="2" ry="2" />
+<text  x="577.35" y="511.5" >VclGr..</text>
+</g>
+<g >
+<title>SfxBaseModel::impl_store (1 samples, 4.35%)</title><rect x="266.5" y="965" width="51.3" height="15.0" fill="rgb(223,17,8)" rx="2" ry="2" />
+<text  x="269.52" y="975.5" >SfxBa..</text>
+</g>
+<g >
+<title>__default_morecore@GLIBC_2.2.5 (1 samples, 4.35%)</title><rect x="317.8" y="885" width="51.3" height="15.0" fill="rgb(214,211,0)" rx="2" ry="2" />
+<text  x="320.83" y="895.5" >__def..</text>
+</g>
+<g >
+<title>vcl::Window::get_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="373" width="51.4" height="15.0" fill="rgb(224,186,9)" rx="2" ry="2" />
+<text  x="577.35" y="383.5" >vcl::..</text>
+</g>
+<g >
+<title>VclBuilder::handleObject (4 samples, 17.39%)</title><rect x="625.7" y="981" width="205.2" height="15.0" fill="rgb(209,47,3)" rx="2" ry="2" />
+<text  x="628.65" y="991.5" >VclBuilder::handleObject</text>
+</g>
+<g >
+<title>[libc.so.6] (3 samples, 13.04%)</title><rect x="10.0" y="597" width="153.9" height="15.0" fill="rgb(210,141,38)" rx="2" ry="2" />
+<text  x="13.00" y="607.5" >[libc.so.6]</text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (3 samples, 13.04%)</title><rect x="882.2" y="981" width="153.9" height="15.0" fill="rgb(225,143,28)" rx="2" ry="2" />
+<text  x="885.17" y="991.5" >SfxObjectShell::DoL..</text>
+</g>
+<g >
+<title>Dialog::StartExecuteAsync (1 samples, 4.35%)</title><rect x="574.3" y="933" width="51.4" height="15.0" fill="rgb(212,38,6)" rx="2" ry="2" />
+<text  x="577.35" y="943.5" >Dialo..</text>
+</g>
+<g >
+<title>VclContainer::getLayoutRequisition (1 samples, 4.35%)</title><rect x="574.3" y="181" width="51.4" height="15.0" fill="rgb(207,36,46)" rx="2" ry="2" />
+<text  x="577.35" y="191.5" >VclCo..</text>
+</g>
+<g >
+<title>ScFlatUInt16RowSegments::getRangeData (1 samples, 4.35%)</title><rect x="163.9" y="741" width="51.3" height="15.0" fill="rgb(248,29,35)" rx="2" ry="2" />
+<text  x="166.91" y="751.5" >ScFla..</text>
+</g>
+<g >
+<title>ChildSession::_handleInput (1 samples, 4.35%)</title><rect x="317.8" y="981" width="51.3" height="15.0" fill="rgb(223,224,19)" rx="2" ry="2" />
+<text  x="320.83" y="991.5" >Child..</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatDoc (1 samples, 4.35%)</title><rect x="523.0" y="757" width="51.3" height="15.0" fill="rgb(210,19,51)" rx="2" ry="2" />
+<text  x="526.04" y="767.5" >ImpEd..</text>
+</g>
+<g >
+<title>non-virtual thunk to (anonymous namespace)::DocumentDigitalSignatures::verifyScriptingContentSignatures (3 samples, 13.04%)</title><rect x="882.2" y="901" width="153.9" height="15.0" fill="rgb(246,56,32)" rx="2" ry="2" />
+<text  x="885.17" y="911.5" >non-virtual thunk t..</text>
+</g>
+<g >
+<title>gray_convert_glyph_inner (3 samples, 13.04%)</title><rect x="1036.1" y="997" width="153.9" height="15.0" fill="rgb(220,7,39)" rx="2" ry="2" />
+<text  x="1039.09" y="1007.5" >gray_convert_glyph_..</text>
+</g>
+<g >
+<title>VclGrid::calculateRequisitionForSpacings (1 samples, 4.35%)</title><rect x="574.3" y="421" width="51.4" height="15.0" fill="rgb(224,214,2)" rx="2" ry="2" />
+<text  x="577.35" y="431.5" >VclGr..</text>
+</g>
+<g >
+<title>secmod_LoadPKCS11Module (3 samples, 13.04%)</title><rect x="882.2" y="789" width="153.9" height="15.0" fill="rgb(211,35,0)" rx="2" ry="2" />
+<text  x="885.17" y="799.5" >secmod_LoadPKCS11Mo..</text>
+</g>
+<g >
+<title>syscall (1 samples, 4.35%)</title><rect x="163.9" y="693" width="51.3" height="15.0" fill="rgb(226,57,37)" rx="2" ry="2" />
+<text  x="166.91" y="703.5" >syscall</text>
+</g>
+<g >
+<title>systrim.constprop.0 (1 samples, 4.35%)</title><rect x="317.8" y="901" width="51.3" height="15.0" fill="rgb(243,119,0)" rx="2" ry="2" />
+<text  x="320.83" y="911.5" >systr..</text>
+</g>
+<g >
+<title>DOM::CDocumentBuilder::parse (1 samples, 4.35%)</title><rect x="830.9" y="789" width="51.3" height="15.0" fill="rgb(211,132,34)" rx="2" ry="2" />
+<text  x="833.87" y="799.5" >DOM::..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 4.35%)</title><rect x="317.8" y="821" width="51.3" height="15.0" fill="rgb(210,205,39)" rx="2" ry="2" />
+<text  x="320.83" y="831.5" >handl..</text>
+</g>
+<g >
+<title>SvxAreaTabPage::SetOptimalSize (3 samples, 13.04%)</title><rect x="10.0" y="789" width="153.9" height="15.0" fill="rgb(245,44,27)" rx="2" ry="2" />
+<text  x="13.00" y="799.5" >SvxAreaTabPage::Set..</text>
+</g>
+<g >
+<title>SalInstanceBuilder::~SalInstanceBuilder (3 samples, 13.04%)</title><rect x="10.0" y="725" width="153.9" height="15.0" fill="rgb(232,189,16)" rx="2" ry="2" />
+<text  x="13.00" y="735.5" >SalInstanceBuilder:..</text>
+</g>
+<g >
+<title>syscall (1 samples, 4.35%)</title><rect x="471.7" y="805" width="51.3" height="15.0" fill="rgb(212,22,43)" rx="2" ry="2" />
+<text  x="474.74" y="815.5" >syscall</text>
+</g>
+<g >
+<title>SwDocShell::Edit (3 samples, 13.04%)</title><rect x="10.0" y="869" width="153.9" height="15.0" fill="rgb(234,218,30)" rx="2" ry="2" />
+<text  x="13.00" y="879.5" >SwDocShell::Edit</text>
+</g>
+<g >
+<title>gray_conic_to (3 samples, 13.04%)</title><rect x="1036.1" y="965" width="153.9" height="15.0" fill="rgb(232,59,10)" rx="2" ry="2" />
+<text  x="1039.09" y="975.5" >gray_conic_to</text>
+</g>
+<g >
+<title>osl_releaseMutex (3 samples, 13.04%)</title><rect x="10.0" y="629" width="153.9" height="15.0" fill="rgb(235,221,34)" rx="2" ry="2" />
+<text  x="13.00" y="639.5" >osl_releaseMutex</text>
+</g>
+<g >
+<title>SfxOfficeDispatch::dispatch (5 samples, 21.74%)</title><rect x="10.0" y="933" width="256.5" height="15.0" fill="rgb(236,127,21)" rx="2" ry="2" />
+<text  x="13.00" y="943.5" >SfxOfficeDispatch::dispatch</text>
+</g>
+<g >
+<title>vcl::Window::get_ungrouped_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="357" width="51.4" height="15.0" fill="rgb(243,195,30)" rx="2" ry="2" />
+<text  x="577.35" y="367.5" >vcl::..</text>
+</g>
+<g >
+<title>ImplListBox::InsertEntry (1 samples, 4.35%)</title><rect x="779.6" y="773" width="51.3" height="15.0" fill="rgb(253,57,9)" rx="2" ry="2" />
+<text  x="782.57" y="783.5" >ImplL..</text>
+</g>
+<g >
+<title>SwDocShell::ExecStyleSheet (3 samples, 13.04%)</title><rect x="10.0" y="885" width="153.9" height="15.0" fill="rgb(254,140,49)" rx="2" ry="2" />
+<text  x="13.00" y="895.5" >SwDocShell::ExecSty..</text>
+</g>
+<g >
+<title>VclBuilder::handleChild (4 samples, 17.39%)</title><rect x="625.7" y="997" width="205.2" height="15.0" fill="rgb(226,34,16)" rx="2" ry="2" />
+<text  x="628.65" y="1007.5" >VclBuilder::handleChild</text>
+</g>
+<g >
+<title>FilterConfigCache::FilterConfigCache (1 samples, 4.35%)</title><rect x="266.5" y="805" width="51.3" height="15.0" fill="rgb(243,114,35)" rx="2" ry="2" />
+<text  x="269.52" y="815.5" >Filte..</text>
+</g>
+<g >
+<title>VclBuilder::disposeBuilder (3 samples, 13.04%)</title><rect x="10.0" y="693" width="153.9" height="15.0" fill="rgb(229,75,32)" rx="2" ry="2" />
+<text  x="13.00" y="703.5" >VclBuilder::dispose..</text>
+</g>
+<g >
+<title>configmgr::Access::getElementNames (1 samples, 4.35%)</title><rect x="266.5" y="773" width="51.3" height="15.0" fill="rgb(248,207,38)" rx="2" ry="2" />
+<text  x="269.52" y="783.5" >confi..</text>
+</g>
+<g >
+<title>vcl::Window::get_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="581" width="51.4" height="15.0" fill="rgb(235,165,30)" rx="2" ry="2" />
+<text  x="577.35" y="591.5" >vcl::..</text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (3 samples, 13.04%)</title><rect x="882.2" y="1013" width="153.9" height="15.0" fill="rgb(206,18,25)" rx="2" ry="2" />
+<text  x="885.17" y="1023.5" >framework::LoadEnv:..</text>
+</g>
+<g >
+<title>SvxAreaTabPage::Create (3 samples, 13.04%)</title><rect x="10.0" y="805" width="153.9" height="15.0" fill="rgb(242,184,41)" rx="2" ry="2" />
+<text  x="13.00" y="815.5" >SvxAreaTabPage::Cre..</text>
+</g>
+<g >
+<title>syscall (1 samples, 4.35%)</title><rect x="574.3" y="37" width="51.4" height="15.0" fill="rgb(214,67,2)" rx="2" ry="2" />
+<text  x="577.35" y="47.5" >syscall</text>
+</g>
+<g >
+<title>vcl::Window::get_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="725" width="51.4" height="15.0" fill="rgb(242,226,47)" rx="2" ry="2" />
+<text  x="577.35" y="735.5" >vcl::..</text>
+</g>
+<g >
+<title>BitmapReadAccess::GetPixelForN32BitTcRgbx (1 samples, 4.35%)</title><rect x="471.7" y="853" width="51.3" height="15.0" fill="rgb(211,89,51)" rx="2" ry="2" />
+<text  x="474.74" y="863.5" >Bitma..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;SalLayoutGlyphsCache::CachedGlyphsKey, std::pair&lt;SalLayoutGlyphsCache::CachedGlyphsKey const, std::_List_iterator&lt;std::pair&lt;SalLayoutGlyphsCache::CachedGlyphsKey, SalLayoutGlyphs&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;SalLayoutGlyphsCache::CachedGlyphsKey const, std::_List_iterator&lt;std::pair&lt;SalLayoutGlyphsCache::CachedGlyphsKey, SalLayoutGlyphs&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;SalLayoutGlyphsCache::CachedGlyphsKey&gt;, SalLayoutGlyphsCache::CachedGlyphsHash, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt; &gt;::_M_find_before_node (1 samples, 4.35%)</title><rect x="420.4" y="821" width="51.3" height="15.0" fill="rgb(208,186,1)" rx="2" ry="2" />
+<text  x="423.43" y="831.5" >std::..</text>
+</g>
+<g >
+<title>calcMaxs (1 samples, 4.35%)</title><rect x="574.3" y="405" width="51.4" height="15.0" fill="rgb(238,109,0)" rx="2" ry="2" />
+<text  x="577.35" y="415.5" >calcM..</text>
+</g>
+<g >
+<title>[libc.so.6] (1 samples, 4.35%)</title><rect x="830.9" y="677" width="51.3" height="15.0" fill="rgb(230,61,38)" rx="2" ry="2" />
+<text  x="833.87" y="687.5" >[libc..</text>
+</g>
+<g >
+<title>desktop::Desktop::Main (1 samples, 4.35%)</title><rect x="830.9" y="933" width="51.3" height="15.0" fill="rgb(210,22,40)" rx="2" ry="2" />
+<text  x="833.87" y="943.5" >deskt..</text>
+</g>
+<g >
+<title>u_getIntPropertyValue_73 (1 samples, 4.35%)</title><rect x="779.6" y="661" width="51.3" height="15.0" fill="rgb(230,9,41)" rx="2" ry="2" />
+<text  x="782.57" y="671.5" >u_get..</text>
+</g>
+<g >
+<title>vcl::Window::ImplCallInitShow (1 samples, 4.35%)</title><rect x="574.3" y="853" width="51.4" height="15.0" fill="rgb(214,225,53)" rx="2" ry="2" />
+<text  x="577.35" y="863.5" >vcl::..</text>
+</g>
+<g >
+<title>comphelper::dispatchCommand (5 samples, 21.74%)</title><rect x="10.0" y="965" width="256.5" height="15.0" fill="rgb(213,228,19)" rx="2" ry="2" />
+<text  x="13.00" y="975.5" >comphelper::dispatchCommand</text>
+</g>
+<g >
+<title>ScGridWindow::PaintTile (2 samples, 8.70%)</title><rect x="369.1" y="949" width="102.6" height="15.0" fill="rgb(238,10,45)" rx="2" ry="2" />
+<text  x="372.13" y="959.5" >ScGridWindow..</text>
+</g>
+<g >
+<title>vcl::Window::get_ungrouped_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="517" width="51.4" height="15.0" fill="rgb(242,170,31)" rx="2" ry="2" />
+<text  x="577.35" y="527.5" >vcl::..</text>
+</g>
+<g >
+<title>SfxObjectShell::CommonSaveAs_Impl (1 samples, 4.35%)</title><rect x="471.7" y="981" width="51.3" height="15.0" fill="rgb(222,65,16)" rx="2" ry="2" />
+<text  x="474.74" y="991.5" >SfxOb..</text>
+</g>
+<g >
+<title>VclContainer::getLayoutRequisition (1 samples, 4.35%)</title><rect x="574.3" y="309" width="51.4" height="15.0" fill="rgb(215,140,48)" rx="2" ry="2" />
+<text  x="577.35" y="319.5" >VclCo..</text>
+</g>
+<g >
+<title>do_lookup_x (3 samples, 13.04%)</title><rect x="882.2" y="501" width="153.9" height="15.0" fill="rgb(209,157,1)" rx="2" ry="2" />
+<text  x="885.17" y="511.5" >do_lookup_x</text>
+</g>
+<g >
+<title>VclContainer::getLayoutRequisition (1 samples, 4.35%)</title><rect x="574.3" y="677" width="51.4" height="15.0" fill="rgb(233,215,10)" rx="2" ry="2" />
+<text  x="577.35" y="687.5" >VclCo..</text>
+</g>
+<g >
+<title>[libc.so.6] (1 samples, 4.35%)</title><rect x="523.0" y="645" width="51.3" height="15.0" fill="rgb(241,141,33)" rx="2" ry="2" />
+<text  x="526.04" y="655.5" >[libc..</text>
+</g>
+<g >
+<title>VclScrolledWindow::dispose (3 samples, 13.04%)</title><rect x="10.0" y="677" width="153.9" height="15.0" fill="rgb(220,129,15)" rx="2" ry="2" />
+<text  x="13.00" y="687.5" >VclScrolledWindow::..</text>
+</g>
+<g >
+<title>vcl::Window::get_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="789" width="51.4" height="15.0" fill="rgb(248,73,26)" rx="2" ry="2" />
+<text  x="577.35" y="799.5" >vcl::..</text>
+</g>
+<g >
+<title>PR_LoadLibraryWithFlags (3 samples, 13.04%)</title><rect x="882.2" y="709" width="153.9" height="15.0" fill="rgb(237,136,12)" rx="2" ry="2" />
+<text  x="885.17" y="719.5" >PR_LoadLibraryWithF..</text>
+</g>
+<g >
+<title>ScColumn::GetOptimalHeight (1 samples, 4.35%)</title><rect x="523.0" y="837" width="51.3" height="15.0" fill="rgb(217,157,35)" rx="2" ry="2" />
+<text  x="526.04" y="847.5" >ScCol..</text>
+</g>
+<g >
+<title>syscall (1 samples, 4.35%)</title><rect x="369.1" y="901" width="51.3" height="15.0" fill="rgb(247,77,45)" rx="2" ry="2" />
+<text  x="372.13" y="911.5" >syscall</text>
+</g>
+<g >
+<title>xmlParseContentInternal (1 samples, 4.35%)</title><rect x="830.9" y="725" width="51.3" height="15.0" fill="rgb(220,109,35)" rx="2" ry="2" />
+<text  x="833.87" y="735.5" >xmlPa..</text>
+</g>
+<g >
+<title>SalGraphics::GetNativeControlRegion (1 samples, 4.35%)</title><rect x="574.3" y="85" width="51.4" height="15.0" fill="rgb(226,91,45)" rx="2" ry="2" />
+<text  x="577.35" y="95.5" >SalGr..</text>
+</g>
+<g >
+<title>ScFlatBoolRowSegments::getRangeData (1 samples, 4.35%)</title><rect x="215.2" y="725" width="51.3" height="15.0" fill="rgb(205,169,50)" rx="2" ry="2" />
+<text  x="218.22" y="735.5" >ScFla..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 4.35%)</title><rect x="523.0" y="629" width="51.3" height="15.0" fill="rgb(216,11,27)" rx="2" ry="2" />
+<text  x="526.04" y="639.5" >handl..</text>
+</g>
+<g >
+<title>vcl::Window::get_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="293" width="51.4" height="15.0" fill="rgb(225,212,46)" rx="2" ry="2" />
+<text  x="577.35" y="303.5" >vcl::..</text>
+</g>
+<g >
+<title>SfxDispatchController_Impl::addStatusListener (1 samples, 4.35%)</title><rect x="779.6" y="869" width="51.3" height="15.0" fill="rgb(210,167,15)" rx="2" ry="2" />
+<text  x="782.57" y="879.5" >SfxDi..</text>
+</g>
+<g >
+<title>RenderTiles::doRender (2 samples, 8.70%)</title><rect x="369.1" y="1013" width="102.6" height="15.0" fill="rgb(223,53,26)" rx="2" ry="2" />
+<text  x="372.13" y="1023.5" >RenderTiles:..</text>
+</g>
+<g >
+<title>vcl::Window::get_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="453" width="51.4" height="15.0" fill="rgb(243,165,18)" rx="2" ry="2" />
+<text  x="577.35" y="463.5" >vcl::..</text>
+</g>
+<g >
+<title>SalLayoutGlyphsCache::GetLayoutGlyphs (1 samples, 4.35%)</title><rect x="420.4" y="853" width="51.3" height="15.0" fill="rgb(224,204,48)" rx="2" ry="2" />
+<text  x="423.43" y="863.5" >SalLa..</text>
+</g>
+<g >
+<title>dlopen_doit (3 samples, 13.04%)</title><rect x="882.2" y="629" width="153.9" height="15.0" fill="rgb(229,127,10)" rx="2" ry="2" />
+<text  x="885.17" y="639.5" >dlopen_doit</text>
+</g>
+<g >
+<title>_dl_lookup_symbol_x (3 samples, 13.04%)</title><rect x="882.2" y="517" width="153.9" height="15.0" fill="rgb(231,148,10)" rx="2" ry="2" />
+<text  x="885.17" y="527.5" >_dl_lookup_symbol_x</text>
+</g>
+<g >
+<title>VclBuilder::handleChild (3 samples, 13.04%)</title><rect x="625.7" y="965" width="153.9" height="15.0" fill="rgb(248,208,51)" rx="2" ry="2" />
+<text  x="628.65" y="975.5" >VclBuilder::handleC..</text>
+</g>
+<g >
+<title>comphelper::BackupFileHelper::tryPushExtensionInfo (1 samples, 4.35%)</title><rect x="830.9" y="901" width="51.3" height="15.0" fill="rgb(227,4,26)" rx="2" ry="2" />
+<text  x="833.87" y="911.5" >comph..</text>
+</g>
+<g >
+<title>vcl::Window::get_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="533" width="51.4" height="15.0" fill="rgb(251,63,44)" rx="2" ry="2" />
+<text  x="577.35" y="543.5" >vcl::..</text>
+</g>
+<g >
+<title>[libc.so.6] (1 samples, 4.35%)</title><rect x="266.5" y="741" width="51.3" height="15.0" fill="rgb(236,18,25)" rx="2" ry="2" />
+<text  x="269.52" y="751.5" >[libc..</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::filter (1 samples, 4.35%)</title><rect x="523.0" y="965" width="51.3" height="15.0" fill="rgb(250,137,33)" rx="2" ry="2" />
+<text  x="526.04" y="975.5" >oox::..</text>
+</g>
+<g >
+<title>[unknown] (23 samples, 100.00%)</title><rect x="10.0" y="1029" width="1180.0" height="15.0" fill="rgb(243,208,27)" rx="2" ry="2" />
+<text  x="13.00" y="1039.5" >[unknown]</text>
+</g>
+<g >
+<title>vcl::text::TextLayoutCache::TextLayoutCache (1 samples, 4.35%)</title><rect x="779.6" y="693" width="51.3" height="15.0" fill="rgb(214,144,10)" rx="2" ry="2" />
+<text  x="782.57" y="703.5" >vcl::..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 13.04%)</title><rect x="625.7" y="581" width="153.9" height="15.0" fill="rgb(209,70,32)" rx="2" ry="2" />
+<text  x="628.65" y="591.5" >handleUserProfileSi..</text>
+</g>
+<g >
+<title>JSDialog::runAsync (1 samples, 4.35%)</title><rect x="574.3" y="965" width="51.4" height="15.0" fill="rgb(227,113,48)" rx="2" ry="2" />
+<text  x="577.35" y="975.5" >JSDia..</text>
+</g>
+<g >
+<title>PR_CallOnce (3 samples, 13.04%)</title><rect x="882.2" y="773" width="153.9" height="15.0" fill="rgb(217,98,53)" rx="2" ry="2" />
+<text  x="885.17" y="783.5" >PR_CallOnce</text>
+</g>
+<g >
+<title>SfxDispatchController_Impl::dispatch (5 samples, 21.74%)</title><rect x="10.0" y="917" width="256.5" height="15.0" fill="rgb(217,126,19)" rx="2" ry="2" />
+<text  x="13.00" y="927.5" >SfxDispatchController_Impl::dispatch</text>
+</g>
+<g >
+<title>SfxBaseModel::storeToURL (1 samples, 4.35%)</title><rect x="266.5" y="981" width="51.3" height="15.0" fill="rgb(210,18,16)" rx="2" ry="2" />
+<text  x="269.52" y="991.5" >SfxBa..</text>
+</g>
+<g >
+<title>softoken_LoadDSO (3 samples, 13.04%)</title><rect x="882.2" y="757" width="153.9" height="15.0" fill="rgb(217,53,38)" rx="2" ry="2" />
+<text  x="885.17" y="767.5" >softoken_LoadDSO</text>
+</g>
+<g >
+<title>vcl::Window::get_ungrouped_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="565" width="51.4" height="15.0" fill="rgb(253,222,28)" rx="2" ry="2" />
+<text  x="577.35" y="575.5" >vcl::..</text>
+</g>
+<g >
+<title>FilterConfigCache::ImplInit (1 samples, 4.35%)</title><rect x="266.5" y="789" width="51.3" height="15.0" fill="rgb(213,135,12)" rx="2" ry="2" />
+<text  x="269.52" y="799.5" >Filte..</text>
+</g>
+<g >
+<title>ScTable::SetOptimalHeight (1 samples, 4.35%)</title><rect x="523.0" y="853" width="51.3" height="15.0" fill="rgb(225,63,28)" rx="2" ry="2" />
+<text  x="526.04" y="863.5" >ScTab..</text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (1 samples, 4.35%)</title><rect x="523.0" y="997" width="51.3" height="15.0" fill="rgb(206,30,20)" rx="2" ry="2" />
+<text  x="526.04" y="1007.5" >SfxOb..</text>
+</g>
+<g >
+<title>SfxDispatcher::Call_Impl (3 samples, 13.04%)</title><rect x="10.0" y="901" width="153.9" height="15.0" fill="rgb(239,92,24)" rx="2" ry="2" />
+<text  x="13.00" y="911.5" >SfxDispatcher::Call..</text>
+</g>
+<g >
+<title>ScDrawStringsVars::SetText (1 samples, 4.35%)</title><rect x="420.4" y="901" width="51.3" height="15.0" fill="rgb(228,211,34)" rx="2" ry="2" />
+<text  x="423.43" y="911.5" >ScDra..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 4.35%)</title><rect x="163.9" y="709" width="51.3" height="15.0" fill="rgb(219,189,31)" rx="2" ry="2" />
+<text  x="166.91" y="719.5" >handl..</text>
+</g>
+<g >
+<title>void std::__introsort_loop&lt;__gnu_cxx::__normal_iterator&lt;std::vector&lt;com::sun::star::uno::Reference&lt;com::sun::star::deployment::XPackage&gt;, std::allocator&lt;com::sun::star::uno::Reference&lt;com::sun::star::deployment::XPackage&gt; &gt; &gt;*, std::vector&lt;std::vector&lt;com::sun::star::uno::Reference&lt;com::sun::star::deployment::XPackage&gt;, std::allocator&lt;com::sun::star::uno::Reference&lt;com::sun::star::deployment::XPackage&gt; &gt; &gt;, std::allocator&lt;std::vector&lt;com::sun::star::uno::Reference&lt;com::sun::star::deployment::XPackage&gt;, std::allocator&lt;com::sun::star::uno::Reference&lt;com::sun::star::deployment::XPackage&gt; &gt; &gt; &gt; &gt; &gt;, long, __gnu_cxx::__ops::_Iter_comp_iter&lt;(anonymous namespace)::CompIdentifiers&gt; &gt; (1 samples, 4.35%)</title><rect x="830.9" y="853" width="51.3" height="15.0" fill="rgb(238,220,17)" rx="2" ry="2" />
+<text  x="833.87" y="863.5" >void ..</text>
+</g>
+<g >
+<title>ImplListBoxWindow::ImplUpdateEntryMetrics (1 samples, 4.35%)</title><rect x="779.6" y="757" width="51.3" height="15.0" fill="rgb(245,164,46)" rx="2" ry="2" />
+<text  x="782.57" y="767.5" >ImplL..</text>
+</g>
+<g >
+<title>ONSSInitializer::initNSS (3 samples, 13.04%)</title><rect x="882.2" y="853" width="153.9" height="15.0" fill="rgb(250,135,19)" rx="2" ry="2" />
+<text  x="885.17" y="863.5" >ONSSInitializer::in..</text>
+</g>
+<g >
+<title>lokit_main (1 samples, 4.35%)</title><rect x="830.9" y="997" width="51.3" height="15.0" fill="rgb(231,57,53)" rx="2" ry="2" />
+<text  x="833.87" y="1007.5" >lokit..</text>
+</g>
+<g >
+<title>ScModelObj::paintTile (2 samples, 8.70%)</title><rect x="369.1" y="965" width="102.6" height="15.0" fill="rgb(234,155,42)" rx="2" ry="2" />
+<text  x="372.13" y="975.5" >ScModelObj::..</text>
+</g>
+<g >
+<title>ScDocShell::UpdateAllRowHeights (1 samples, 4.35%)</title><rect x="523.0" y="885" width="51.3" height="15.0" fill="rgb(235,176,38)" rx="2" ry="2" />
+<text  x="526.04" y="895.5" >ScDoc..</text>
+</g>
+<g >
+<title>OutputDevice::GetTextArray (1 samples, 4.35%)</title><rect x="523.0" y="677" width="51.3" height="15.0" fill="rgb(252,170,24)" rx="2" ry="2" />
+<text  x="526.04" y="687.5" >Outpu..</text>
+</g>
+<g >
+<title>dl_open_worker_begin (3 samples, 13.04%)</title><rect x="882.2" y="549" width="153.9" height="15.0" fill="rgb(234,223,45)" rx="2" ry="2" />
+<text  x="885.17" y="559.5" >dl_open_worker_begin</text>
+</g>
+<g >
+<title>oox::core::FilterBase::filter (1 samples, 4.35%)</title><rect x="523.0" y="949" width="51.3" height="15.0" fill="rgb(214,58,1)" rx="2" ry="2" />
+<text  x="526.04" y="959.5" >oox::..</text>
+</g>
+<g >
+<title>void rtl::str::release&lt;_rtl_uString&gt; (1 samples, 4.35%)</title><rect x="266.5" y="757" width="51.3" height="15.0" fill="rgb(227,178,31)" rx="2" ry="2" />
+<text  x="269.52" y="767.5" >void ..</text>
+</g>
+<g >
+<title>TabControl::calculateRequisition (1 samples, 4.35%)</title><rect x="574.3" y="341" width="51.4" height="15.0" fill="rgb(242,102,51)" rx="2" ry="2" />
+<text  x="577.35" y="351.5" >TabCo..</text>
+</g>
+<g >
+<title>VclContainer::getLayoutRequisition (1 samples, 4.35%)</title><rect x="574.3" y="389" width="51.4" height="15.0" fill="rgb(240,219,43)" rx="2" ry="2" />
+<text  x="577.35" y="399.5" >VclCo..</text>
+</g>
+<g >
+<title>VclBuilder::insertObject (1 samples, 4.35%)</title><rect x="779.6" y="965" width="51.3" height="15.0" fill="rgb(221,185,51)" rx="2" ry="2" />
+<text  x="782.57" y="975.5" >VclBu..</text>
+</g>
+<g >
+<title>GraphicExportFilter::filterRenderDocument (1 samples, 4.35%)</title><rect x="266.5" y="869" width="51.3" height="15.0" fill="rgb(225,100,8)" rx="2" ry="2" />
+<text  x="269.52" y="879.5" >Graph..</text>
+</g>
+<g >
+<title>xmlDoRead (1 samples, 4.35%)</title><rect x="830.9" y="773" width="51.3" height="15.0" fill="rgb(209,76,49)" rx="2" ry="2" />
+<text  x="833.87" y="783.5" >xmlDo..</text>
+</g>
+<g >
+<title>vcl::Window::get_ungrouped_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="437" width="51.4" height="15.0" fill="rgb(239,189,26)" rx="2" ry="2" />
+<text  x="577.35" y="447.5" >vcl::..</text>
+</g>
+<g >
+<title>SalInstanceComboBoxWithEdit::insert (1 samples, 4.35%)</title><rect x="779.6" y="805" width="51.3" height="15.0" fill="rgb(236,2,29)" rx="2" ry="2" />
+<text  x="782.57" y="815.5" >SalIn..</text>
+</g>
+<g >
+<title>Session::handleMessage (1 samples, 4.35%)</title><rect x="317.8" y="997" width="51.3" height="15.0" fill="rgb(228,228,33)" rx="2" ry="2" />
+<text  x="320.83" y="1007.5" >Sessi..</text>
+</g>
+<g >
+<title>SfxObjectShell::CheckSecurityOnLoading_Impl (3 samples, 13.04%)</title><rect x="882.2" y="949" width="153.9" height="15.0" fill="rgb(252,153,12)" rx="2" ry="2" />
+<text  x="885.17" y="959.5" >SfxObjectShell::Che..</text>
+</g>
+<g >
+<title>SfxBaseModel::load (3 samples, 13.04%)</title><rect x="882.2" y="997" width="153.9" height="15.0" fill="rgb(213,117,24)" rx="2" ry="2" />
+<text  x="885.17" y="1007.5" >SfxBaseModel::load</text>
+</g>
+<g >
+<title>ToolBox::InsertItem (3 samples, 13.04%)</title><rect x="625.7" y="885" width="153.9" height="15.0" fill="rgb(246,29,50)" rx="2" ry="2" />
+<text  x="628.65" y="895.5" >ToolBox::InsertItem</text>
+</g>
+<g >
+<title>SystemWindow::setOptimalLayoutSize (1 samples, 4.35%)</title><rect x="574.3" y="805" width="51.4" height="15.0" fill="rgb(213,186,23)" rx="2" ry="2" />
+<text  x="577.35" y="815.5" >Syste..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 4.35%)</title><rect x="266.5" y="725" width="51.3" height="15.0" fill="rgb(229,9,32)" rx="2" ry="2" />
+<text  x="269.52" y="735.5" >handl..</text>
+</g>
+<g >
+<title>_dlerror_run (3 samples, 13.04%)</title><rect x="882.2" y="677" width="153.9" height="15.0" fill="rgb(211,113,14)" rx="2" ry="2" />
+<text  x="885.17" y="687.5" >_dlerror_run</text>
+</g>
+<g >
+<title>SEInitializer_NssImpl::createSecurityContext (3 samples, 13.04%)</title><rect x="882.2" y="869" width="153.9" height="15.0" fill="rgb(212,104,38)" rx="2" ry="2" />
+<text  x="885.17" y="879.5" >SEInitializer_NssIm..</text>
+</g>
+<g >
+<title>framework::XMLBasedAcceleratorConfiguration::reload (3 samples, 13.04%)</title><rect x="625.7" y="741" width="153.9" height="15.0" fill="rgb(232,123,43)" rx="2" ry="2" />
+<text  x="628.65" y="751.5" >framework::XMLBased..</text>
+</g>
+<g >
+<title>weld::DialogController::runAsync (1 samples, 4.35%)</title><rect x="574.3" y="981" width="51.4" height="15.0" fill="rgb(244,35,34)" rx="2" ry="2" />
+<text  x="577.35" y="991.5" >weld:..</text>
+</g>
+<g >
+<title>SfxTabDialogController::CreatePages (3 samples, 13.04%)</title><rect x="10.0" y="821" width="153.9" height="15.0" fill="rgb(224,209,24)" rx="2" ry="2" />
+<text  x="13.00" y="831.5" >SfxTabDialogControl..</text>
+</g>
+<g >
+<title>ScViewData::GetScrPos (2 samples, 8.70%)</title><rect x="163.9" y="773" width="102.6" height="15.0" fill="rgb(241,160,19)" rx="2" ry="2" />
+<text  x="166.91" y="783.5" >ScViewData::..</text>
+</g>
+<g >
+<title>doc_saveAs (1 samples, 4.35%)</title><rect x="266.5" y="997" width="51.3" height="15.0" fill="rgb(239,97,28)" rx="2" ry="2" />
+<text  x="269.52" y="1007.5" >doc_s..</text>
+</g>
+<g >
+<title>cppuhelper::ServiceManager::createInstanceWithArgumentsAndContext (3 samples, 13.04%)</title><rect x="625.7" y="805" width="153.9" height="15.0" fill="rgb(247,49,31)" rx="2" ry="2" />
+<text  x="628.65" y="815.5" >cppuhelper::Service..</text>
+</g>
+<g >
+<title>ChildSession::sendTextFrame (1 samples, 4.35%)</title><rect x="317.8" y="949" width="51.3" height="15.0" fill="rgb(210,166,1)" rx="2" ry="2" />
+<text  x="320.83" y="959.5" >Child..</text>
+</g>
+<g >
+<title>ScCellShell::ExecuteMove (2 samples, 8.70%)</title><rect x="163.9" y="869" width="102.6" height="15.0" fill="rgb(214,66,1)" rx="2" ry="2" />
+<text  x="166.91" y="879.5" >ScCellShell:..</text>
+</g>
+<g >
+<title>ScColumn::GetNeededSize (1 samples, 4.35%)</title><rect x="523.0" y="821" width="51.3" height="15.0" fill="rgb(236,81,14)" rx="2" ry="2" />
+<text  x="526.04" y="831.5" >ScCol..</text>
+</g>
+<g >
+<title>calcMaxs (1 samples, 4.35%)</title><rect x="574.3" y="197" width="51.4" height="15.0" fill="rgb(240,110,11)" rx="2" ry="2" />
+<text  x="577.35" y="207.5" >calcM..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 4.35%)</title><rect x="215.2" y="693" width="51.3" height="15.0" fill="rgb(205,143,15)" rx="2" ry="2" />
+<text  x="218.22" y="703.5" >handl..</text>
+</g>
+<g >
+<title>SfxObjectShell::CommonSaveAs_Impl (1 samples, 4.35%)</title><rect x="266.5" y="933" width="51.3" height="15.0" fill="rgb(231,157,14)" rx="2" ry="2" />
+<text  x="269.52" y="943.5" >SfxOb..</text>
+</g>
+<g >
+<title>comphelper::BackupFileHelper::tryPush_extensionInfo (1 samples, 4.35%)</title><rect x="830.9" y="885" width="51.3" height="15.0" fill="rgb(248,128,39)" rx="2" ry="2" />
+<text  x="833.87" y="895.5" >comph..</text>
+</g>
+<g >
+<title>syscall (1 samples, 4.35%)</title><rect x="317.8" y="805" width="51.3" height="15.0" fill="rgb(237,125,43)" rx="2" ry="2" />
+<text  x="320.83" y="815.5" >syscall</text>
+</g>
+<g >
+<title>xmlParseStartTag2.constprop.0 (1 samples, 4.35%)</title><rect x="830.9" y="693" width="51.3" height="15.0" fill="rgb(206,17,38)" rx="2" ry="2" />
+<text  x="833.87" y="703.5" >xmlPa..</text>
+</g>
+<g >
+<title>comphelper::SolarMutex::doRelease (3 samples, 13.04%)</title><rect x="10.0" y="645" width="153.9" height="15.0" fill="rgb(229,76,19)" rx="2" ry="2" />
+<text  x="13.00" y="655.5" >comphelper::SolarMu..</text>
+</g>
+<g >
+<title>[libc.so.6] (1 samples, 4.35%)</title><rect x="471.7" y="837" width="51.3" height="15.0" fill="rgb(208,27,38)" rx="2" ry="2" />
+<text  x="474.74" y="847.5" >[libc..</text>
+</g>
+<g >
+<title>GraphicFilter::GetGraphicFilter (1 samples, 4.35%)</title><rect x="266.5" y="853" width="51.3" height="15.0" fill="rgb(214,141,29)" rx="2" ry="2" />
+<text  x="269.52" y="863.5" >Graph..</text>
+</g>
+<g >
+<title>VclContainer::getLayoutRequisition (1 samples, 4.35%)</title><rect x="574.3" y="549" width="51.4" height="15.0" fill="rgb(208,45,17)" rx="2" ry="2" />
+<text  x="577.35" y="559.5" >VclCo..</text>
+</g>
+<g >
+<title>_dl_open (3 samples, 13.04%)</title><rect x="882.2" y="613" width="153.9" height="15.0" fill="rgb(252,60,27)" rx="2" ry="2" />
+<text  x="885.17" y="623.5" >_dl_open</text>
+</g>
+<g >
+<title>vcl::CommandInfoProvider::GetDocumentAcceleratorConfiguration (3 samples, 13.04%)</title><rect x="625.7" y="837" width="153.9" height="15.0" fill="rgb(252,200,35)" rx="2" ry="2" />
+<text  x="628.65" y="847.5" >vcl::CommandInfoPro..</text>
+</g>
+<g >
+<title>SfxBaseModel::load (1 samples, 4.35%)</title><rect x="523.0" y="1013" width="51.3" height="15.0" fill="rgb(236,60,27)" rx="2" ry="2" />
+<text  x="526.04" y="1023.5" >SfxBa..</text>
+</g>
+<g >
+<title>[libstdc++.so.6.0.30] (3 samples, 13.04%)</title><rect x="625.7" y="629" width="153.9" height="15.0" fill="rgb(230,7,29)" rx="2" ry="2" />
+<text  x="628.65" y="639.5" >[libstdc++.so.6.0.30]</text>
+</g>
+<g >
+<title>lo_runLoop (1 samples, 4.35%)</title><rect x="830.9" y="981" width="51.3" height="15.0" fill="rgb(225,194,41)" rx="2" ry="2" />
+<text  x="833.87" y="991.5" >lo_ru..</text>
+</g>
+<g >
+<title>vcl::Window::get_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="165" width="51.4" height="15.0" fill="rgb(224,95,48)" rx="2" ry="2" />
+<text  x="577.35" y="175.5" >vcl::..</text>
+</g>
+<g >
+<title>vcl::Window::Show (1 samples, 4.35%)</title><rect x="574.3" y="901" width="51.4" height="15.0" fill="rgb(247,66,27)" rx="2" ry="2" />
+<text  x="577.35" y="911.5" >vcl::..</text>
+</g>
+<g >
+<title>ScDrawStringsVars::GetFmtTextWidth (1 samples, 4.35%)</title><rect x="420.4" y="869" width="51.3" height="15.0" fill="rgb(223,53,36)" rx="2" ry="2" />
+<text  x="423.43" y="879.5" >ScDra..</text>
+</g>
+<g >
+<title>syscall (3 samples, 13.04%)</title><rect x="10.0" y="565" width="153.9" height="15.0" fill="rgb(217,172,22)" rx="2" ry="2" />
+<text  x="13.00" y="575.5" >syscall</text>
+</g>
+<g >
+<title>[libc.so.6] (1 samples, 4.35%)</title><rect x="779.6" y="645" width="51.3" height="15.0" fill="rgb(225,56,38)" rx="2" ry="2" />
+<text  x="782.57" y="655.5" >[libc..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 4.35%)</title><rect x="471.7" y="821" width="51.3" height="15.0" fill="rgb(227,203,4)" rx="2" ry="2" />
+<text  x="474.74" y="831.5" >handl..</text>
+</g>
+<g >
+<title>_dl_catch_exception (3 samples, 13.04%)</title><rect x="882.2" y="645" width="153.9" height="15.0" fill="rgb(214,102,27)" rx="2" ry="2" />
+<text  x="885.17" y="655.5" >_dl_catch_exception</text>
+</g>
+<g >
+<title>GraphicExportFilter::filterRenderDocument (1 samples, 4.35%)</title><rect x="471.7" y="917" width="51.3" height="15.0" fill="rgb(206,91,44)" rx="2" ry="2" />
+<text  x="474.74" y="927.5" >Graph..</text>
+</g>
+<g >
+<title>OutputDevice::GetNativeControlRegion (1 samples, 4.35%)</title><rect x="574.3" y="101" width="51.4" height="15.0" fill="rgb(212,99,28)" rx="2" ry="2" />
+<text  x="577.35" y="111.5" >Outpu..</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatParagraphs (1 samples, 4.35%)</title><rect x="523.0" y="741" width="51.3" height="15.0" fill="rgb(252,110,27)" rx="2" ry="2" />
+<text  x="526.04" y="751.5" >ImpEd..</text>
+</g>
+<g >
+<title>ComboBox::CalcMinimumSize (1 samples, 4.35%)</title><rect x="574.3" y="133" width="51.4" height="15.0" fill="rgb(247,15,20)" rx="2" ry="2" />
+<text  x="577.35" y="143.5" >Combo..</text>
+</g>
+<g >
+<title>_dl_catch_exception (3 samples, 13.04%)</title><rect x="882.2" y="565" width="153.9" height="15.0" fill="rgb(238,122,33)" rx="2" ry="2" />
+<text  x="885.17" y="575.5" >_dl_catch_exception</text>
+</g>
+<g >
+<title>lcl_GetDocFontList (1 samples, 4.35%)</title><rect x="779.6" y="853" width="51.3" height="15.0" fill="rgb(245,28,37)" rx="2" ry="2" />
+<text  x="782.57" y="863.5" >lcl_G..</text>
+</g>
+<g >
+<title>GenericSalLayout::LayoutText (1 samples, 4.35%)</title><rect x="779.6" y="709" width="51.3" height="15.0" fill="rgb(217,154,36)" rx="2" ry="2" />
+<text  x="782.57" y="719.5" >Gener..</text>
+</g>
+<g >
+<title>virtual thunk to JSComboBox::insert (1 samples, 4.35%)</title><rect x="779.6" y="821" width="51.3" height="15.0" fill="rgb(251,185,8)" rx="2" ry="2" />
+<text  x="782.57" y="831.5" >virtu..</text>
+</g>
+<g >
+<title>ChildSession::saveAs (1 samples, 4.35%)</title><rect x="266.5" y="1013" width="51.3" height="15.0" fill="rgb(241,37,6)" rx="2" ry="2" />
+<text  x="269.52" y="1023.5" >Child..</text>
+</g>
+<g >
+<title>oox::xls::WorkbookGlobals::finalize (1 samples, 4.35%)</title><rect x="523.0" y="901" width="51.3" height="15.0" fill="rgb(211,163,38)" rx="2" ry="2" />
+<text  x="526.04" y="911.5" >oox::..</text>
+</g>
+<g >
+<title>SystemWindow::GetOptimalSize (1 samples, 4.35%)</title><rect x="574.3" y="757" width="51.4" height="15.0" fill="rgb(248,80,11)" rx="2" ry="2" />
+<text  x="577.35" y="767.5" >Syste..</text>
+</g>
+<g >
+<title>ScTable::RowHidden (1 samples, 4.35%)</title><rect x="215.2" y="741" width="51.3" height="15.0" fill="rgb(248,100,4)" rx="2" ry="2" />
+<text  x="218.22" y="751.5" >ScTab..</text>
+</g>
+<g >
+<title>doc_paintPartTile (2 samples, 8.70%)</title><rect x="369.1" y="997" width="102.6" height="15.0" fill="rgb(212,229,29)" rx="2" ry="2" />
+<text  x="372.13" y="1007.5" >doc_paintPar..</text>
+</g>
+<g >
+<title>GraphicFilter::ImplInit (1 samples, 4.35%)</title><rect x="266.5" y="821" width="51.3" height="15.0" fill="rgb(213,68,9)" rx="2" ry="2" />
+<text  x="269.52" y="831.5" >Graph..</text>
+</g>
+<g >
+<title>SfxObjectShell::FinishedLoading (3 samples, 13.04%)</title><rect x="882.2" y="965" width="153.9" height="15.0" fill="rgb(225,110,14)" rx="2" ry="2" />
+<text  x="885.17" y="975.5" >SfxObjectShell::Fin..</text>
+</g>
+<g >
+<title>ImpEditEngine::CreateLines (1 samples, 4.35%)</title><rect x="523.0" y="725" width="51.3" height="15.0" fill="rgb(205,177,15)" rx="2" ry="2" />
+<text  x="526.04" y="735.5" >ImpEd..</text>
+</g>
+<g >
+<title>[libc.so.6] (1 samples, 4.35%)</title><rect x="420.4" y="805" width="51.3" height="15.0" fill="rgb(245,192,53)" rx="2" ry="2" />
+<text  x="423.43" y="815.5" >[libc..</text>
+</g>
+<g >
+<title>sfx2::sidebar::SidebarToolBox::CreateController (1 samples, 4.35%)</title><rect x="779.6" y="917" width="51.3" height="15.0" fill="rgb(237,131,27)" rx="2" ry="2" />
+<text  x="782.57" y="927.5" >sfx2:..</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::importDocument (1 samples, 4.35%)</title><rect x="523.0" y="933" width="51.3" height="15.0" fill="rgb(235,142,3)" rx="2" ry="2" />
+<text  x="526.04" y="943.5" >oox::..</text>
+</g>
+<g >
+<title>comphelper::dispatchCommand (5 samples, 21.74%)</title><rect x="10.0" y="949" width="256.5" height="15.0" fill="rgb(207,51,19)" rx="2" ry="2" />
+<text  x="13.00" y="959.5" >comphelper::dispatchCommand</text>
+</g>
+<g >
+<title>xmlParseElement (1 samples, 4.35%)</title><rect x="830.9" y="741" width="51.3" height="15.0" fill="rgb(252,61,6)" rx="2" ry="2" />
+<text  x="833.87" y="751.5" >xmlPa..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;SalLayoutGlyphsCache::CachedGlyphsKey, std::pair&lt;SalLayoutGlyphsCache::CachedGlyphsKey const, std::_List_iterator&lt;std::pair&lt;SalLayoutGlyphsCache::CachedGlyphsKey, SalLayoutGlyphs&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;SalLayoutGlyphsCache::CachedGlyphsKey const, std::_List_iterator&lt;std::pair&lt;SalLayoutGlyphsCache::CachedGlyphsKey, SalLayoutGlyphs&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;SalLayoutGlyphsCache::CachedGlyphsKey&gt;, SalLayoutGlyphsCache::CachedGlyphsHash, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt; &gt;::find (1 samples, 4.35%)</title><rect x="420.4" y="837" width="51.3" height="15.0" fill="rgb(244,3,15)" rx="2" ry="2" />
+<text  x="423.43" y="847.5" >std::..</text>
+</g>
+<g >
+<title>Dialog::ImplStartExecute (1 samples, 4.35%)</title><rect x="574.3" y="917" width="51.4" height="15.0" fill="rgb(212,171,50)" rx="2" ry="2" />
+<text  x="577.35" y="927.5" >Dialo..</text>
+</g>
+<g >
+<title>SfxObjectShell::ExportTo (1 samples, 4.35%)</title><rect x="266.5" y="885" width="51.3" height="15.0" fill="rgb(210,169,20)" rx="2" ry="2" />
+<text  x="269.52" y="895.5" >SfxOb..</text>
+</g>
+<g >
+<title>VclContainer::getLayoutRequisition (1 samples, 4.35%)</title><rect x="574.3" y="597" width="51.4" height="15.0" fill="rgb(251,134,49)" rx="2" ry="2" />
+<text  x="577.35" y="607.5" >VclCo..</text>
+</g>
+<g >
+<title>_dl_catch_error (3 samples, 13.04%)</title><rect x="882.2" y="661" width="153.9" height="15.0" fill="rgb(240,208,36)" rx="2" ry="2" />
+<text  x="885.17" y="671.5" >_dl_catch_error</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatAndLayout (1 samples, 4.35%)</title><rect x="523.0" y="773" width="51.3" height="15.0" fill="rgb(222,171,25)" rx="2" ry="2" />
+<text  x="526.04" y="783.5" >ImpEd..</text>
+</g>
+<g >
+<title>com::sun::star::ui::DocumentAcceleratorConfiguration::createWithDocumentRoot (3 samples, 13.04%)</title><rect x="625.7" y="821" width="153.9" height="15.0" fill="rgb(227,169,52)" rx="2" ry="2" />
+<text  x="628.65" y="831.5" >com::sun::star::ui:..</text>
+</g>
+<g >
+<title>ChildSession::_handleInput (5 samples, 21.74%)</title><rect x="10.0" y="1013" width="256.5" height="15.0" fill="rgb(208,11,1)" rx="2" ry="2" />
+<text  x="13.00" y="1023.5" >ChildSession::_handleInput</text>
+</g>
+<g >
+<title>OutputDevice::ImplLayout (1 samples, 4.35%)</title><rect x="779.6" y="725" width="51.3" height="15.0" fill="rgb(249,130,33)" rx="2" ry="2" />
+<text  x="782.57" y="735.5" >Outpu..</text>
+</g>
+<g >
+<title>OutputDevice::ImplDevicePixelToLogicWidth (1 samples, 4.35%)</title><rect x="523.0" y="661" width="51.3" height="15.0" fill="rgb(216,49,9)" rx="2" ry="2" />
+<text  x="526.04" y="671.5" >Outpu..</text>
+</g>
+<g >
+<title>_dl_relocate_object (3 samples, 13.04%)</title><rect x="882.2" y="533" width="153.9" height="15.0" fill="rgb(228,84,23)" rx="2" ry="2" />
+<text  x="885.17" y="543.5" >_dl_relocate_object</text>
+</g>
+<g >
+<title>SfxObjectShell::ImplGetSignatureState (3 samples, 13.04%)</title><rect x="882.2" y="933" width="153.9" height="15.0" fill="rgb(247,129,34)" rx="2" ry="2" />
+<text  x="885.17" y="943.5" >SfxObjectShell::Imp..</text>
+</g>
+<g >
+<title>__gxx_personality_v0 (3 samples, 13.04%)</title><rect x="625.7" y="645" width="153.9" height="15.0" fill="rgb(251,191,44)" rx="2" ry="2" />
+<text  x="628.65" y="655.5" >__gxx_personality_v0</text>
+</g>
+<g >
+<title>dp_misc::getDescriptionInfoset (1 samples, 4.35%)</title><rect x="830.9" y="805" width="51.3" height="15.0" fill="rgb(207,54,10)" rx="2" ry="2" />
+<text  x="833.87" y="815.5" >dp_mi..</text>
+</g>
+<g >
+<title>SvxColorTabPage::~SvxColorTabPage (3 samples, 13.04%)</title><rect x="10.0" y="773" width="153.9" height="15.0" fill="rgb(213,223,40)" rx="2" ry="2" />
+<text  x="13.00" y="783.5" >SvxColorTabPage::~S..</text>
+</g>
+<g >
+<title>kitbroker (23 samples, 100.00%)</title><rect x="10.0" y="1045" width="1180.0" height="15.0" fill="rgb(212,131,2)" rx="2" ry="2" />
+<text  x="13.00" y="1055.5" >kitbroker</text>
+</g>
+<g >
+<title>ComboBox::InsertEntry (1 samples, 4.35%)</title><rect x="779.6" y="789" width="51.3" height="15.0" fill="rgb(249,28,45)" rx="2" ry="2" />
+<text  x="782.57" y="799.5" >Combo..</text>
+</g>
+<g >
+<title>ChildSession::getCommandValues (1 samples, 4.35%)</title><rect x="317.8" y="965" width="51.3" height="15.0" fill="rgb(238,117,6)" rx="2" ry="2" />
+<text  x="320.83" y="975.5" >Child..</text>
+</g>
+<g >
+<title>VclBuilder::makeObject (1 samples, 4.35%)</title><rect x="779.6" y="949" width="51.3" height="15.0" fill="rgb(220,109,13)" rx="2" ry="2" />
+<text  x="782.57" y="959.5" >VclBu..</text>
+</g>
+<g >
+<title>svt::ToolboxController::bindListener (1 samples, 4.35%)</title><rect x="779.6" y="885" width="51.3" height="15.0" fill="rgb(223,164,23)" rx="2" ry="2" />
+<text  x="782.57" y="895.5" >svt::..</text>
+</g>
+<g >
+<title>SfxTabDialogController::Start_Impl (3 samples, 13.04%)</title><rect x="10.0" y="837" width="153.9" height="15.0" fill="rgb(205,85,13)" rx="2" ry="2" />
+<text  x="13.00" y="847.5" >SfxTabDialogControl..</text>
+</g>
+<g >
+<title>dp_registry::backend::bundle::(anonymous namespace)::BackendImpl::PackageImpl::getDisplayName (1 samples, 4.35%)</title><rect x="830.9" y="821" width="51.3" height="15.0" fill="rgb(244,89,49)" rx="2" ry="2" />
+<text  x="833.87" y="831.5" >dp_re..</text>
+</g>
+<g >
+<title>syscall (3 samples, 13.04%)</title><rect x="625.7" y="565" width="153.9" height="15.0" fill="rgb(212,152,29)" rx="2" ry="2" />
+<text  x="628.65" y="575.5" >syscall</text>
+</g>
+<g >
+<title>__sbrk (1 samples, 4.35%)</title><rect x="317.8" y="869" width="51.3" height="15.0" fill="rgb(248,199,26)" rx="2" ry="2" />
+<text  x="320.83" y="879.5" >__sbrk</text>
+</g>
+<g >
+<title>PORT_LoadLibraryFromOrigin (3 samples, 13.04%)</title><rect x="882.2" y="741" width="153.9" height="15.0" fill="rgb(221,136,0)" rx="2" ry="2" />
+<text  x="885.17" y="751.5" >PORT_LoadLibraryFro..</text>
+</g>
+<g >
+<title>vcl::Window::get_ungrouped_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="277" width="51.4" height="15.0" fill="rgb(253,8,6)" rx="2" ry="2" />
+<text  x="577.35" y="287.5" >vcl::..</text>
+</g>
+<g >
+<title>SfxTabPage::~SfxTabPage (3 samples, 13.04%)</title><rect x="10.0" y="757" width="153.9" height="15.0" fill="rgb(227,3,13)" rx="2" ry="2" />
+<text  x="13.00" y="767.5" >SfxTabPage::~SfxTab..</text>
+</g>
+<g >
+<title>ScTabView::SelectionChanged (2 samples, 8.70%)</title><rect x="163.9" y="821" width="102.6" height="15.0" fill="rgb(233,154,37)" rx="2" ry="2" />
+<text  x="166.91" y="831.5" >ScTabView::S..</text>
+</g>
+<g >
+<title>[libc.so.6] (1 samples, 4.35%)</title><rect x="163.9" y="725" width="51.3" height="15.0" fill="rgb(228,178,36)" rx="2" ry="2" />
+<text  x="166.91" y="735.5" >[libc..</text>
+</g>
+<g >
+<title>SfxObjectShell::SaveTo_Impl (1 samples, 4.35%)</title><rect x="471.7" y="949" width="51.3" height="15.0" fill="rgb(215,5,7)" rx="2" ry="2" />
+<text  x="474.74" y="959.5" >SfxOb..</text>
+</g>
+<g >
+<title>Dialog::StateChanged (1 samples, 4.35%)</title><rect x="574.3" y="837" width="51.4" height="15.0" fill="rgb(251,88,0)" rx="2" ry="2" />
+<text  x="577.35" y="847.5" >Dialo..</text>
+</g>
+<g >
+<title>SfxTabDialogController::runAsync (1 samples, 4.35%)</title><rect x="574.3" y="997" width="51.4" height="15.0" fill="rgb(215,82,10)" rx="2" ry="2" />
+<text  x="577.35" y="1007.5" >SfxTa..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 13.04%)</title><rect x="10.0" y="581" width="153.9" height="15.0" fill="rgb(206,119,34)" rx="2" ry="2" />
+<text  x="13.00" y="591.5" >handleUserProfileSi..</text>
+</g>
+<g >
+<title>SfxObjectShell::APISaveAs_Impl (1 samples, 4.35%)</title><rect x="266.5" y="949" width="51.3" height="15.0" fill="rgb(212,119,30)" rx="2" ry="2" />
+<text  x="269.52" y="959.5" >SfxOb..</text>
+</g>
+<g >
+<title>com_sun_star_comp_framework_DocumentAcceleratorConfiguration_get_implementation (3 samples, 13.04%)</title><rect x="625.7" y="757" width="153.9" height="15.0" fill="rgb(230,131,45)" rx="2" ry="2" />
+<text  x="628.65" y="767.5" >com_sun_star_comp_f..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 13.04%)</title><rect x="1036.1" y="933" width="153.9" height="15.0" fill="rgb(227,128,7)" rx="2" ry="2" />
+<text  x="1039.09" y="943.5" >handleUserProfileSi..</text>
+</g>
+<g >
+<title>VclBuilder::~VclBuilder (3 samples, 13.04%)</title><rect x="10.0" y="709" width="153.9" height="15.0" fill="rgb(224,146,53)" rx="2" ry="2" />
+<text  x="13.00" y="719.5" >VclBuilder::~VclBui..</text>
+</g>
+<g >
+<title>SfxObjectShell::GetDocumentSignatureInformation (3 samples, 13.04%)</title><rect x="882.2" y="917" width="153.9" height="15.0" fill="rgb(210,54,53)" rx="2" ry="2" />
+<text  x="885.17" y="927.5" >SfxObjectShell::Get..</text>
+</g>
+<g >
+<title>vcl::Window::get_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="245" width="51.4" height="15.0" fill="rgb(244,72,51)" rx="2" ry="2" />
+<text  x="577.35" y="255.5" >vcl::..</text>
+</g>
+<g >
+<title>[libc.so.6] (3 samples, 13.04%)</title><rect x="882.2" y="485" width="153.9" height="15.0" fill="rgb(212,217,13)" rx="2" ry="2" />
+<text  x="885.17" y="495.5" >[libc.so.6]</text>
+</g>
+<g >
+<title>vcl::Window::get_ungrouped_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="773" width="51.4" height="15.0" fill="rgb(234,185,13)" rx="2" ry="2" />
+<text  x="577.35" y="783.5" >vcl::..</text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (1 samples, 4.35%)</title><rect x="317.8" y="933" width="51.3" height="15.0" fill="rgb(214,82,48)" rx="2" ry="2" />
+<text  x="320.83" y="943.5" >cfree..</text>
+</g>
+<g >
+<title>xmlParseElementStart (1 samples, 4.35%)</title><rect x="830.9" y="709" width="51.3" height="15.0" fill="rgb(238,77,46)" rx="2" ry="2" />
+<text  x="833.87" y="719.5" >xmlPa..</text>
+</g>
+<g >
+<title>SfxObjectShell::APISaveAs_Impl (1 samples, 4.35%)</title><rect x="471.7" y="997" width="51.3" height="15.0" fill="rgb(223,169,50)" rx="2" ry="2" />
+<text  x="474.74" y="1007.5" >SfxOb..</text>
+</g>
+<g >
+<title>vcl::ScriptRun::next (1 samples, 4.35%)</title><rect x="779.6" y="677" width="51.3" height="15.0" fill="rgb(218,210,19)" rx="2" ry="2" />
+<text  x="782.57" y="687.5" >vcl::..</text>
+</g>
+<g >
+<title>vcl::Window::dispose (3 samples, 13.04%)</title><rect x="10.0" y="661" width="153.9" height="15.0" fill="rgb(230,224,49)" rx="2" ry="2" />
+<text  x="13.00" y="671.5" >vcl::Window::dispose</text>
+</g>
+<g >
+<title>VclContainer::getLayoutRequisition (1 samples, 4.35%)</title><rect x="574.3" y="261" width="51.4" height="15.0" fill="rgb(249,211,9)" rx="2" ry="2" />
+<text  x="577.35" y="271.5" >VclCo..</text>
+</g>
+<g >
+<title>vcl::Window::get_ungrouped_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="645" width="51.4" height="15.0" fill="rgb(224,70,2)" rx="2" ry="2" />
+<text  x="577.35" y="655.5" >vcl::..</text>
+</g>
+<g >
+<title>ScOutputData::LayoutStrings (1 samples, 4.35%)</title><rect x="420.4" y="917" width="51.3" height="15.0" fill="rgb(236,218,42)" rx="2" ry="2" />
+<text  x="423.43" y="927.5" >ScOut..</text>
+</g>
+<g >
+<title>syscall (3 samples, 13.04%)</title><rect x="1036.1" y="917" width="153.9" height="15.0" fill="rgb(227,73,0)" rx="2" ry="2" />
+<text  x="1039.09" y="927.5" >syscall</text>
+</g>
+<g >
+<title>SfxDispatcher::Execute (2 samples, 8.70%)</title><rect x="163.9" y="901" width="102.6" height="15.0" fill="rgb(224,87,40)" rx="2" ry="2" />
+<text  x="166.91" y="911.5" >SfxDispatche..</text>
+</g>
+<g >
+<title>void std::__introsort_loop&lt;__gnu_cxx::__normal_iterator&lt;std::vector&lt;com::sun::star::uno::Reference&lt;com::sun::star::deployment::XPackage&gt;, std::allocator&lt;com::sun::star::uno::Reference&lt;com::sun::star::deployment::XPackage&gt; &gt; &gt;*, std::vector&lt;std::vector&lt;com::sun::star::uno::Reference&lt;com::sun::star::deployment::XPackage&gt;, std::allocator&lt;com::sun::star::uno::Reference&lt;com::sun::star::deployment::XPackage&gt; &gt; &gt;, std::allocator&lt;std::vector&lt;com::sun::star::uno::Reference&lt;com::sun::star::deployment::XPackage&gt;, std::allocator&lt;com::sun::star::uno::Reference&lt;com::sun::star::deployment::XPackage&gt; &gt; &gt; &gt; &gt; &gt;, long, __gnu_cxx::__ops::_Iter_comp_iter&lt;(anonymous namespace)::CompIdentifiers&gt; &gt; (1 samples, 4.35%)</title><rect x="830.9" y="837" width="51.3" height="15.0" fill="rgb(232,69,24)" rx="2" ry="2" />
+<text  x="833.87" y="847.5" >void ..</text>
+</g>
+<g >
+<title>syscall (1 samples, 4.35%)</title><rect x="266.5" y="709" width="51.3" height="15.0" fill="rgb(209,60,54)" rx="2" ry="2" />
+<text  x="269.52" y="719.5" >syscall</text>
+</g>
+<g >
+<title>desktop::Desktop::doShutdown (1 samples, 4.35%)</title><rect x="830.9" y="917" width="51.3" height="15.0" fill="rgb(211,216,50)" rx="2" ry="2" />
+<text  x="833.87" y="927.5" >deskt..</text>
+</g>
+<g >
+<title>syscall (1 samples, 4.35%)</title><rect x="215.2" y="677" width="51.3" height="15.0" fill="rgb(241,109,18)" rx="2" ry="2" />
+<text  x="218.22" y="687.5" >syscall</text>
+</g>
+<g >
+<title>vcl::CommandInfoProvider::GetCommandShortcut (3 samples, 13.04%)</title><rect x="625.7" y="853" width="153.9" height="15.0" fill="rgb(209,116,38)" rx="2" ry="2" />
+<text  x="628.65" y="863.5" >vcl::CommandInfoPro..</text>
+</g>
+<g >
+<title>SfxObjectShell::PreDoSaveAs_Impl (1 samples, 4.35%)</title><rect x="471.7" y="965" width="51.3" height="15.0" fill="rgb(217,193,34)" rx="2" ry="2" />
+<text  x="474.74" y="975.5" >SfxOb..</text>
+</g>
+<g >
+<title>VclBuilder::handleObject (4 samples, 17.39%)</title><rect x="625.7" y="1013" width="205.2" height="15.0" fill="rgb(242,52,27)" rx="2" ry="2" />
+<text  x="628.65" y="1023.5" >VclBuilder::handleObject</text>
+</g>
+<g >
+<title>dp_manager::ExtensionManager::getAllExtensions (1 samples, 4.35%)</title><rect x="830.9" y="869" width="51.3" height="15.0" fill="rgb(242,164,11)" rx="2" ry="2" />
+<text  x="833.87" y="879.5" >dp_ma..</text>
+</g>
+<g >
+<title>ImplSVMain (1 samples, 4.35%)</title><rect x="830.9" y="949" width="51.3" height="15.0" fill="rgb(223,90,33)" rx="2" ry="2" />
+<text  x="833.87" y="959.5" >ImplS..</text>
+</g>
+<g >
+<title>ScTabView::UpdateAutoFillMark (2 samples, 8.70%)</title><rect x="163.9" y="805" width="102.6" height="15.0" fill="rgb(235,174,16)" rx="2" ry="2" />
+<text  x="166.91" y="815.5" >ScTabView::U..</text>
+</g>
+<g >
+<title>VclContainer::getLayoutRequisition (1 samples, 4.35%)</title><rect x="574.3" y="469" width="51.4" height="15.0" fill="rgb(206,175,31)" rx="2" ry="2" />
+<text  x="577.35" y="479.5" >VclCo..</text>
+</g>
+<g >
+<title>syscall (1 samples, 4.35%)</title><rect x="523.0" y="613" width="51.3" height="15.0" fill="rgb(221,28,46)" rx="2" ry="2" />
+<text  x="526.04" y="623.5" >syscall</text>
+</g>
+<g >
+<title>FontNameBox::Fill (1 samples, 4.35%)</title><rect x="779.6" y="837" width="51.3" height="15.0" fill="rgb(235,47,53)" rx="2" ry="2" />
+<text  x="782.57" y="847.5" >FontN..</text>
+</g>
+<g >
+<title>_int_free (1 samples, 4.35%)</title><rect x="317.8" y="917" width="51.3" height="15.0" fill="rgb(247,213,35)" rx="2" ry="2" />
+<text  x="320.83" y="927.5" >_int_..</text>
+</g>
+<g >
+<title>TabControl::ImplCalculateRequisition (1 samples, 4.35%)</title><rect x="574.3" y="325" width="51.4" height="15.0" fill="rgb(231,51,50)" rx="2" ry="2" />
+<text  x="577.35" y="335.5" >TabCo..</text>
+</g>
+<g >
+<title>all (23 samples, 100%)</title><rect x="10.0" y="1061" width="1180.0" height="15.0" fill="rgb(250,177,46)" rx="2" ry="2" />
+<text  x="13.00" y="1071.5" ></text>
+</g>
+<g >
+<title>vcl::Window::Show (1 samples, 4.35%)</title><rect x="574.3" y="885" width="51.4" height="15.0" fill="rgb(218,226,29)" rx="2" ry="2" />
+<text  x="577.35" y="895.5" >vcl::..</text>
+</g>
+<g >
+<title>vcl::Window::ImplCallInitShow (1 samples, 4.35%)</title><rect x="574.3" y="869" width="51.4" height="15.0" fill="rgb(224,6,20)" rx="2" ry="2" />
+<text  x="577.35" y="879.5" >vcl::..</text>
+</g>
+<g >
+<title>SECMOD_LoadModule (3 samples, 13.04%)</title><rect x="882.2" y="805" width="153.9" height="15.0" fill="rgb(240,96,34)" rx="2" ry="2" />
+<text  x="885.17" y="815.5" >SECMOD_LoadModule</text>
+</g>
+<g >
+<title>VclBox::calculateRequisition (1 samples, 4.35%)</title><rect x="574.3" y="693" width="51.4" height="15.0" fill="rgb(221,212,54)" rx="2" ry="2" />
+<text  x="577.35" y="703.5" >VclBo..</text>
+</g>
+<g >
+<title>SystemWindow::DoInitialLayout (1 samples, 4.35%)</title><rect x="574.3" y="821" width="51.4" height="15.0" fill="rgb(211,68,29)" rx="2" ry="2" />
+<text  x="577.35" y="831.5" >Syste..</text>
+</g>
+<g >
+<title>[libc.so.6] (1 samples, 4.35%)</title><rect x="317.8" y="837" width="51.3" height="15.0" fill="rgb(209,111,24)" rx="2" ry="2" />
+<text  x="320.83" y="847.5" >[libc..</text>
+</g>
+<g >
+<title>GraphicFilter::GraphicFilter (1 samples, 4.35%)</title><rect x="266.5" y="837" width="51.3" height="15.0" fill="rgb(253,161,22)" rx="2" ry="2" />
+<text  x="269.52" y="847.5" >Graph..</text>
+</g>
+<g >
+<title>[libc.so.6] (3 samples, 13.04%)</title><rect x="625.7" y="597" width="153.9" height="15.0" fill="rgb(214,170,22)" rx="2" ry="2" />
+<text  x="628.65" y="607.5" >[libc.so.6]</text>
+</g>
+<g >
+<title>ChildSession::unoCommand (5 samples, 21.74%)</title><rect x="10.0" y="997" width="256.5" height="15.0" fill="rgb(238,45,32)" rx="2" ry="2" />
+<text  x="13.00" y="1007.5" >ChildSession::unoCommand</text>
+</g>
+<g >
+<title>SfxTabDialogController::runAsync (3 samples, 13.04%)</title><rect x="10.0" y="853" width="153.9" height="15.0" fill="rgb(248,44,15)" rx="2" ry="2" />
+<text  x="13.00" y="863.5" >SfxTabDialogControl..</text>
+</g>
+<g >
+<title>oox::xls::WorkbookGlobals::~WorkbookGlobals (1 samples, 4.35%)</title><rect x="523.0" y="917" width="51.3" height="15.0" fill="rgb(225,162,24)" rx="2" ry="2" />
+<text  x="526.04" y="927.5" >oox::..</text>
+</g>
+<g >
+<title>ScTabView::MarkColumns (2 samples, 8.70%)</title><rect x="163.9" y="853" width="102.6" height="15.0" fill="rgb(213,93,32)" rx="2" ry="2" />
+<text  x="166.91" y="863.5" >ScTabView::M..</text>
+</g>
+<g >
+<title>SfxBaseModel::impl_store (1 samples, 4.35%)</title><rect x="471.7" y="1013" width="51.3" height="15.0" fill="rgb(237,199,50)" rx="2" ry="2" />
+<text  x="474.74" y="1023.5" >SfxBa..</text>
+</g>
+<g >
+<title>SalInstanceDialog::runAsync (1 samples, 4.35%)</title><rect x="574.3" y="949" width="51.4" height="15.0" fill="rgb(223,46,34)" rx="2" ry="2" />
+<text  x="577.35" y="959.5" >SalIn..</text>
+</g>
+<g >
+<title>NSS_InitReadWrite (3 samples, 13.04%)</title><rect x="882.2" y="837" width="153.9" height="15.0" fill="rgb(216,80,20)" rx="2" ry="2" />
+<text  x="885.17" y="847.5" >NSS_InitReadWrite</text>
+</g>
+<g >
+<title>[libc.so.6] (1 samples, 4.35%)</title><rect x="574.3" y="69" width="51.4" height="15.0" fill="rgb(221,125,47)" rx="2" ry="2" />
+<text  x="577.35" y="79.5" >[libc..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 4.35%)</title><rect x="830.9" y="661" width="51.3" height="15.0" fill="rgb(220,120,28)" rx="2" ry="2" />
+<text  x="833.87" y="671.5" >handl..</text>
+</g>
+<g >
+<title>sfx2::sidebar::SidebarToolBox::InsertItem (3 samples, 13.04%)</title><rect x="625.7" y="901" width="153.9" height="15.0" fill="rgb(216,141,49)" rx="2" ry="2" />
+<text  x="628.65" y="911.5" >sfx2::sidebar::Side..</text>
+</g>
+<g >
+<title>calcMaxs (1 samples, 4.35%)</title><rect x="574.3" y="485" width="51.4" height="15.0" fill="rgb(219,31,29)" rx="2" ry="2" />
+<text  x="577.35" y="495.5" >calcM..</text>
+</g>
+<g >
+<title>framework::PresetHandler::openTarget (3 samples, 13.04%)</title><rect x="625.7" y="725" width="153.9" height="15.0" fill="rgb(229,34,33)" rx="2" ry="2" />
+<text  x="628.65" y="735.5" >framework::PresetHa..</text>
+</g>
+<g >
+<title>syscall (1 samples, 4.35%)</title><rect x="779.6" y="613" width="51.3" height="15.0" fill="rgb(253,166,8)" rx="2" ry="2" />
+<text  x="782.57" y="623.5" >syscall</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 4.35%)</title><rect x="779.6" y="629" width="51.3" height="15.0" fill="rgb(216,210,53)" rx="2" ry="2" />
+<text  x="782.57" y="639.5" >handl..</text>
+</g>
+<g >
+<title>_Unwind_RaiseException (3 samples, 13.04%)</title><rect x="625.7" y="661" width="153.9" height="15.0" fill="rgb(236,188,9)" rx="2" ry="2" />
+<text  x="628.65" y="671.5" >_Unwind_RaiseExcept..</text>
+</g>
+<g >
+<title>SfxObjectShell::ExportTo (1 samples, 4.35%)</title><rect x="471.7" y="933" width="51.3" height="15.0" fill="rgb(226,43,43)" rx="2" ry="2" />
+<text  x="474.74" y="943.5" >SfxOb..</text>
+</g>
+<g >
+<title>vcl::Window::get_ungrouped_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="149" width="51.4" height="15.0" fill="rgb(215,175,24)" rx="2" ry="2" />
+<text  x="577.35" y="159.5" >vcl::..</text>
+</g>
+<g >
+<title>gray_convert_glyph (3 samples, 13.04%)</title><rect x="1036.1" y="1013" width="153.9" height="15.0" fill="rgb(228,128,26)" rx="2" ry="2" />
+<text  x="1039.09" y="1023.5" >gray_convert_glyph</text>
+</g>
+<g >
+<title>SwDocShell::Edit (1 samples, 4.35%)</title><rect x="574.3" y="1013" width="51.4" height="15.0" fill="rgb(210,192,32)" rx="2" ry="2" />
+<text  x="577.35" y="1023.5" >SwDoc..</text>
+</g>
+<g >
+<title>SfxObjectShell::SaveTo_Impl (1 samples, 4.35%)</title><rect x="266.5" y="901" width="51.3" height="15.0" fill="rgb(210,224,2)" rx="2" ry="2" />
+<text  x="269.52" y="911.5" >SfxOb..</text>
+</g>
+<g >
+<title>dl_open_worker (3 samples, 13.04%)</title><rect x="882.2" y="581" width="153.9" height="15.0" fill="rgb(235,229,4)" rx="2" ry="2" />
+<text  x="885.17" y="591.5" >dl_open_worker</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 13.04%)</title><rect x="882.2" y="469" width="153.9" height="15.0" fill="rgb(237,110,12)" rx="2" ry="2" />
+<text  x="885.17" y="479.5" >handleUserProfileSi..</text>
+</g>
+<g >
+<title>DocumentSignatureManager::init (3 samples, 13.04%)</title><rect x="882.2" y="885" width="153.9" height="15.0" fill="rgb(233,15,4)" rx="2" ry="2" />
+<text  x="885.17" y="895.5" >DocumentSignatureMa..</text>
+</g>
+<g >
+<title>ScGridWindow::UpdateAutoFillOverlay (2 samples, 8.70%)</title><rect x="163.9" y="789" width="102.6" height="15.0" fill="rgb(250,190,44)" rx="2" ry="2" />
+<text  x="166.91" y="799.5" >ScGridWindow..</text>
+</g>
+<g >
+<title>pthread_mutex_unlock@@GLIBC_2.2.5 (3 samples, 13.04%)</title><rect x="10.0" y="613" width="153.9" height="15.0" fill="rgb(236,183,9)" rx="2" ry="2" />
+<text  x="13.00" y="623.5" >pthread_mutex_unloc..</text>
+</g>
+<g >
+<title>vcl::Window::get_ungrouped_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="709" width="51.4" height="15.0" fill="rgb(231,35,48)" rx="2" ry="2" />
+<text  x="577.35" y="719.5" >vcl::..</text>
+</g>
+<g >
+<title>SfxObjectShell::ImportFrom (1 samples, 4.35%)</title><rect x="523.0" y="981" width="51.3" height="15.0" fill="rgb(251,12,11)" rx="2" ry="2" />
+<text  x="526.04" y="991.5" >SfxOb..</text>
+</g>
+<g >
+<title>doc_postUnoCommand (5 samples, 21.74%)</title><rect x="10.0" y="981" width="256.5" height="15.0" fill="rgb(217,154,1)" rx="2" ry="2" />
+<text  x="13.00" y="991.5" >doc_postUnoCommand</text>
+</g>
+<g >
+<title>FT_Outline_Decompose (3 samples, 13.04%)</title><rect x="1036.1" y="981" width="153.9" height="15.0" fill="rgb(235,81,39)" rx="2" ry="2" />
+<text  x="1039.09" y="991.5" >FT_Outline_Decompose</text>
+</g>
+<g >
+<title>JSInstanceBuilder::~JSInstanceBuilder (3 samples, 13.04%)</title><rect x="10.0" y="741" width="153.9" height="15.0" fill="rgb(206,32,13)" rx="2" ry="2" />
+<text  x="13.00" y="751.5" >JSInstanceBuilder::..</text>
+</g>
+<g >
+<title>SfxObjectShell::PreDoSaveAs_Impl (1 samples, 4.35%)</title><rect x="266.5" y="917" width="51.3" height="15.0" fill="rgb(247,39,23)" rx="2" ry="2" />
+<text  x="269.52" y="927.5" >SfxOb..</text>
+</g>
+<g >
+<title>GraphicFilter::ExportGraphic (1 samples, 4.35%)</title><rect x="471.7" y="901" width="51.3" height="15.0" fill="rgb(224,216,19)" rx="2" ry="2" />
+<text  x="474.74" y="911.5" >Graph..</text>
+</g>
+<g >
+<title>TabControl::calculateRequisition (1 samples, 4.35%)</title><rect x="574.3" y="629" width="51.4" height="15.0" fill="rgb(213,123,48)" rx="2" ry="2" />
+<text  x="577.35" y="639.5" >TabCo..</text>
+</g>
+<g >
+<title>vcl::Window::get_ungrouped_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="229" width="51.4" height="15.0" fill="rgb(253,186,1)" rx="2" ry="2" />
+<text  x="577.35" y="239.5" >vcl::..</text>
+</g>
+<g >
+<title>SfxDispatcher::Call_Impl (2 samples, 8.70%)</title><rect x="163.9" y="885" width="102.6" height="15.0" fill="rgb(241,125,24)" rx="2" ry="2" />
+<text  x="166.91" y="895.5" >SfxDispatche..</text>
+</g>
+<g >
+<title>OStorage::OpenStreamElement_Impl (3 samples, 13.04%)</title><rect x="625.7" y="693" width="153.9" height="15.0" fill="rgb(227,95,12)" rx="2" ry="2" />
+<text  x="628.65" y="703.5" >OStorage::OpenStrea..</text>
+</g>
+<g >
+<title>cppuhelper::ServiceManager::Data::Implementation::doCreateInstanceWithArguments (3 samples, 13.04%)</title><rect x="625.7" y="773" width="153.9" height="15.0" fill="rgb(245,155,41)" rx="2" ry="2" />
+<text  x="628.65" y="783.5" >cppuhelper::Service..</text>
+</g>
+<g >
+<title>ScTable::GetRowHeight (2 samples, 8.70%)</title><rect x="163.9" y="757" width="102.6" height="15.0" fill="rgb(211,100,9)" rx="2" ry="2" />
+<text  x="166.91" y="767.5" >ScTable::Get..</text>
+</g>
+<g >
+<title>OStorage::openStreamElement (3 samples, 13.04%)</title><rect x="625.7" y="709" width="153.9" height="15.0" fill="rgb(249,78,24)" rx="2" ry="2" />
+<text  x="628.65" y="719.5" >OStorage::openStrea..</text>
+</g>
+<g >
+<title>[libc.so.6] (3 samples, 13.04%)</title><rect x="1036.1" y="949" width="153.9" height="15.0" fill="rgb(239,209,45)" rx="2" ry="2" />
+<text  x="1039.09" y="959.5" >[libc.so.6]</text>
+</g>
+<g >
+<title>sfx2::sidebar::SidebarToolBox::InsertItem (1 samples, 4.35%)</title><rect x="779.6" y="933" width="51.3" height="15.0" fill="rgb(236,178,9)" rx="2" ry="2" />
+<text  x="782.57" y="943.5" >sfx2:..</text>
+</g>
+<g >
+<title>ScDrawStringsVars::TextChanged (1 samples, 4.35%)</title><rect x="420.4" y="885" width="51.3" height="15.0" fill="rgb(230,51,40)" rx="2" ry="2" />
+<text  x="423.43" y="895.5" >ScDra..</text>
+</g>
+<g >
+<title>loader_LoadLibInReferenceDir (3 samples, 13.04%)</title><rect x="882.2" y="725" width="153.9" height="15.0" fill="rgb(218,111,23)" rx="2" ry="2" />
+<text  x="885.17" y="735.5" >loader_LoadLibInRef..</text>
+</g>
+<g >
+<title>VclBuilder::handleObject (3 samples, 13.04%)</title><rect x="625.7" y="949" width="153.9" height="15.0" fill="rgb(252,117,27)" rx="2" ry="2" />
+<text  x="628.65" y="959.5" >VclBuilder::handleO..</text>
+</g>
+<g >
+<title>VclBuilder::insertObject (3 samples, 13.04%)</title><rect x="625.7" y="933" width="153.9" height="15.0" fill="rgb(246,20,24)" rx="2" ry="2" />
+<text  x="628.65" y="943.5" >VclBuilder::insertO..</text>
+</g>
+<g >
+<title>nss_Init (3 samples, 13.04%)</title><rect x="882.2" y="821" width="153.9" height="15.0" fill="rgb(251,215,19)" rx="2" ry="2" />
+<text  x="885.17" y="831.5" >nss_Init</text>
+</g>
+<g >
+<title>doc_paintTile (2 samples, 8.70%)</title><rect x="369.1" y="981" width="102.6" height="15.0" fill="rgb(246,213,48)" rx="2" ry="2" />
+<text  x="372.13" y="991.5" >doc_paintTile</text>
+</g>
+<g >
+<title>[coolforkit] (1 samples, 4.35%)</title><rect x="830.9" y="1013" width="51.3" height="15.0" fill="rgb(243,96,54)" rx="2" ry="2" />
+<text  x="833.87" y="1023.5" >[cool..</text>
+</g>
+<g >
+<title>[libc.so.6] (1 samples, 4.35%)</title><rect x="215.2" y="709" width="51.3" height="15.0" fill="rgb(246,184,39)" rx="2" ry="2" />
+<text  x="218.22" y="719.5" >[libc..</text>
+</g>
+<g >
+<title>ImplEntryType::GetTextGlyphs (1 samples, 4.35%)</title><rect x="779.6" y="741" width="51.3" height="15.0" fill="rgb(209,138,12)" rx="2" ry="2" />
+<text  x="782.57" y="751.5" >ImplE..</text>
+</g>
+<g >
+<title>syscall (1 samples, 4.35%)</title><rect x="830.9" y="645" width="51.3" height="15.0" fill="rgb(227,180,21)" rx="2" ry="2" />
+<text  x="833.87" y="655.5" >syscall</text>
+</g>
+<g >
+<title>ImpEditEngine::SetUpdateLayout (1 samples, 4.35%)</title><rect x="523.0" y="789" width="51.3" height="15.0" fill="rgb(209,123,2)" rx="2" ry="2" />
+<text  x="526.04" y="799.5" >ImpEd..</text>
+</g>
+<g >
+<title>vcl::bitmap::convertBitmap32To24Plus8 (1 samples, 4.35%)</title><rect x="471.7" y="869" width="51.3" height="15.0" fill="rgb(210,73,53)" rx="2" ry="2" />
+<text  x="474.74" y="879.5" >vcl::..</text>
+</g>
+<g >
+<title>sfx2::sidebar::ControllerFactory::CreateToolBoxController (1 samples, 4.35%)</title><rect x="779.6" y="901" width="51.3" height="15.0" fill="rgb(231,87,18)" rx="2" ry="2" />
+<text  x="782.57" y="911.5" >sfx2:..</text>
+</g>
+<g >
+<title>EditEngine::SetUpdateLayout (1 samples, 4.35%)</title><rect x="523.0" y="805" width="51.3" height="15.0" fill="rgb(249,146,11)" rx="2" ry="2" />
+<text  x="526.04" y="815.5" >EditE..</text>
+</g>
+<g >
+<title>vcl::CommandInfoProvider::GetTooltipForCommand (3 samples, 13.04%)</title><rect x="625.7" y="869" width="153.9" height="15.0" fill="rgb(217,60,6)" rx="2" ry="2" />
+<text  x="628.65" y="879.5" >vcl::CommandInfoPro..</text>
+</g>
+<g >
+<title>__brk (1 samples, 4.35%)</title><rect x="317.8" y="853" width="51.3" height="15.0" fill="rgb(223,198,18)" rx="2" ry="2" />
+<text  x="320.83" y="863.5" >__brk</text>
+</g>
+<g >
+<title>ScTabView::MarkCursor (2 samples, 8.70%)</title><rect x="163.9" y="837" width="102.6" height="15.0" fill="rgb(234,66,41)" rx="2" ry="2" />
+<text  x="166.91" y="847.5" >ScTabView::M..</text>
+</g>
+<g >
+<title>ScOutputData::DrawFrame (1 samples, 4.35%)</title><rect x="369.1" y="917" width="51.3" height="15.0" fill="rgb(249,90,46)" rx="2" ry="2" />
+<text  x="372.13" y="927.5" >ScOut..</text>
+</g>
+<g >
+<title>xmlParseDocument (1 samples, 4.35%)</title><rect x="830.9" y="757" width="51.3" height="15.0" fill="rgb(254,148,44)" rx="2" ry="2" />
+<text  x="833.87" y="767.5" >xmlPa..</text>
+</g>
+<g >
+<title>SvxFont::QuickGetTextSize (1 samples, 4.35%)</title><rect x="523.0" y="709" width="51.3" height="15.0" fill="rgb(225,112,26)" rx="2" ry="2" />
+<text  x="526.04" y="719.5" >SvxFo..</text>
+</g>
+<g >
+<title>vcl::Window::get_preferred_size (1 samples, 4.35%)</title><rect x="574.3" y="661" width="51.4" height="15.0" fill="rgb(210,147,9)" rx="2" ry="2" />
+<text  x="577.35" y="671.5" >vcl::..</text>
+</g>
+<g >
+<title>Edit::CalcMinimumSizeForText (1 samples, 4.35%)</title><rect x="574.3" y="117" width="51.4" height="15.0" fill="rgb(209,187,42)" rx="2" ry="2" />
+<text  x="577.35" y="127.5" >Edit:..</text>
+</g>
+<g >
+<title>Document::forwardToChild (1 samples, 4.35%)</title><rect x="317.8" y="1013" width="51.3" height="15.0" fill="rgb(215,100,9)" rx="2" ry="2" />
+<text  x="320.83" y="1023.5" >Docum..</text>
+</g>
+<g >
+<title>VclContainer::getLayoutRequisition (1 samples, 4.35%)</title><rect x="574.3" y="741" width="51.4" height="15.0" fill="rgb(206,173,49)" rx="2" ry="2" />
+<text  x="577.35" y="751.5" >VclCo..</text>
+</g>
+<g >
+<title>vcl::pngWrite (1 samples, 4.35%)</title><rect x="471.7" y="885" width="51.3" height="15.0" fill="rgb(208,74,29)" rx="2" ry="2" />
+<text  x="474.74" y="895.5" >vcl::..</text>
+</g>
+<g >
+<title>VclGrid::calculateRequisitionForSpacings (1 samples, 4.35%)</title><rect x="574.3" y="213" width="51.4" height="15.0" fill="rgb(221,206,33)" rx="2" ry="2" />
+<text  x="577.35" y="223.5" >VclGr..</text>
+</g>
+<g >
+<title>ScDocRowHeightUpdater::updateAll (1 samples, 4.35%)</title><rect x="523.0" y="869" width="51.3" height="15.0" fill="rgb(238,95,47)" rx="2" ry="2" />
+<text  x="526.04" y="879.5" >ScDoc..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 4.35%)</title><rect x="420.4" y="789" width="51.3" height="15.0" fill="rgb(228,78,53)" rx="2" ry="2" />
+<text  x="423.43" y="799.5" >handl..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 4.35%)</title><rect x="574.3" y="53" width="51.4" height="15.0" fill="rgb(236,29,38)" rx="2" ry="2" />
+<text  x="577.35" y="63.5" >handl..</text>
+</g>
+<g >
+<title>__cxxabiv1::__class_type_info::__do_catch (3 samples, 13.04%)</title><rect x="625.7" y="613" width="153.9" height="15.0" fill="rgb(223,65,39)" rx="2" ry="2" />
+<text  x="628.65" y="623.5" >__cxxabiv1::__class..</text>
+</g>
+<g >
+<title>VclBuilder::makeObject (3 samples, 13.04%)</title><rect x="625.7" y="917" width="153.9" height="15.0" fill="rgb(205,165,28)" rx="2" ry="2" />
+<text  x="628.65" y="927.5" >VclBuilder::makeObj..</text>
+</g>
+<g >
+<title>_dl_catch_exception (3 samples, 13.04%)</title><rect x="882.2" y="597" width="153.9" height="15.0" fill="rgb(222,221,33)" rx="2" ry="2" />
+<text  x="885.17" y="607.5" >_dl_catch_exception</text>
+</g>
+<g >
+<title>TabControl::ImplCalculateRequisition (1 samples, 4.35%)</title><rect x="574.3" y="613" width="51.4" height="15.0" fill="rgb(240,136,16)" rx="2" ry="2" />
+<text  x="577.35" y="623.5" >TabCo..</text>
+</g>
+</g>
+</svg>
