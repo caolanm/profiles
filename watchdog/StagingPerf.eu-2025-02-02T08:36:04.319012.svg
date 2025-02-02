@@ -1,0 +1,993 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="550" onload="init(evt)" viewBox="0 0 1200 550" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="550.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >StagingPerf.eu Watchdog Profile (2025-02-02T08:36:04.319012)</text>
+<text id="details" x="10.00" y="533" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="533" > </text>
+<g id="frames">
+<g >
+<title>comphelper::ThreadTaskTag::waitUntilDone (10 samples, 50.00%)</title><rect x="10.0" y="165" width="590.0" height="15.0" fill="rgb(229,20,14)" rx="2" ry="2" />
+<text  x="13.00" y="175.5" >comphelper::ThreadTaskTag::waitUntilDone</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveContents (4 samples, 20.00%)</title><rect x="954.0" y="309" width="236.0" height="15.0" fill="rgb(237,95,45)" rx="2" ry="2" />
+<text  x="957.00" y="319.5" >ZipPackageFolder::saveContents</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 5.00%)</title><rect x="600.0" y="117" width="59.0" height="15.0" fill="rgb(233,93,18)" rx="2" ry="2" />
+<text  x="603.00" y="127.5" >_IO_fu..</text>
+</g>
+<g >
+<title>OStorage_Impl::Commit (10 samples, 50.00%)</title><rect x="10.0" y="357" width="590.0" height="15.0" fill="rgb(244,200,40)" rx="2" ry="2" />
+<text  x="13.00" y="367.5" >OStorage_Impl::Commit</text>
+</g>
+<g >
+<title>SfxObjectShell::SaveTo_Impl (1 samples, 5.00%)</title><rect x="659.0" y="357" width="59.0" height="15.0" fill="rgb(235,181,3)" rx="2" ry="2" />
+<text  x="662.00" y="367.5" >SfxObj..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 5.00%)</title><rect x="895.0" y="133" width="59.0" height="15.0" fill="rgb(236,204,41)" rx="2" ry="2" />
+<text  x="898.00" y="143.5" >_IO_fu..</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::filter (1 samples, 5.00%)</title><rect x="600.0" y="421" width="59.0" height="15.0" fill="rgb(212,57,32)" rx="2" ry="2" />
+<text  x="603.00" y="431.5" >oox::x..</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::filter (10 samples, 50.00%)</title><rect x="10.0" y="437" width="590.0" height="15.0" fill="rgb(247,134,14)" rx="2" ry="2" />
+<text  x="13.00" y="447.5" >oox::xls::ExcelFilter::filter</text>
+</g>
+<g >
+<title>syscall (1 samples, 5.00%)</title><rect x="600.0" y="85" width="59.0" height="15.0" fill="rgb(246,105,12)" rx="2" ry="2" />
+<text  x="603.00" y="95.5" >syscall</text>
+</g>
+<g >
+<title>SfxObjectShell::SaveTo_Impl (1 samples, 5.00%)</title><rect x="600.0" y="453" width="59.0" height="15.0" fill="rgb(216,70,6)" rx="2" ry="2" />
+<text  x="603.00" y="463.5" >SfxObj..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 5.00%)</title><rect x="659.0" y="213" width="59.0" height="15.0" fill="rgb(224,169,54)" rx="2" ry="2" />
+<text  x="662.00" y="223.5" >_IO_fu..</text>
+</g>
+<g >
+<title>ScTabView::SetTabNo (1 samples, 5.00%)</title><rect x="895.0" y="309" width="59.0" height="15.0" fill="rgb(247,145,41)" rx="2" ry="2" />
+<text  x="898.00" y="319.5" >ScTabV..</text>
+</g>
+<g >
+<title>ZipPackage::commitChanges (10 samples, 50.00%)</title><rect x="10.0" y="341" width="590.0" height="15.0" fill="rgb(205,99,2)" rx="2" ry="2" />
+<text  x="13.00" y="351.5" >ZipPackage::commitChanges</text>
+</g>
+<g >
+<title>pthread_cond_wait (4 samples, 20.00%)</title><rect x="954.0" y="165" width="236.0" height="15.0" fill="rgb(209,171,45)" rx="2" ry="2" />
+<text  x="957.00" y="175.5" >pthread_cond_wait</text>
+</g>
+<g >
+<title>framework::Desktop::loadComponentFromURL (1 samples, 5.00%)</title><rect x="895.0" y="437" width="59.0" height="15.0" fill="rgb(231,134,13)" rx="2" ry="2" />
+<text  x="898.00" y="447.5" >framew..</text>
+</g>
+<g >
+<title>OStorage::commit (1 samples, 5.00%)</title><rect x="600.0" y="357" width="59.0" height="15.0" fill="rgb(236,9,10)" rx="2" ry="2" />
+<text  x="603.00" y="367.5" >OStora..</text>
+</g>
+<g >
+<title>lo_documentLoadWithOptions (1 samples, 5.00%)</title><rect x="895.0" y="453" width="59.0" height="15.0" fill="rgb(220,1,38)" rx="2" ry="2" />
+<text  x="898.00" y="463.5" >lo_doc..</text>
+</g>
+<g >
+<title>ScTabViewShell::afterCallbackRegistered (1 samples, 5.00%)</title><rect x="895.0" y="245" width="59.0" height="15.0" fill="rgb(225,8,19)" rx="2" ry="2" />
+<text  x="898.00" y="255.5" >ScTabV..</text>
+</g>
+<g >
+<title>SfxObjectShell::ExportTo (10 samples, 50.00%)</title><rect x="10.0" y="453" width="590.0" height="15.0" fill="rgb(205,135,46)" rx="2" ry="2" />
+<text  x="13.00" y="463.5" >SfxObjectShell::ExportTo</text>
+</g>
+<g >
+<title>oox::core::FilterBase::filter (10 samples, 50.00%)</title><rect x="10.0" y="421" width="590.0" height="15.0" fill="rgb(214,126,20)" rx="2" ry="2" />
+<text  x="13.00" y="431.5" >oox::core::FilterBase::filter</text>
+</g>
+<g >
+<title>ScTabView::TabChanged (1 samples, 5.00%)</title><rect x="895.0" y="293" width="59.0" height="15.0" fill="rgb(244,4,44)" rx="2" ry="2" />
+<text  x="898.00" y="303.5" >ScTabV..</text>
+</g>
+<g >
+<title>CRC32::updateSegment (1 samples, 5.00%)</title><rect x="600.0" y="165" width="59.0" height="15.0" fill="rgb(216,59,33)" rx="2" ry="2" />
+<text  x="603.00" y="175.5" >CRC32:..</text>
+</g>
+<g >
+<title>ScTable::SetOptimalHeight (3 samples, 15.00%)</title><rect x="718.0" y="229" width="177.0" height="15.0" fill="rgb(245,27,23)" rx="2" ry="2" />
+<text  x="721.00" y="239.5" >ScTable::SetOptimalHeight</text>
+</g>
+<g >
+<title>syscall (10 samples, 50.00%)</title><rect x="10.0" y="101" width="590.0" height="15.0" fill="rgb(224,152,12)" rx="2" ry="2" />
+<text  x="13.00" y="111.5" >syscall</text>
+</g>
+<g >
+<title>comphelper::ThreadPool::waitUntilDone (10 samples, 50.00%)</title><rect x="10.0" y="181" width="590.0" height="15.0" fill="rgb(231,90,10)" rx="2" ry="2" />
+<text  x="13.00" y="191.5" >comphelper::ThreadPool::waitUntilDone</text>
+</g>
+<g >
+<title>std::num_put&lt;char, std::ostreambuf_iterator&lt;char, std::char_traits&lt;char&gt; &gt; &gt;::_M_insert_int&lt;unsigned long&gt; (1 samples, 5.00%)</title><rect x="895.0" y="165" width="59.0" height="15.0" fill="rgb(229,131,37)" rx="2" ry="2" />
+<text  x="898.00" y="175.5" >std::n..</text>
+</g>
+<g >
+<title>SfxBaseModel::storeToURL (1 samples, 5.00%)</title><rect x="659.0" y="437" width="59.0" height="15.0" fill="rgb(233,105,31)" rx="2" ry="2" />
+<text  x="662.00" y="447.5" >SfxBas..</text>
+</g>
+<g >
+<title>framework::LoadEnv::loadComponentFromURL (1 samples, 5.00%)</title><rect x="895.0" y="421" width="59.0" height="15.0" fill="rgb(246,57,36)" rx="2" ry="2" />
+<text  x="898.00" y="431.5" >framew..</text>
+</g>
+<g >
+<title>doc_saveAs (1 samples, 5.00%)</title><rect x="659.0" y="453" width="59.0" height="15.0" fill="rgb(237,103,0)" rx="2" ry="2" />
+<text  x="662.00" y="463.5" >doc_sa..</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveChild (1 samples, 5.00%)</title><rect x="600.0" y="245" width="59.0" height="15.0" fill="rgb(233,133,1)" rx="2" ry="2" />
+<text  x="603.00" y="255.5" >ZipPac..</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveContents (4 samples, 20.00%)</title><rect x="954.0" y="277" width="236.0" height="15.0" fill="rgb(210,96,48)" rx="2" ry="2" />
+<text  x="957.00" y="287.5" >ZipPackageFolder::saveContents</text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (3 samples, 15.00%)</title><rect x="718.0" y="405" width="177.0" height="15.0" fill="rgb(239,169,2)" rx="2" ry="2" />
+<text  x="721.00" y="415.5" >framework::LoadEnv::imp..</text>
+</g>
+<g >
+<title>oox::core::FilterBase::filter (1 samples, 5.00%)</title><rect x="600.0" y="405" width="59.0" height="15.0" fill="rgb(209,14,46)" rx="2" ry="2" />
+<text  x="603.00" y="415.5" >oox::c..</text>
+</g>
+<g >
+<title>osl_thread_create_Impl (4 samples, 20.00%)</title><rect x="954.0" y="181" width="236.0" height="15.0" fill="rgb(227,123,32)" rx="2" ry="2" />
+<text  x="957.00" y="191.5" >osl_thread_create_Impl</text>
+</g>
+<g >
+<title>ZipOutputEntryParallel::writeStream (10 samples, 50.00%)</title><rect x="10.0" y="213" width="590.0" height="15.0" fill="rgb(248,216,30)" rx="2" ry="2" />
+<text  x="13.00" y="223.5" >ZipOutputEntryParallel::writeStream</text>
+</g>
+<g >
+<title>SfxObjectShell::PreDoSaveAs_Impl (1 samples, 5.00%)</title><rect x="659.0" y="373" width="59.0" height="15.0" fill="rgb(221,1,10)" rx="2" ry="2" />
+<text  x="662.00" y="383.5" >SfxObj..</text>
+</g>
+<g >
+<title>oox::xls::WorkbookGlobals::finalize (3 samples, 15.00%)</title><rect x="718.0" y="277" width="177.0" height="15.0" fill="rgb(244,160,48)" rx="2" ry="2" />
+<text  x="721.00" y="287.5" >oox::xls::WorkbookGloba..</text>
+</g>
+<g >
+<title>SfxBaseController::attachFrame (1 samples, 5.00%)</title><rect x="895.0" y="357" width="59.0" height="15.0" fill="rgb(240,181,35)" rx="2" ry="2" />
+<text  x="898.00" y="367.5" >SfxBas..</text>
+</g>
+<g >
+<title>XclExpRowBuffer::GetOrCreateRow (1 samples, 5.00%)</title><rect x="659.0" y="229" width="59.0" height="15.0" fill="rgb(207,205,50)" rx="2" ry="2" />
+<text  x="662.00" y="239.5" >XclExp..</text>
+</g>
+<g >
+<title>salhelper::Thread::launch (4 samples, 20.00%)</title><rect x="954.0" y="197" width="236.0" height="15.0" fill="rgb(234,75,24)" rx="2" ry="2" />
+<text  x="957.00" y="207.5" >salhelper::Thread::launch</text>
+</g>
+<g >
+<title>SfxObjectShell::ExportTo (1 samples, 5.00%)</title><rect x="659.0" y="341" width="59.0" height="15.0" fill="rgb(219,225,11)" rx="2" ry="2" />
+<text  x="662.00" y="351.5" >SfxObj..</text>
+</g>
+<g >
+<title>oox::core::FilterBase::filter (3 samples, 15.00%)</title><rect x="718.0" y="325" width="177.0" height="15.0" fill="rgb(242,223,24)" rx="2" ry="2" />
+<text  x="721.00" y="335.5" >oox::core::FilterBase::..</text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (1 samples, 5.00%)</title><rect x="895.0" y="373" width="59.0" height="15.0" fill="rgb(220,42,25)" rx="2" ry="2" />
+<text  x="898.00" y="383.5" >framew..</text>
+</g>
+<g >
+<title>XclExpCellTable::XclExpCellTable (1 samples, 5.00%)</title><rect x="659.0" y="245" width="59.0" height="15.0" fill="rgb(249,46,39)" rx="2" ry="2" />
+<text  x="662.00" y="255.5" >XclExp..</text>
+</g>
+<g >
+<title>Color::AsRGBHexString (1 samples, 5.00%)</title><rect x="895.0" y="197" width="59.0" height="15.0" fill="rgb(207,118,39)" rx="2" ry="2" />
+<text  x="898.00" y="207.5" >Color:..</text>
+</g>
+<g >
+<title>XclExpXmlStream::exportDocument (1 samples, 5.00%)</title><rect x="659.0" y="293" width="59.0" height="15.0" fill="rgb(207,158,10)" rx="2" ry="2" />
+<text  x="662.00" y="303.5" >XclExp..</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveChild (1 samples, 5.00%)</title><rect x="600.0" y="277" width="59.0" height="15.0" fill="rgb(221,53,27)" rx="2" ry="2" />
+<text  x="603.00" y="287.5" >ZipPac..</text>
+</g>
+<g >
+<title>framework::LoadEnv::start (1 samples, 5.00%)</title><rect x="895.0" y="389" width="59.0" height="15.0" fill="rgb(236,83,52)" rx="2" ry="2" />
+<text  x="898.00" y="399.5" >framew..</text>
+</g>
+<g >
+<title>ScColumn::GetOptimalHeight (3 samples, 15.00%)</title><rect x="718.0" y="213" width="177.0" height="15.0" fill="rgb(207,181,19)" rx="2" ry="2" />
+<text  x="721.00" y="223.5" >ScColumn::GetOptimalHei..</text>
+</g>
+<g >
+<title>framework::LoadEnv::startLoading (1 samples, 5.00%)</title><rect x="895.0" y="405" width="59.0" height="15.0" fill="rgb(250,96,31)" rx="2" ry="2" />
+<text  x="898.00" y="415.5" >framew..</text>
+</g>
+<g >
+<title>XclExpXmlStream::exportDocument (10 samples, 50.00%)</title><rect x="10.0" y="405" width="590.0" height="15.0" fill="rgb(205,190,51)" rx="2" ry="2" />
+<text  x="13.00" y="415.5" >XclExpXmlStream::exportDocument</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 5.00%)</title><rect x="600.0" y="101" width="59.0" height="15.0" fill="rgb(208,127,52)" rx="2" ry="2" />
+<text  x="603.00" y="111.5" >handle..</text>
+</g>
+<g >
+<title>OStorage_Impl::Commit (1 samples, 5.00%)</title><rect x="600.0" y="341" width="59.0" height="15.0" fill="rgb(240,31,4)" rx="2" ry="2" />
+<text  x="603.00" y="351.5" >OStora..</text>
+</g>
+<g >
+<title>std::__numpunct_cache&lt;char&gt;::_M_cache (1 samples, 5.00%)</title><rect x="895.0" y="149" width="59.0" height="15.0" fill="rgb(210,225,4)" rx="2" ry="2" />
+<text  x="898.00" y="159.5" >std::_..</text>
+</g>
+<g >
+<title>OStorage::commit (10 samples, 50.00%)</title><rect x="10.0" y="373" width="590.0" height="15.0" fill="rgb(233,56,32)" rx="2" ry="2" />
+<text  x="13.00" y="383.5" >OStorage::commit</text>
+</g>
+<g >
+<title>SfxViewShell::setLibreOfficeKitViewCallback (1 samples, 5.00%)</title><rect x="895.0" y="261" width="59.0" height="15.0" fill="rgb(216,91,49)" rx="2" ry="2" />
+<text  x="898.00" y="271.5" >SfxVie..</text>
+</g>
+<g >
+<title>SfxBaseModel::load (3 samples, 15.00%)</title><rect x="718.0" y="389" width="177.0" height="15.0" fill="rgb(241,12,41)" rx="2" ry="2" />
+<text  x="721.00" y="399.5" >SfxBaseModel::load</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveContents (10 samples, 50.00%)</title><rect x="10.0" y="245" width="590.0" height="15.0" fill="rgb(228,228,16)" rx="2" ry="2" />
+<text  x="13.00" y="255.5" >ZipPackageFolder::saveContents</text>
+</g>
+<g >
+<title>XclExpXmlStream::exportDocument (4 samples, 20.00%)</title><rect x="954.0" y="437" width="236.0" height="15.0" fill="rgb(217,148,12)" rx="2" ry="2" />
+<text  x="957.00" y="447.5" >XclExpXmlStream::exportDocument</text>
+</g>
+<g >
+<title>ZipPackageStream::saveChild (4 samples, 20.00%)</title><rect x="954.0" y="261" width="236.0" height="15.0" fill="rgb(218,159,12)" rx="2" ry="2" />
+<text  x="957.00" y="271.5" >ZipPackageStream::saveChild</text>
+</g>
+<g >
+<title>ZipPackage::commitChanges (4 samples, 20.00%)</title><rect x="954.0" y="373" width="236.0" height="15.0" fill="rgb(252,151,10)" rx="2" ry="2" />
+<text  x="957.00" y="383.5" >ZipPackage::commitChanges</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::filter (1 samples, 5.00%)</title><rect x="659.0" y="325" width="59.0" height="15.0" fill="rgb(209,74,44)" rx="2" ry="2" />
+<text  x="662.00" y="335.5" >oox::x..</text>
+</g>
+<g >
+<title>i18npool::BreakIteratorImpl::endOfScript (3 samples, 15.00%)</title><rect x="718.0" y="133" width="177.0" height="15.0" fill="rgb(213,178,0)" rx="2" ry="2" />
+<text  x="721.00" y="143.5" >i18npool::BreakIterator..</text>
+</g>
+<g >
+<title>oox::ZipStorage::implCommit (4 samples, 20.00%)</title><rect x="954.0" y="421" width="236.0" height="15.0" fill="rgb(238,216,42)" rx="2" ry="2" />
+<text  x="957.00" y="431.5" >oox::ZipStorage::implCommit</text>
+</g>
+<g >
+<title>ScDocument::GetStringScriptType (3 samples, 15.00%)</title><rect x="718.0" y="149" width="177.0" height="15.0" fill="rgb(227,228,27)" rx="2" ry="2" />
+<text  x="721.00" y="159.5" >ScDocument::GetStringSc..</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveChild (4 samples, 20.00%)</title><rect x="954.0" y="293" width="236.0" height="15.0" fill="rgb(222,66,10)" rx="2" ry="2" />
+<text  x="957.00" y="303.5" >ZipPackageFolder::saveChild</text>
+</g>
+<g >
+<title>ublock_getCode_73 (3 samples, 15.00%)</title><rect x="718.0" y="101" width="177.0" height="15.0" fill="rgb(251,129,11)" rx="2" ry="2" />
+<text  x="721.00" y="111.5" >ublock_getCode_73</text>
+</g>
+<g >
+<title>ScDocShell::UpdateAllRowHeights (3 samples, 15.00%)</title><rect x="718.0" y="261" width="177.0" height="15.0" fill="rgb(235,142,42)" rx="2" ry="2" />
+<text  x="721.00" y="271.5" >ScDocShell::UpdateAllRo..</text>
+</g>
+<g >
+<title>SfxObjectShell::APISaveAs_Impl (1 samples, 5.00%)</title><rect x="659.0" y="405" width="59.0" height="15.0" fill="rgb(207,182,12)" rx="2" ry="2" />
+<text  x="662.00" y="415.5" >SfxObj..</text>
+</g>
+<g >
+<title>ScColumn::HasEditCells (3 samples, 15.00%)</title><rect x="718.0" y="197" width="177.0" height="15.0" fill="rgb(220,193,35)" rx="2" ry="2" />
+<text  x="721.00" y="207.5" >ScColumn::HasEditCells</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveContents (1 samples, 5.00%)</title><rect x="600.0" y="229" width="59.0" height="15.0" fill="rgb(243,81,18)" rx="2" ry="2" />
+<text  x="603.00" y="239.5" >ZipPac..</text>
+</g>
+<g >
+<title>XclExpXmlStream::exportDocument (1 samples, 5.00%)</title><rect x="600.0" y="389" width="59.0" height="15.0" fill="rgb(222,214,41)" rx="2" ry="2" />
+<text  x="603.00" y="399.5" >XclExp..</text>
+</g>
+<g >
+<title>ScDocRowHeightUpdater::updateAll (3 samples, 15.00%)</title><rect x="718.0" y="245" width="177.0" height="15.0" fill="rgb(249,40,53)" rx="2" ry="2" />
+<text  x="721.00" y="255.5" >ScDocRowHeightUpdater::..</text>
+</g>
+<g >
+<title>framework::LoadEnv::start (3 samples, 15.00%)</title><rect x="718.0" y="421" width="177.0" height="15.0" fill="rgb(208,147,8)" rx="2" ry="2" />
+<text  x="721.00" y="431.5" >framework::LoadEnv::start</text>
+</g>
+<g >
+<title>oox::xls::WorkbookGlobals::~WorkbookGlobals (3 samples, 15.00%)</title><rect x="718.0" y="293" width="177.0" height="15.0" fill="rgb(231,109,5)" rx="2" ry="2" />
+<text  x="721.00" y="303.5" >oox::xls::WorkbookGloba..</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveChild (4 samples, 20.00%)</title><rect x="954.0" y="325" width="236.0" height="15.0" fill="rgb(228,177,16)" rx="2" ry="2" />
+<text  x="957.00" y="335.5" >ZipPackageFolder::saveChild</text>
+</g>
+<g >
+<title>ScTabView::ImplTabChanged (1 samples, 5.00%)</title><rect x="895.0" y="277" width="59.0" height="15.0" fill="rgb(254,4,1)" rx="2" ry="2" />
+<text  x="898.00" y="287.5" >ScTabV..</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveContents (10 samples, 50.00%)</title><rect x="10.0" y="309" width="590.0" height="15.0" fill="rgb(252,48,42)" rx="2" ry="2" />
+<text  x="13.00" y="319.5" >ZipPackageFolder::saveContents</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 15.00%)</title><rect x="718.0" y="69" width="177.0" height="15.0" fill="rgb(215,57,49)" rx="2" ry="2" />
+<text  x="721.00" y="79.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>ZipOutputEntryParallel::writeStream (4 samples, 20.00%)</title><rect x="954.0" y="245" width="236.0" height="15.0" fill="rgb(243,137,20)" rx="2" ry="2" />
+<text  x="957.00" y="255.5" >ZipOutputEntryParallel::writeSt..</text>
+</g>
+<g >
+<title>std::ostream::_M_insert&lt;unsigned long&gt; (1 samples, 5.00%)</title><rect x="895.0" y="181" width="59.0" height="15.0" fill="rgb(227,202,0)" rx="2" ry="2" />
+<text  x="898.00" y="191.5" >std::o..</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveChild (10 samples, 50.00%)</title><rect x="10.0" y="261" width="590.0" height="15.0" fill="rgb(219,139,39)" rx="2" ry="2" />
+<text  x="13.00" y="271.5" >ZipPackageFolder::saveChild</text>
+</g>
+<g >
+<title>u_getUnicodeProperties_73 (3 samples, 15.00%)</title><rect x="718.0" y="85" width="177.0" height="15.0" fill="rgb(240,154,14)" rx="2" ry="2" />
+<text  x="721.00" y="95.5" >u_getUnicodeProperties_73</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 5.00%)</title><rect x="659.0" y="197" width="59.0" height="15.0" fill="rgb(248,55,41)" rx="2" ry="2" />
+<text  x="662.00" y="207.5" >handle..</text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (3 samples, 15.00%)</title><rect x="718.0" y="373" width="177.0" height="15.0" fill="rgb(205,135,18)" rx="2" ry="2" />
+<text  x="721.00" y="383.5" >SfxObjectShell::DoLoad</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::importDocument (3 samples, 15.00%)</title><rect x="718.0" y="309" width="177.0" height="15.0" fill="rgb(214,183,39)" rx="2" ry="2" />
+<text  x="721.00" y="319.5" >oox::xls::ExcelFilter::..</text>
+</g>
+<g >
+<title>i18npool::BreakIteratorImpl::getScriptClass (3 samples, 15.00%)</title><rect x="718.0" y="117" width="177.0" height="15.0" fill="rgb(244,110,35)" rx="2" ry="2" />
+<text  x="721.00" y="127.5" >i18npool::BreakIterator..</text>
+</g>
+<g >
+<title>SfxBaseController::ConnectSfxFrame_Impl (1 samples, 5.00%)</title><rect x="895.0" y="341" width="59.0" height="15.0" fill="rgb(215,40,52)" rx="2" ry="2" />
+<text  x="898.00" y="351.5" >SfxBas..</text>
+</g>
+<g >
+<title>SfxBaseModel::impl_store (1 samples, 5.00%)</title><rect x="659.0" y="421" width="59.0" height="15.0" fill="rgb(244,65,31)" rx="2" ry="2" />
+<text  x="662.00" y="431.5" >SfxBas..</text>
+</g>
+<g >
+<title>OStorage::commit (4 samples, 20.00%)</title><rect x="954.0" y="405" width="236.0" height="15.0" fill="rgb(208,97,25)" rx="2" ry="2" />
+<text  x="957.00" y="415.5" >OStorage::commit</text>
+</g>
+<g >
+<title>oox::core::FilterBase::filter (4 samples, 20.00%)</title><rect x="954.0" y="453" width="236.0" height="15.0" fill="rgb(221,113,13)" rx="2" ry="2" />
+<text  x="957.00" y="463.5" >oox::core::FilterBase::filter</text>
+</g>
+<g >
+<title>ZipPackage::writeTempFile (4 samples, 20.00%)</title><rect x="954.0" y="357" width="236.0" height="15.0" fill="rgb(246,66,48)" rx="2" ry="2" />
+<text  x="957.00" y="367.5" >ZipPackage::writeTempFile</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveContents (1 samples, 5.00%)</title><rect x="600.0" y="261" width="59.0" height="15.0" fill="rgb(219,118,6)" rx="2" ry="2" />
+<text  x="603.00" y="271.5" >ZipPac..</text>
+</g>
+<g >
+<title>ZipPackage::writeTempFile (1 samples, 5.00%)</title><rect x="600.0" y="309" width="59.0" height="15.0" fill="rgb(216,9,5)" rx="2" ry="2" />
+<text  x="603.00" y="319.5" >ZipPac..</text>
+</g>
+<g >
+<title>svx::theme::notifyLOK (1 samples, 5.00%)</title><rect x="895.0" y="229" width="59.0" height="15.0" fill="rgb(206,64,18)" rx="2" ry="2" />
+<text  x="898.00" y="239.5" >svx::t..</text>
+</g>
+<g >
+<title>ZipPackage::writeTempFile (10 samples, 50.00%)</title><rect x="10.0" y="325" width="590.0" height="15.0" fill="rgb(216,112,27)" rx="2" ry="2" />
+<text  x="13.00" y="335.5" >ZipPackage::writeTempFile</text>
+</g>
+<g >
+<title>rtl_crc32 (1 samples, 5.00%)</title><rect x="600.0" y="149" width="59.0" height="15.0" fill="rgb(213,63,22)" rx="2" ry="2" />
+<text  x="603.00" y="159.5" >rtl_cr..</text>
+</g>
+<g >
+<title>ZipUtils::ThreadedDeflater::deflateWrite (10 samples, 50.00%)</title><rect x="10.0" y="197" width="590.0" height="15.0" fill="rgb(249,142,39)" rx="2" ry="2" />
+<text  x="13.00" y="207.5" >ZipUtils::ThreadedDeflater::deflateWrite</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::filter (3 samples, 15.00%)</title><rect x="718.0" y="341" width="177.0" height="15.0" fill="rgb(253,14,38)" rx="2" ry="2" />
+<text  x="721.00" y="351.5" >oox::xls::ExcelFilter::..</text>
+</g>
+<g >
+<title>ExcTable::FillAsTableXml (1 samples, 5.00%)</title><rect x="659.0" y="261" width="59.0" height="15.0" fill="rgb(251,225,46)" rx="2" ry="2" />
+<text  x="662.00" y="271.5" >ExcTab..</text>
+</g>
+<g >
+<title>ZipPackageStream::saveChild (10 samples, 50.00%)</title><rect x="10.0" y="229" width="590.0" height="15.0" fill="rgb(224,152,45)" rx="2" ry="2" />
+<text  x="13.00" y="239.5" >ZipPackageStream::saveChild</text>
+</g>
+<g >
+<title>oox::core::FilterBase::filter (1 samples, 5.00%)</title><rect x="659.0" y="309" width="59.0" height="15.0" fill="rgb(222,163,16)" rx="2" ry="2" />
+<text  x="662.00" y="319.5" >oox::c..</text>
+</g>
+<g >
+<title>oox::ZipStorage::implCommit (10 samples, 50.00%)</title><rect x="10.0" y="389" width="590.0" height="15.0" fill="rgb(205,79,17)" rx="2" ry="2" />
+<text  x="13.00" y="399.5" >oox::ZipStorage::implCommit</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 5.00%)</title><rect x="895.0" y="117" width="59.0" height="15.0" fill="rgb(242,17,17)" rx="2" ry="2" />
+<text  x="898.00" y="127.5" >handle..</text>
+</g>
+<g >
+<title>syscall (4 samples, 20.00%)</title><rect x="954.0" y="117" width="236.0" height="15.0" fill="rgb(223,160,34)" rx="2" ry="2" />
+<text  x="957.00" y="127.5" >syscall</text>
+</g>
+<g >
+<title>ZipUtils::ThreadedDeflater::deflateWrite (4 samples, 20.00%)</title><rect x="954.0" y="229" width="236.0" height="15.0" fill="rgb(243,41,38)" rx="2" ry="2" />
+<text  x="957.00" y="239.5" >ZipUtils::ThreadedDeflater::def..</text>
+</g>
+<g >
+<title>kitbroker (20 samples, 100.00%)</title><rect x="10.0" y="485" width="1180.0" height="15.0" fill="rgb(216,146,34)" rx="2" ry="2" />
+<text  x="13.00" y="495.5" >kitbroker</text>
+</g>
+<g >
+<title>all (20 samples, 100%)</title><rect x="10.0" y="501" width="1180.0" height="15.0" fill="rgb(250,35,31)" rx="2" ry="2" />
+<text  x="13.00" y="511.5" ></text>
+</g>
+<g >
+<title>crc32_z (1 samples, 5.00%)</title><rect x="600.0" y="133" width="59.0" height="15.0" fill="rgb(220,16,35)" rx="2" ry="2" />
+<text  x="603.00" y="143.5" >crc32_z</text>
+</g>
+<g >
+<title>ScColumn::GetRangeScriptType (3 samples, 15.00%)</title><rect x="718.0" y="181" width="177.0" height="15.0" fill="rgb(237,174,35)" rx="2" ry="2" />
+<text  x="721.00" y="191.5" >ScColumn::GetRangeScrip..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 15.00%)</title><rect x="718.0" y="53" width="177.0" height="15.0" fill="rgb(222,21,54)" rx="2" ry="2" />
+<text  x="721.00" y="63.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>framework::LoadEnv::startLoading (3 samples, 15.00%)</title><rect x="718.0" y="437" width="177.0" height="15.0" fill="rgb(211,1,40)" rx="2" ry="2" />
+<text  x="721.00" y="447.5" >framework::LoadEnv::sta..</text>
+</g>
+<g >
+<title>_IO_funlockfile (10 samples, 50.00%)</title><rect x="10.0" y="133" width="590.0" height="15.0" fill="rgb(238,171,14)" rx="2" ry="2" />
+<text  x="13.00" y="143.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>framework::LoadEnv::loadComponentFromURL (3 samples, 15.00%)</title><rect x="718.0" y="453" width="177.0" height="15.0" fill="rgb(237,48,49)" rx="2" ry="2" />
+<text  x="721.00" y="463.5" >framework::LoadEnv::loa..</text>
+</g>
+<g >
+<title>oox::ZipStorage::implCommit (1 samples, 5.00%)</title><rect x="600.0" y="373" width="59.0" height="15.0" fill="rgb(231,100,15)" rx="2" ry="2" />
+<text  x="603.00" y="383.5" >oox::Z..</text>
+</g>
+<g >
+<title>SfxObjectShell::ExportTo (1 samples, 5.00%)</title><rect x="600.0" y="437" width="59.0" height="15.0" fill="rgb(235,229,50)" rx="2" ry="2" />
+<text  x="603.00" y="447.5" >SfxObj..</text>
+</g>
+<g >
+<title>SfxObjectShell::ImportFrom (3 samples, 15.00%)</title><rect x="718.0" y="357" width="177.0" height="15.0" fill="rgb(251,27,48)" rx="2" ry="2" />
+<text  x="721.00" y="367.5" >SfxObjectShell::ImportF..</text>
+</g>
+<g >
+<title>ZipPackage::commitChanges (1 samples, 5.00%)</title><rect x="600.0" y="325" width="59.0" height="15.0" fill="rgb(206,205,2)" rx="2" ry="2" />
+<text  x="603.00" y="335.5" >ZipPac..</text>
+</g>
+<g >
+<title>ScColumn::UpdateScriptType (3 samples, 15.00%)</title><rect x="718.0" y="165" width="177.0" height="15.0" fill="rgb(215,202,52)" rx="2" ry="2" />
+<text  x="721.00" y="175.5" >ScColumn::UpdateScriptT..</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveContents (1 samples, 5.00%)</title><rect x="600.0" y="293" width="59.0" height="15.0" fill="rgb(224,179,45)" rx="2" ry="2" />
+<text  x="603.00" y="303.5" >ZipPac..</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveContents (4 samples, 20.00%)</title><rect x="954.0" y="341" width="236.0" height="15.0" fill="rgb(242,188,38)" rx="2" ry="2" />
+<text  x="957.00" y="351.5" >ZipPackageFolder::saveContents</text>
+</g>
+<g >
+<title>SfxObjectShell::CommonSaveAs_Impl (1 samples, 5.00%)</title><rect x="659.0" y="389" width="59.0" height="15.0" fill="rgb(225,100,1)" rx="2" ry="2" />
+<text  x="662.00" y="399.5" >SfxObj..</text>
+</g>
+<g >
+<title>ZipOutputEntryParallel::writeStream (1 samples, 5.00%)</title><rect x="600.0" y="197" width="59.0" height="15.0" fill="rgb(219,84,44)" rx="2" ry="2" />
+<text  x="603.00" y="207.5" >ZipOut..</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveChild (10 samples, 50.00%)</title><rect x="10.0" y="293" width="590.0" height="15.0" fill="rgb(241,198,19)" rx="2" ry="2" />
+<text  x="13.00" y="303.5" >ZipPackageFolder::saveChild</text>
+</g>
+<g >
+<title>syscall (3 samples, 15.00%)</title><rect x="718.0" y="37" width="177.0" height="15.0" fill="rgb(231,129,10)" rx="2" ry="2" />
+<text  x="721.00" y="47.5" >syscall</text>
+</g>
+<g >
+<title>OStorage_Impl::Commit (4 samples, 20.00%)</title><rect x="954.0" y="389" width="236.0" height="15.0" fill="rgb(248,120,36)" rx="2" ry="2" />
+<text  x="957.00" y="399.5" >OStorage_Impl::Commit</text>
+</g>
+<g >
+<title>ScTabViewShell::DoReadUserDataSequence (1 samples, 5.00%)</title><rect x="895.0" y="325" width="59.0" height="15.0" fill="rgb(212,3,25)" rx="2" ry="2" />
+<text  x="898.00" y="335.5" >ScTabV..</text>
+</g>
+<g >
+<title>pthread_cond_timedwait (10 samples, 50.00%)</title><rect x="10.0" y="149" width="590.0" height="15.0" fill="rgb(224,177,47)" rx="2" ry="2" />
+<text  x="13.00" y="159.5" >pthread_cond_timedwait</text>
+</g>
+<g >
+<title>[unknown] (20 samples, 100.00%)</title><rect x="10.0" y="469" width="1180.0" height="15.0" fill="rgb(248,109,22)" rx="2" ry="2" />
+<text  x="13.00" y="479.5" >[unknown]</text>
+</g>
+<g >
+<title>ZipUtils::ThreadedDeflater::deflateWrite (1 samples, 5.00%)</title><rect x="600.0" y="181" width="59.0" height="15.0" fill="rgb(250,143,46)" rx="2" ry="2" />
+<text  x="603.00" y="191.5" >ZipUti..</text>
+</g>
+<g >
+<title>ExcDocument::ReadDoc (1 samples, 5.00%)</title><rect x="659.0" y="277" width="59.0" height="15.0" fill="rgb(226,55,39)" rx="2" ry="2" />
+<text  x="662.00" y="287.5" >ExcDoc..</text>
+</g>
+<g >
+<title>syscall (1 samples, 5.00%)</title><rect x="659.0" y="181" width="59.0" height="15.0" fill="rgb(221,131,23)" rx="2" ry="2" />
+<text  x="662.00" y="191.5" >syscall</text>
+</g>
+<g >
+<title>comphelper::ThreadPool::pushTask (4 samples, 20.00%)</title><rect x="954.0" y="213" width="236.0" height="15.0" fill="rgb(248,105,21)" rx="2" ry="2" />
+<text  x="957.00" y="223.5" >comphelper::ThreadPool::pushTask</text>
+</g>
+<g >
+<title>_IO_funlockfile (4 samples, 20.00%)</title><rect x="954.0" y="149" width="236.0" height="15.0" fill="rgb(230,15,22)" rx="2" ry="2" />
+<text  x="957.00" y="159.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>handleUserProfileSignal (4 samples, 20.00%)</title><rect x="954.0" y="133" width="236.0" height="15.0" fill="rgb(216,15,5)" rx="2" ry="2" />
+<text  x="957.00" y="143.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>handleUserProfileSignal (10 samples, 50.00%)</title><rect x="10.0" y="117" width="590.0" height="15.0" fill="rgb(240,195,43)" rx="2" ry="2" />
+<text  x="13.00" y="127.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>ZipPackageStream::saveChild (1 samples, 5.00%)</title><rect x="600.0" y="213" width="59.0" height="15.0" fill="rgb(253,2,8)" rx="2" ry="2" />
+<text  x="603.00" y="223.5" >ZipPac..</text>
+</g>
+<g >
+<title>PaletteManager::generateJSON (1 samples, 5.00%)</title><rect x="895.0" y="213" width="59.0" height="15.0" fill="rgb(237,131,1)" rx="2" ry="2" />
+<text  x="898.00" y="223.5" >Palett..</text>
+</g>
+<g >
+<title>ZipPackageFolder::saveContents (10 samples, 50.00%)</title><rect x="10.0" y="277" width="590.0" height="15.0" fill="rgb(233,158,41)" rx="2" ry="2" />
+<text  x="13.00" y="287.5" >ZipPackageFolder::saveContents</text>
+</g>
+<g >
+<title>syscall (1 samples, 5.00%)</title><rect x="895.0" y="101" width="59.0" height="15.0" fill="rgb(231,124,53)" rx="2" ry="2" />
+<text  x="898.00" y="111.5" >syscall</text>
+</g>
+</g>
+</svg>
