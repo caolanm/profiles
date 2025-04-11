@@ -1,0 +1,1641 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="470" onload="init(evt)" viewBox="0 0 1200 470" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="470.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >StagingPerf.eu Watchdog Profile (2025-04-10T11:00:01.394349)</text>
+<text id="details" x="10.00" y="453" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="453" > </text>
+<g id="frames">
+<g >
+<title>SvpSalInstance::DoYield (2 samples, 0.02%)</title><rect x="1188.3" y="261" width="0.2" height="15.0" fill="rgb(244,224,32)" rx="2" ry="2" />
+<text  x="1191.33" y="271.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 0.02%)</title><rect x="1182.5" y="229" width="0.2" height="15.0" fill="rgb(211,93,23)" rx="2" ry="2" />
+<text  x="1185.46" y="239.5" ></text>
+</g>
+<g >
+<title>std::string::reserve (3 samples, 0.02%)</title><rect x="10.0" y="277" width="0.3" height="15.0" fill="rgb(253,76,32)" rx="2" ry="2" />
+<text  x="13.00" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.02%)</title><rect x="1188.5" y="261" width="0.2" height="15.0" fill="rgb(245,103,21)" rx="2" ry="2" />
+<text  x="1191.53" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (7 samples, 0.06%)</title><rect x="1184.5" y="197" width="0.7" height="15.0" fill="rgb(223,26,36)" rx="2" ry="2" />
+<text  x="1187.51" y="207.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.02%)</title><rect x="1185.9" y="37" width="0.3" height="15.0" fill="rgb(254,77,21)" rx="2" ry="2" />
+<text  x="1188.89" y="47.5" ></text>
+</g>
+<g >
+<title>vcl::graphic::loadFromURL (3 samples, 0.02%)</title><rect x="1185.9" y="181" width="0.3" height="15.0" fill="rgb(218,116,42)" rx="2" ry="2" />
+<text  x="1188.89" y="191.5" ></text>
+</g>
+<g >
+<title>ScXMLImportWrapper::Import (2 samples, 0.02%)</title><rect x="1186.4" y="325" width="0.2" height="15.0" fill="rgb(250,29,12)" rx="2" ry="2" />
+<text  x="1189.38" y="335.5" ></text>
+</g>
+<g >
+<title>SdrGraphicLink::DataChanged (3 samples, 0.02%)</title><rect x="1185.9" y="213" width="0.3" height="15.0" fill="rgb(244,156,41)" rx="2" ry="2" />
+<text  x="1188.89" y="223.5" ></text>
+</g>
+<g >
+<title>ImplSVMain (6 samples, 0.05%)</title><rect x="1187.0" y="277" width="0.6" height="15.0" fill="rgb(218,131,40)" rx="2" ry="2" />
+<text  x="1189.96" y="287.5" ></text>
+</g>
+<g >
+<title>ScXMLImportWrapper::ImportFromComponent (3 samples, 0.02%)</title><rect x="1185.9" y="357" width="0.3" height="15.0" fill="rgb(223,78,37)" rx="2" ry="2" />
+<text  x="1188.89" y="367.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (6 samples, 0.05%)</title><rect x="1187.0" y="341" width="0.6" height="15.0" fill="rgb(248,129,7)" rx="2" ry="2" />
+<text  x="1189.96" y="351.5" ></text>
+</g>
+<g >
+<title>SvxGraphicObject::setPropertyValueImpl (3 samples, 0.02%)</title><rect x="1185.9" y="245" width="0.3" height="15.0" fill="rgb(223,8,44)" rx="2" ry="2" />
+<text  x="1188.89" y="255.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__class_type_info::__do_dyncast (3 samples, 0.02%)</title><rect x="1182.7" y="245" width="0.2" height="15.0" fill="rgb(205,14,50)" rx="2" ry="2" />
+<text  x="1185.65" y="255.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::startFastElement (3 samples, 0.02%)</title><rect x="1185.9" y="309" width="0.3" height="15.0" fill="rgb(206,78,45)" rx="2" ry="2" />
+<text  x="1188.89" y="319.5" ></text>
+</g>
+<g >
+<title>lokit_main (23 samples, 0.19%)</title><rect x="1175.5" y="325" width="2.3" height="15.0" fill="rgb(235,207,40)" rx="2" ry="2" />
+<text  x="1178.50" y="335.5" ></text>
+</g>
+<g >
+<title>XMLPropStyleContext::FillPropertySet (2 samples, 0.02%)</title><rect x="1186.4" y="149" width="0.2" height="15.0" fill="rgb(228,150,40)" rx="2" ry="2" />
+<text  x="1189.38" y="159.5" ></text>
+</g>
+<g >
+<title>ClientSession::_handleInput (3 samples, 0.02%)</title><rect x="10.0" y="341" width="0.3" height="15.0" fill="rgb(233,106,28)" rx="2" ry="2" />
+<text  x="13.00" y="351.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::endFastElement (2 samples, 0.02%)</title><rect x="1186.4" y="261" width="0.2" height="15.0" fill="rgb(251,53,45)" rx="2" ry="2" />
+<text  x="1189.38" y="271.5" ></text>
+</g>
+<g >
+<title>WebSocketHandler::handleTCPStream (2 samples, 0.02%)</title><rect x="10.6" y="309" width="0.2" height="15.0" fill="rgb(207,3,31)" rx="2" ry="2" />
+<text  x="13.59" y="319.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (7 samples, 0.06%)</title><rect x="1184.5" y="229" width="0.7" height="15.0" fill="rgb(210,96,22)" rx="2" ry="2" />
+<text  x="1187.51" y="239.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (8 samples, 0.07%)</title><rect x="11.1" y="309" width="0.8" height="15.0" fill="rgb(252,191,28)" rx="2" ry="2" />
+<text  x="14.08" y="319.5" ></text>
+</g>
+<g >
+<title>Application::Execute (6 samples, 0.05%)</title><rect x="1187.6" y="229" width="0.5" height="15.0" fill="rgb(232,139,17)" rx="2" ry="2" />
+<text  x="1190.55" y="239.5" ></text>
+</g>
+<g >
+<title>Scheduler::CallbackTaskScheduling (6 samples, 0.05%)</title><rect x="1187.0" y="165" width="0.6" height="15.0" fill="rgb(233,18,8)" rx="2" ry="2" />
+<text  x="1189.96" y="175.5" ></text>
+</g>
+<g >
+<title>SocketPoll::poll (2 samples, 0.02%)</title><rect x="1188.5" y="357" width="0.2" height="15.0" fill="rgb(238,210,17)" rx="2" ry="2" />
+<text  x="1191.53" y="367.5" ></text>
+</g>
+<g >
+<title>ChildSession::_handleInput (19 samples, 0.16%)</title><rect x="1183.4" y="341" width="1.9" height="15.0" fill="rgb(212,82,28)" rx="2" ry="2" />
+<text  x="1186.44" y="351.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 0.02%)</title><rect x="1187.6" y="117" width="0.2" height="15.0" fill="rgb(243,227,37)" rx="2" ry="2" />
+<text  x="1190.55" y="127.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 0.02%)</title><rect x="1175.7" y="85" width="0.2" height="15.0" fill="rgb(243,169,50)" rx="2" ry="2" />
+<text  x="1178.70" y="95.5" ></text>
+</g>
+<g >
+<title>Scheduler::CallbackTaskScheduling (23 samples, 0.19%)</title><rect x="1175.5" y="165" width="2.3" height="15.0" fill="rgb(207,214,16)" rx="2" ry="2" />
+<text  x="1178.50" y="175.5" ></text>
+</g>
+<g >
+<title>createLibreOfficeKit (6 samples, 0.05%)</title><rect x="1187.0" y="373" width="0.6" height="15.0" fill="rgb(211,65,5)" rx="2" ry="2" />
+<text  x="1189.96" y="383.5" ></text>
+</g>
+<g >
+<title>docbroker (4 samples, 0.03%)</title><rect x="10.0" y="405" width="0.4" height="15.0" fill="rgb(251,227,11)" rx="2" ry="2" />
+<text  x="13.00" y="415.5" ></text>
+</g>
+<g >
+<title>Session::handleMessage (19 samples, 0.16%)</title><rect x="1181.6" y="341" width="1.8" height="15.0" fill="rgb(245,117,6)" rx="2" ry="2" />
+<text  x="1184.58" y="351.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::parseStream (2 samples, 0.02%)</title><rect x="1186.4" y="293" width="0.2" height="15.0" fill="rgb(247,155,34)" rx="2" ry="2" />
+<text  x="1189.38" y="303.5" ></text>
+</g>
+<g >
+<title>ImplSVMain (35 samples, 0.29%)</title><rect x="1177.8" y="261" width="3.4" height="15.0" fill="rgb(234,24,51)" rx="2" ry="2" />
+<text  x="1180.76" y="271.5" ></text>
+</g>
+<g >
+<title>ImplSVMain (6 samples, 0.05%)</title><rect x="1187.6" y="261" width="0.5" height="15.0" fill="rgb(233,171,2)" rx="2" ry="2" />
+<text  x="1190.55" y="271.5" ></text>
+</g>
+<g >
+<title>__libc_start_main (27 samples, 0.22%)</title><rect x="10.8" y="373" width="2.6" height="15.0" fill="rgb(233,157,22)" rx="2" ry="2" />
+<text  x="13.78" y="383.5" ></text>
+</g>
+<g >
+<title>desktop::Desktop::Main (2 samples, 0.02%)</title><rect x="1188.3" y="309" width="0.2" height="15.0" fill="rgb(227,0,23)" rx="2" ry="2" />
+<text  x="1191.33" y="319.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 0.02%)</title><rect x="10.9" y="293" width="0.2" height="15.0" fill="rgb(220,90,54)" rx="2" ry="2" />
+<text  x="13.88" y="303.5" ></text>
+</g>
+<g >
+<title>ScXMLImportWrapper::Import (3 samples, 0.02%)</title><rect x="1185.9" y="373" width="0.3" height="15.0" fill="rgb(232,39,45)" rx="2" ry="2" />
+<text  x="1188.89" y="383.5" ></text>
+</g>
+<g >
+<title>prisoner_poll (12 samples, 0.10%)</title><rect x="1188.5" y="405" width="1.2" height="15.0" fill="rgb(242,164,22)" rx="2" ry="2" />
+<text  x="1191.53" y="415.5" ></text>
+</g>
+<g >
+<title>osl_setCondition (5 samples, 0.04%)</title><rect x="1178.8" y="181" width="0.5" height="15.0" fill="rgb(219,178,16)" rx="2" ry="2" />
+<text  x="1181.83" y="191.5" ></text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (2 samples, 0.02%)</title><rect x="1186.4" y="277" width="0.2" height="15.0" fill="rgb(237,126,14)" rx="2" ry="2" />
+<text  x="1189.38" y="287.5" ></text>
+</g>
+<g >
+<title>__strcmp_avx2 (2 samples, 0.02%)</title><rect x="1182.5" y="245" width="0.2" height="15.0" fill="rgb(231,122,49)" rx="2" ry="2" />
+<text  x="1185.46" y="255.5" ></text>
+</g>
+<g >
+<title>desktop::Desktop::Main (35 samples, 0.29%)</title><rect x="1177.8" y="245" width="3.4" height="15.0" fill="rgb(229,228,11)" rx="2" ry="2" />
+<text  x="1180.76" y="255.5" ></text>
+</g>
+<g >
+<title>ImplYield (6 samples, 0.05%)</title><rect x="1187.0" y="229" width="0.6" height="15.0" fill="rgb(220,102,46)" rx="2" ry="2" />
+<text  x="1189.96" y="239.5" ></text>
+</g>
+<g >
+<title>sal_detail_log_report (5 samples, 0.04%)</title><rect x="1180.7" y="197" width="0.5" height="15.0" fill="rgb(240,42,50)" rx="2" ry="2" />
+<text  x="1183.69" y="207.5" ></text>
+</g>
+<g >
+<title>Session::handleMessage (19 samples, 0.16%)</title><rect x="1183.4" y="357" width="1.9" height="15.0" fill="rgb(215,178,36)" rx="2" ry="2" />
+<text  x="1186.44" y="367.5" ></text>
+</g>
+<g >
+<title>forkit_main (27 samples, 0.22%)</title><rect x="10.8" y="357" width="2.6" height="15.0" fill="rgb(232,2,52)" rx="2" ry="2" />
+<text  x="13.78" y="367.5" ></text>
+</g>
+<g >
+<title>WebSocketHandler::handleIncomingMessage (3 samples, 0.02%)</title><rect x="1185.5" y="325" width="0.3" height="15.0" fill="rgb(209,228,8)" rx="2" ry="2" />
+<text  x="1188.49" y="335.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (8 samples, 0.07%)</title><rect x="11.1" y="293" width="0.8" height="15.0" fill="rgb(226,159,21)" rx="2" ry="2" />
+<text  x="14.08" y="303.5" ></text>
+</g>
+<g >
+<title>SvpSalInstance::CheckTimeout (10 samples, 0.08%)</title><rect x="1177.9" y="165" width="0.9" height="15.0" fill="rgb(217,229,48)" rx="2" ry="2" />
+<text  x="1180.85" y="175.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 0.02%)</title><rect x="1184.3" y="213" width="0.2" height="15.0" fill="rgb(215,114,32)" rx="2" ry="2" />
+<text  x="1187.32" y="223.5" ></text>
+</g>
+<g >
+<title>pthread_cond_timedwait (3 samples, 0.02%)</title><rect x="1185.9" y="85" width="0.3" height="15.0" fill="rgb(229,145,1)" rx="2" ry="2" />
+<text  x="1188.89" y="95.5" ></text>
+</g>
+<g >
+<title>__strcmp_avx2 (2 samples, 0.02%)</title><rect x="1184.3" y="229" width="0.2" height="15.0" fill="rgb(212,50,0)" rx="2" ry="2" />
+<text  x="1187.32" y="239.5" ></text>
+</g>
+<g >
+<title>[unknown] (75 samples, 0.62%)</title><rect x="1181.2" y="389" width="7.3" height="15.0" fill="rgb(239,65,40)" rx="2" ry="2" />
+<text  x="1184.18" y="399.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;char, std::allocator&lt;char&gt; &gt;::_M_range_insert&lt;char const*&gt; (3 samples, 0.02%)</title><rect x="1188.7" y="357" width="0.3" height="15.0" fill="rgb(221,162,34)" rx="2" ry="2" />
+<text  x="1191.73" y="367.5" ></text>
+</g>
+<g >
+<title>sfx2::SvBaseLink::Update (3 samples, 0.02%)</title><rect x="1185.9" y="229" width="0.3" height="15.0" fill="rgb(230,223,28)" rx="2" ry="2" />
+<text  x="1188.89" y="239.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 0.02%)</title><rect x="1182.9" y="213" width="0.2" height="15.0" fill="rgb(217,89,0)" rx="2" ry="2" />
+<text  x="1185.95" y="223.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 0.02%)</title><rect x="1182.7" y="213" width="0.2" height="15.0" fill="rgb(223,84,16)" rx="2" ry="2" />
+<text  x="1185.65" y="223.5" ></text>
+</g>
+<g >
+<title>soffice_main (23 samples, 0.19%)</title><rect x="1175.5" y="293" width="2.3" height="15.0" fill="rgb(243,228,40)" rx="2" ry="2" />
+<text  x="1178.50" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 0.02%)</title><rect x="10.0" y="181" width="0.3" height="15.0" fill="rgb(252,166,30)" rx="2" ry="2" />
+<text  x="13.00" y="191.5" ></text>
+</g>
+<g >
+<title>StreamSocket::handlePoll (4 samples, 0.03%)</title><rect x="1189.3" y="309" width="0.4" height="15.0" fill="rgb(241,128,30)" rx="2" ry="2" />
+<text  x="1192.31" y="319.5" ></text>
+</g>
+<g >
+<title>ScDocShell::Load (2 samples, 0.02%)</title><rect x="1186.4" y="357" width="0.2" height="15.0" fill="rgb(216,107,9)" rx="2" ry="2" />
+<text  x="1189.38" y="367.5" ></text>
+</g>
+<g >
+<title>SvpSalInstance::ImplYield (10 samples, 0.08%)</title><rect x="1177.9" y="181" width="0.9" height="15.0" fill="rgb(233,104,50)" rx="2" ry="2" />
+<text  x="1180.85" y="191.5" ></text>
+</g>
+<g >
+<title>Application::Execute (2 samples, 0.02%)</title><rect x="1188.3" y="293" width="0.2" height="15.0" fill="rgb(224,25,51)" rx="2" ry="2" />
+<text  x="1191.33" y="303.5" ></text>
+</g>
+<g >
+<title>SocketPoll::poll (7 samples, 0.06%)</title><rect x="1189.0" y="325" width="0.7" height="15.0" fill="rgb(230,82,45)" rx="2" ry="2" />
+<text  x="1192.02" y="335.5" ></text>
+</g>
+<g >
+<title>utl::UcbStreamHelper::CreateStream (3 samples, 0.02%)</title><rect x="1185.9" y="165" width="0.3" height="15.0" fill="rgb(232,57,0)" rx="2" ry="2" />
+<text  x="1188.89" y="175.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.02%)</title><rect x="10.0" y="165" width="0.3" height="15.0" fill="rgb(205,219,28)" rx="2" ry="2" />
+<text  x="13.00" y="175.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.02%)</title><rect x="1177.9" y="69" width="0.2" height="15.0" fill="rgb(215,205,31)" rx="2" ry="2" />
+<text  x="1180.85" y="79.5" ></text>
+</g>
+<g >
+<title>SocketPoll::poll (3 samples, 0.02%)</title><rect x="10.5" y="357" width="0.3" height="15.0" fill="rgb(209,130,5)" rx="2" ry="2" />
+<text  x="13.49" y="367.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (3 samples, 0.02%)</title><rect x="1177.9" y="117" width="0.2" height="15.0" fill="rgb(246,24,2)" rx="2" ry="2" />
+<text  x="1180.85" y="127.5" ></text>
+</g>
+<g >
+<title>SvpSalInstance::ImplYield (2 samples, 0.02%)</title><rect x="1188.3" y="245" width="0.2" height="15.0" fill="rgb(215,43,15)" rx="2" ry="2" />
+<text  x="1191.33" y="255.5" ></text>
+</g>
+<g >
+<title>ScXMLImportWrapper::ImportFromComponent (2 samples, 0.02%)</title><rect x="1186.4" y="309" width="0.2" height="15.0" fill="rgb(226,216,16)" rx="2" ry="2" />
+<text  x="1189.38" y="319.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 0.02%)</title><rect x="1188.5" y="277" width="0.2" height="15.0" fill="rgb(250,11,0)" rx="2" ry="2" />
+<text  x="1191.53" y="287.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 0.02%)</title><rect x="1182.9" y="229" width="0.2" height="15.0" fill="rgb(243,170,27)" rx="2" ry="2" />
+<text  x="1185.95" y="239.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 0.02%)</title><rect x="1182.5" y="213" width="0.2" height="15.0" fill="rgb(215,77,6)" rx="2" ry="2" />
+<text  x="1185.46" y="223.5" ></text>
+</g>
+<g >
+<title>ScDocShell::LoadXML (2 samples, 0.02%)</title><rect x="1186.4" y="341" width="0.2" height="15.0" fill="rgb(246,88,46)" rx="2" ry="2" />
+<text  x="1189.38" y="351.5" ></text>
+</g>
+<g >
+<title>osl_waitCondition (3 samples, 0.02%)</title><rect x="1185.9" y="101" width="0.3" height="15.0" fill="rgb(219,215,5)" rx="2" ry="2" />
+<text  x="1188.89" y="111.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 0.02%)</title><rect x="10.6" y="293" width="0.2" height="15.0" fill="rgb(236,134,9)" rx="2" ry="2" />
+<text  x="13.59" y="303.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (35 samples, 0.29%)</title><rect x="1177.8" y="325" width="3.4" height="15.0" fill="rgb(253,223,5)" rx="2" ry="2" />
+<text  x="1180.76" y="335.5" ></text>
+</g>
+<g >
+<title>std::string::_Rep::_S_create (3 samples, 0.02%)</title><rect x="10.0" y="245" width="0.3" height="15.0" fill="rgb(226,153,33)" rx="2" ry="2" />
+<text  x="13.00" y="255.5" ></text>
+</g>
+<g >
+<title>SocketPoll::poll (4 samples, 0.03%)</title><rect x="1186.6" y="373" width="0.4" height="15.0" fill="rgb(225,57,26)" rx="2" ry="2" />
+<text  x="1189.57" y="383.5" ></text>
+</g>
+<g >
+<title>createLibreOfficeKit (23 samples, 0.19%)</title><rect x="1175.5" y="373" width="2.3" height="15.0" fill="rgb(232,152,30)" rx="2" ry="2" />
+<text  x="1178.50" y="383.5" ></text>
+</g>
+<g >
+<title>Session::handleMessage (3 samples, 0.02%)</title><rect x="10.0" y="357" width="0.3" height="15.0" fill="rgb(213,4,21)" rx="2" ry="2" />
+<text  x="13.00" y="367.5" ></text>
+</g>
+<g >
+<title>WebSocketHandler::handleIncomingMessage (2 samples, 0.02%)</title><rect x="10.6" y="325" width="0.2" height="15.0" fill="rgb(215,216,4)" rx="2" ry="2" />
+<text  x="13.59" y="335.5" ></text>
+</g>
+<g >
+<title>soffice_main (35 samples, 0.29%)</title><rect x="1177.8" y="277" width="3.4" height="15.0" fill="rgb(243,28,36)" rx="2" ry="2" />
+<text  x="1180.76" y="287.5" ></text>
+</g>
+<g >
+<title>sal_detail_log_report (2 samples, 0.02%)</title><rect x="1175.7" y="117" width="0.2" height="15.0" fill="rgb(209,218,51)" rx="2" ry="2" />
+<text  x="1178.70" y="127.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.02%)</title><rect x="1182.7" y="197" width="0.2" height="15.0" fill="rgb(248,50,50)" rx="2" ry="2" />
+<text  x="1185.65" y="207.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (4 samples, 0.03%)</title><rect x="1189.3" y="293" width="0.4" height="15.0" fill="rgb(225,0,49)" rx="2" ry="2" />
+<text  x="1192.31" y="303.5" ></text>
+</g>
+<g >
+<title>lo_runLoop (6 samples, 0.05%)</title><rect x="1187.6" y="293" width="0.5" height="15.0" fill="rgb(235,28,37)" rx="2" ry="2" />
+<text  x="1190.55" y="303.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 0.02%)</title><rect x="13.0" y="341" width="0.3" height="15.0" fill="rgb(209,119,35)" rx="2" ry="2" />
+<text  x="16.04" y="351.5" ></text>
+</g>
+<g >
+<title>kit_spare (58 samples, 0.48%)</title><rect x="1175.5" y="405" width="5.7" height="15.0" fill="rgb(230,10,22)" rx="2" ry="2" />
+<text  x="1178.50" y="415.5" ></text>
+</g>
+<g >
+<title>Scheduler::CallbackTaskScheduling (6 samples, 0.05%)</title><rect x="1177.9" y="149" width="0.5" height="15.0" fill="rgb(206,164,36)" rx="2" ry="2" />
+<text  x="1180.85" y="159.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 0.02%)</title><rect x="1177.9" y="85" width="0.2" height="15.0" fill="rgb(235,144,45)" rx="2" ry="2" />
+<text  x="1180.85" y="95.5" ></text>
+</g>
+<g >
+<title>Task::Start (3 samples, 0.02%)</title><rect x="1177.5" y="117" width="0.3" height="15.0" fill="rgb(212,210,11)" rx="2" ry="2" />
+<text  x="1180.46" y="127.5" ></text>
+</g>
+<g >
+<title>WebSocketHandler::handleTCPStream (4 samples, 0.03%)</title><rect x="1186.6" y="325" width="0.4" height="15.0" fill="rgb(212,49,28)" rx="2" ry="2" />
+<text  x="1189.57" y="335.5" ></text>
+</g>
+<g >
+<title>all (12,046 samples, 100%)</title><rect x="10.0" y="421" width="1180.0" height="15.0" fill="rgb(251,44,39)" rx="2" ry="2" />
+<text  x="13.00" y="431.5" ></text>
+</g>
+<g >
+<title>StreamSocket::handlePoll (4 samples, 0.03%)</title><rect x="1186.6" y="357" width="0.4" height="15.0" fill="rgb(209,222,14)" rx="2" ry="2" />
+<text  x="1189.57" y="367.5" ></text>
+</g>
+<g >
+<title>WebSocketHandler::handleTCPStream (3 samples, 0.02%)</title><rect x="10.0" y="373" width="0.3" height="15.0" fill="rgb(229,229,37)" rx="2" ry="2" />
+<text  x="13.00" y="383.5" ></text>
+</g>
+<g >
+<title>[unknown] (4 samples, 0.03%)</title><rect x="10.4" y="389" width="0.4" height="15.0" fill="rgb(254,120,33)" rx="2" ry="2" />
+<text  x="13.39" y="399.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 0.02%)</title><rect x="1175.7" y="101" width="0.2" height="15.0" fill="rgb(209,182,52)" rx="2" ry="2" />
+<text  x="1178.70" y="111.5" ></text>
+</g>
+<g >
+<title>__strlen_avx2 (6 samples, 0.05%)</title><rect x="1176.7" y="133" width="0.6" height="15.0" fill="rgb(216,133,27)" rx="2" ry="2" />
+<text  x="1179.68" y="143.5" ></text>
+</g>
+<g >
+<title>forkLibreOfficeKit (35 samples, 0.29%)</title><rect x="1177.8" y="373" width="3.4" height="15.0" fill="rgb(233,37,8)" rx="2" ry="2" />
+<text  x="1180.76" y="383.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (23 samples, 0.19%)</title><rect x="1175.5" y="341" width="2.3" height="15.0" fill="rgb(214,179,29)" rx="2" ry="2" />
+<text  x="1178.50" y="351.5" ></text>
+</g>
+<g >
+<title>start_thread (2 samples, 0.02%)</title><rect x="1189.8" y="373" width="0.2" height="15.0" fill="rgb(236,201,43)" rx="2" ry="2" />
+<text  x="1192.80" y="383.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__class_type_info::__do_dyncast (11 samples, 0.09%)</title><rect x="1183.4" y="245" width="1.1" height="15.0" fill="rgb(237,218,30)" rx="2" ry="2" />
+<text  x="1186.44" y="255.5" ></text>
+</g>
+<g >
+<title>soffice_main (6 samples, 0.05%)</title><rect x="1187.6" y="277" width="0.5" height="15.0" fill="rgb(217,148,37)" rx="2" ry="2" />
+<text  x="1190.55" y="287.5" ></text>
+</g>
+<g >
+<title>Document::forwardToChild (20 samples, 0.17%)</title><rect x="1183.4" y="373" width="2.0" height="15.0" fill="rgb(212,67,16)" rx="2" ry="2" />
+<text  x="1186.44" y="383.5" ></text>
+</g>
+<g >
+<title>Application::Execute (6 samples, 0.05%)</title><rect x="1187.0" y="245" width="0.6" height="15.0" fill="rgb(211,93,52)" rx="2" ry="2" />
+<text  x="1189.96" y="255.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 0.02%)</title><rect x="1177.9" y="101" width="0.2" height="15.0" fill="rgb(228,109,15)" rx="2" ry="2" />
+<text  x="1180.85" y="111.5" ></text>
+</g>
+<g >
+<title>malloc (3 samples, 0.02%)</title><rect x="10.0" y="213" width="0.3" height="15.0" fill="rgb(218,33,16)" rx="2" ry="2" />
+<text  x="13.00" y="223.5" ></text>
+</g>
+<g >
+<title>forkKit (6 samples, 0.05%)</title><rect x="1187.0" y="357" width="0.6" height="15.0" fill="rgb(250,7,18)" rx="2" ry="2" />
+<text  x="1189.96" y="367.5" ></text>
+</g>
+<g >
+<title>SvpSalInstance::ImplYield (3 samples, 0.02%)</title><rect x="1187.6" y="181" width="0.2" height="15.0" fill="rgb(211,163,26)" rx="2" ry="2" />
+<text  x="1190.55" y="191.5" ></text>
+</g>
+<g >
+<title>salhelper::ConditionWaiter::ConditionWaiter (3 samples, 0.02%)</title><rect x="1185.9" y="117" width="0.3" height="15.0" fill="rgb(209,209,2)" rx="2" ry="2" />
+<text  x="1188.89" y="127.5" ></text>
+</g>
+<g >
+<title>forkKit (6 samples, 0.05%)</title><rect x="1187.6" y="341" width="0.5" height="15.0" fill="rgb(240,110,26)" rx="2" ry="2" />
+<text  x="1190.55" y="351.5" ></text>
+</g>
+<g >
+<title>Timer::Start (2 samples, 0.02%)</title><rect x="1175.7" y="149" width="0.2" height="15.0" fill="rgb(248,176,13)" rx="2" ry="2" />
+<text  x="1178.70" y="159.5" ></text>
+</g>
+<g >
+<title>ImplYield (4 samples, 0.03%)</title><rect x="1187.6" y="213" width="0.3" height="15.0" fill="rgb(228,128,44)" rx="2" ry="2" />
+<text  x="1190.55" y="223.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__si_class_type_info::__do_dyncast (7 samples, 0.06%)</title><rect x="1184.5" y="245" width="0.7" height="15.0" fill="rgb(214,22,15)" rx="2" ry="2" />
+<text  x="1187.51" y="255.5" ></text>
+</g>
+<g >
+<title>SocketPoll::poll (3 samples, 0.02%)</title><rect x="1185.5" y="357" width="0.3" height="15.0" fill="rgb(219,83,47)" rx="2" ry="2" />
+<text  x="1188.49" y="367.5" ></text>
+</g>
+<g >
+<title>soffice_main (6 samples, 0.05%)</title><rect x="1187.0" y="293" width="0.6" height="15.0" fill="rgb(248,181,32)" rx="2" ry="2" />
+<text  x="1189.96" y="303.5" ></text>
+</g>
+<g >
+<title>Document::notifyViewInfo (2 samples, 0.02%)</title><rect x="1181.2" y="357" width="0.2" height="15.0" fill="rgb(239,197,14)" rx="2" ry="2" />
+<text  x="1184.18" y="367.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__vmi_class_type_info::__do_dyncast (15 samples, 0.12%)</title><rect x="1181.8" y="277" width="1.4" height="15.0" fill="rgb(215,106,30)" rx="2" ry="2" />
+<text  x="1184.77" y="287.5" ></text>
+</g>
+<g >
+<title>SocketPoll::pollingThreadEntry (7 samples, 0.06%)</title><rect x="1189.0" y="341" width="0.7" height="15.0" fill="rgb(226,5,40)" rx="2" ry="2" />
+<text  x="1192.02" y="351.5" ></text>
+</g>
+<g >
+<title>ScMyStylesImportHelper::SetStylesToRanges (2 samples, 0.02%)</title><rect x="1186.4" y="213" width="0.2" height="15.0" fill="rgb(218,101,27)" rx="2" ry="2" />
+<text  x="1189.38" y="223.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 0.02%)</title><rect x="1189.1" y="277" width="0.2" height="15.0" fill="rgb(228,220,18)" rx="2" ry="2" />
+<text  x="1192.12" y="287.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (6 samples, 0.05%)</title><rect x="12.0" y="293" width="0.5" height="15.0" fill="rgb(221,74,25)" rx="2" ry="2" />
+<text  x="14.96" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.02%)</title><rect x="1175.7" y="69" width="0.2" height="15.0" fill="rgb(252,207,40)" rx="2" ry="2" />
+<text  x="1178.70" y="79.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (6 samples, 0.05%)</title><rect x="1179.4" y="165" width="0.6" height="15.0" fill="rgb(247,226,54)" rx="2" ry="2" />
+<text  x="1182.42" y="175.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 0.02%)</title><rect x="10.9" y="277" width="0.2" height="15.0" fill="rgb(214,30,24)" rx="2" ry="2" />
+<text  x="13.88" y="287.5" ></text>
+</g>
+<g >
+<title>KitSocketPoll::kitPoll (3 samples, 0.02%)</title><rect x="1185.5" y="373" width="0.3" height="15.0" fill="rgb(227,118,3)" rx="2" ry="2" />
+<text  x="1188.49" y="383.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.02%)</title><rect x="12.5" y="293" width="0.2" height="15.0" fill="rgb(221,67,14)" rx="2" ry="2" />
+<text  x="15.55" y="303.5" ></text>
+</g>
+<g >
+<title>ImplYield (23 samples, 0.19%)</title><rect x="1175.5" y="229" width="2.3" height="15.0" fill="rgb(243,113,19)" rx="2" ry="2" />
+<text  x="1178.50" y="239.5" ></text>
+</g>
+<g >
+<title>soffice_main (2 samples, 0.02%)</title><rect x="1188.3" y="341" width="0.2" height="15.0" fill="rgb(244,88,53)" rx="2" ry="2" />
+<text  x="1191.33" y="351.5" ></text>
+</g>
+<g >
+<title>__clone (7 samples, 0.06%)</title><rect x="1189.0" y="389" width="0.7" height="15.0" fill="rgb(205,182,15)" rx="2" ry="2" />
+<text  x="1192.02" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (9 samples, 0.07%)</title><rect x="1183.4" y="197" width="0.9" height="15.0" fill="rgb(209,184,17)" rx="2" ry="2" />
+<text  x="1186.44" y="207.5" ></text>
+</g>
+<g >
+<title>StreamSocket::getPollEvents (2 samples, 0.02%)</title><rect x="10.9" y="309" width="0.2" height="15.0" fill="rgb(231,181,27)" rx="2" ry="2" />
+<text  x="13.88" y="319.5" ></text>
+</g>
+<g >
+<title>SvpSalYieldMutex::doAcquire (2 samples, 0.02%)</title><rect x="1178.4" y="149" width="0.2" height="15.0" fill="rgb(254,51,16)" rx="2" ry="2" />
+<text  x="1181.44" y="159.5" ></text>
+</g>
+<g >
+<title>ScCellRangesBase::setPropertyValuesTolerant (2 samples, 0.02%)</title><rect x="1186.4" y="101" width="0.2" height="15.0" fill="rgb(223,201,3)" rx="2" ry="2" />
+<text  x="1189.38" y="111.5" ></text>
+</g>
+<g >
+<title>sal_detail_log_report (14 samples, 0.12%)</title><rect x="1175.9" y="149" width="1.4" height="15.0" fill="rgb(209,9,17)" rx="2" ry="2" />
+<text  x="1178.89" y="159.5" ></text>
+</g>
+<g >
+<title>__dynamic_cast (19 samples, 0.16%)</title><rect x="1183.4" y="309" width="1.9" height="15.0" fill="rgb(251,134,32)" rx="2" ry="2" />
+<text  x="1186.44" y="319.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (4 samples, 0.03%)</title><rect x="1178.9" y="149" width="0.4" height="15.0" fill="rgb(212,38,31)" rx="2" ry="2" />
+<text  x="1181.93" y="159.5" ></text>
+</g>
+<g >
+<title>__dynamic_cast (15 samples, 0.12%)</title><rect x="1181.8" y="293" width="1.4" height="15.0" fill="rgb(252,77,2)" rx="2" ry="2" />
+<text  x="1184.77" y="303.5" ></text>
+</g>
+<g >
+<title>sfx2::LinkManager::GetGraphicFromAny (3 samples, 0.02%)</title><rect x="1185.9" y="197" width="0.3" height="15.0" fill="rgb(218,101,6)" rx="2" ry="2" />
+<text  x="1188.89" y="207.5" ></text>
+</g>
+<g >
+<title>doc_getCommandValues (19 samples, 0.16%)</title><rect x="1183.4" y="325" width="1.9" height="15.0" fill="rgb(244,111,29)" rx="2" ry="2" />
+<text  x="1186.44" y="335.5" ></text>
+</g>
+<g >
+<title>SvpSalInstance::DoYield (17 samples, 0.14%)</title><rect x="1177.8" y="197" width="1.6" height="15.0" fill="rgb(249,138,47)" rx="2" ry="2" />
+<text  x="1180.76" y="207.5" ></text>
+</g>
+<g >
+<title>createLibreOfficeKit (6 samples, 0.05%)</title><rect x="1187.6" y="357" width="0.5" height="15.0" fill="rgb(252,137,10)" rx="2" ry="2" />
+<text  x="1190.55" y="367.5" ></text>
+</g>
+<g >
+<title>SvpSalInstance::CheckTimeout (6 samples, 0.05%)</title><rect x="1187.0" y="181" width="0.6" height="15.0" fill="rgb(217,98,41)" rx="2" ry="2" />
+<text  x="1189.96" y="191.5" ></text>
+</g>
+<g >
+<title>desktop::Desktop::Main (23 samples, 0.19%)</title><rect x="1175.5" y="261" width="2.3" height="15.0" fill="rgb(241,156,16)" rx="2" ry="2" />
+<text  x="1178.50" y="271.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 0.02%)</title><rect x="12.5" y="325" width="0.2" height="15.0" fill="rgb(252,26,50)" rx="2" ry="2" />
+<text  x="15.55" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.02%)</title><rect x="1184.3" y="181" width="0.2" height="15.0" fill="rgb(244,115,43)" rx="2" ry="2" />
+<text  x="1187.32" y="191.5" ></text>
+</g>
+<g >
+<title>ScXMLImport::SetStyleToRanges (2 samples, 0.02%)</title><rect x="1186.4" y="165" width="0.2" height="15.0" fill="rgb(205,205,46)" rx="2" ry="2" />
+<text  x="1189.38" y="175.5" ></text>
+</g>
+<g >
+<title>WebSocketHandler::handleIncomingMessage (2 samples, 0.02%)</title><rect x="1188.5" y="325" width="0.2" height="15.0" fill="rgb(229,76,12)" rx="2" ry="2" />
+<text  x="1191.53" y="335.5" ></text>
+</g>
+<g >
+<title>lokit_main (6 samples, 0.05%)</title><rect x="1187.6" y="309" width="0.5" height="15.0" fill="rgb(231,149,47)" rx="2" ry="2" />
+<text  x="1190.55" y="319.5" ></text>
+</g>
+<g >
+<title>SdXMLGraphicObjectShapeContext::startFastElement (3 samples, 0.02%)</title><rect x="1185.9" y="293" width="0.3" height="15.0" fill="rgb(251,79,31)" rx="2" ry="2" />
+<text  x="1188.89" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (6 samples, 0.05%)</title><rect x="1176.7" y="85" width="0.6" height="15.0" fill="rgb(253,0,25)" rx="2" ry="2" />
+<text  x="1179.68" y="95.5" ></text>
+</g>
+<g >
+<title>Task::Start (2 samples, 0.02%)</title><rect x="1175.7" y="133" width="0.2" height="15.0" fill="rgb(231,37,9)" rx="2" ry="2" />
+<text  x="1178.70" y="143.5" ></text>
+</g>
+<g >
+<title>SocketPoll::pollingThreadEntry (2 samples, 0.02%)</title><rect x="1189.8" y="341" width="0.2" height="15.0" fill="rgb(216,63,30)" rx="2" ry="2" />
+<text  x="1192.80" y="351.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (8 samples, 0.07%)</title><rect x="1175.9" y="117" width="0.8" height="15.0" fill="rgb(208,137,29)" rx="2" ry="2" />
+<text  x="1178.89" y="127.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 0.02%)</title><rect x="1188.5" y="293" width="0.2" height="15.0" fill="rgb(242,189,48)" rx="2" ry="2" />
+<text  x="1191.53" y="303.5" ></text>
+</g>
+<g >
+<title>SvpSalYieldMutex::doAcquire (3 samples, 0.02%)</title><rect x="1187.6" y="165" width="0.2" height="15.0" fill="rgb(248,152,38)" rx="2" ry="2" />
+<text  x="1190.55" y="175.5" ></text>
+</g>
+<g >
+<title>createSubForKit (6 samples, 0.05%)</title><rect x="1187.6" y="373" width="0.5" height="15.0" fill="rgb(205,63,11)" rx="2" ry="2" />
+<text  x="1190.55" y="383.5" ></text>
+</g>
+<g >
+<title>syscall (6 samples, 0.05%)</title><rect x="1179.4" y="149" width="0.6" height="15.0" fill="rgb(240,80,29)" rx="2" ry="2" />
+<text  x="1182.42" y="159.5" ></text>
+</g>
+<g >
+<title>Document::forwardToChild (19 samples, 0.16%)</title><rect x="1181.6" y="357" width="1.8" height="15.0" fill="rgb(210,190,33)" rx="2" ry="2" />
+<text  x="1184.58" y="367.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (6 samples, 0.05%)</title><rect x="1181.9" y="245" width="0.6" height="15.0" fill="rgb(218,152,31)" rx="2" ry="2" />
+<text  x="1184.87" y="255.5" ></text>
+</g>
+<g >
+<title>utl::UcbLockBytes::CreateLockBytes (3 samples, 0.02%)</title><rect x="1185.9" y="133" width="0.3" height="15.0" fill="rgb(211,209,36)" rx="2" ry="2" />
+<text  x="1188.89" y="143.5" ></text>
+</g>
+<g >
+<title>ImplSVMain (2 samples, 0.02%)</title><rect x="1188.3" y="325" width="0.2" height="15.0" fill="rgb(247,85,29)" rx="2" ry="2" />
+<text  x="1191.33" y="335.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (5 samples, 0.04%)</title><rect x="1180.7" y="165" width="0.5" height="15.0" fill="rgb(246,37,46)" rx="2" ry="2" />
+<text  x="1183.69" y="175.5" ></text>
+</g>
+<g >
+<title>sal_detail_log_report (6 samples, 0.05%)</title><rect x="1179.4" y="197" width="0.6" height="15.0" fill="rgb(210,37,40)" rx="2" ry="2" />
+<text  x="1182.42" y="207.5" ></text>
+</g>
+<g >
+<title>__clone (2 samples, 0.02%)</title><rect x="1189.8" y="389" width="0.2" height="15.0" fill="rgb(237,165,46)" rx="2" ry="2" />
+<text  x="1192.80" y="399.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (8 samples, 0.07%)</title><rect x="1175.9" y="133" width="0.8" height="15.0" fill="rgb(235,92,45)" rx="2" ry="2" />
+<text  x="1178.89" y="143.5" ></text>
+</g>
+<g >
+<title>forkKit (23 samples, 0.19%)</title><rect x="1175.5" y="357" width="2.3" height="15.0" fill="rgb(252,7,50)" rx="2" ry="2" />
+<text  x="1178.50" y="367.5" ></text>
+</g>
+<g >
+<title>start_thread (7 samples, 0.06%)</title><rect x="1189.0" y="373" width="0.7" height="15.0" fill="rgb(228,91,22)" rx="2" ry="2" />
+<text  x="1192.02" y="383.5" ></text>
+</g>
+<g >
+<title>SocketPoll::pollingThreadEntry (2 samples, 0.02%)</title><rect x="1188.5" y="373" width="0.2" height="15.0" fill="rgb(222,155,36)" rx="2" ry="2" />
+<text  x="1191.53" y="383.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.03%)</title><rect x="1178.9" y="117" width="0.4" height="15.0" fill="rgb(242,143,1)" rx="2" ry="2" />
+<text  x="1181.93" y="127.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (4 samples, 0.03%)</title><rect x="1178.9" y="133" width="0.4" height="15.0" fill="rgb(212,68,15)" rx="2" ry="2" />
+<text  x="1181.93" y="143.5" ></text>
+</g>
+<g >
+<title>SocketPoll::poll (21 samples, 0.17%)</title><rect x="10.8" y="341" width="2.0" height="15.0" fill="rgb(227,61,36)" rx="2" ry="2" />
+<text  x="13.78" y="351.5" ></text>
+</g>
+<g >
+<title>StreamSocket::handlePoll (7 samples, 0.06%)</title><rect x="11.9" y="325" width="0.6" height="15.0" fill="rgb(221,35,7)" rx="2" ry="2" />
+<text  x="14.86" y="335.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (6 samples, 0.05%)</title><rect x="1176.7" y="101" width="0.6" height="15.0" fill="rgb(207,141,14)" rx="2" ry="2" />
+<text  x="1179.68" y="111.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.02%)</title><rect x="1182.5" y="197" width="0.2" height="15.0" fill="rgb(232,16,30)" rx="2" ry="2" />
+<text  x="1185.46" y="207.5" ></text>
+</g>
+<g >
+<title>SvXMLImportPropertyMapper::FillTolerantMultiPropertySet_ (2 samples, 0.02%)</title><rect x="1186.4" y="117" width="0.2" height="15.0" fill="rgb(244,136,34)" rx="2" ry="2" />
+<text  x="1189.38" y="127.5" ></text>
+</g>
+<g >
+<title>kitbroker (75 samples, 0.62%)</title><rect x="1181.2" y="405" width="7.3" height="15.0" fill="rgb(213,70,7)" rx="2" ry="2" />
+<text  x="1184.18" y="415.5" ></text>
+</g>
+<g >
+<title>SvXMLImportPropertyMapper::FillPropertySet (2 samples, 0.02%)</title><rect x="1186.4" y="133" width="0.2" height="15.0" fill="rgb(249,9,39)" rx="2" ry="2" />
+<text  x="1189.38" y="143.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (9 samples, 0.07%)</title><rect x="1183.4" y="213" width="0.9" height="15.0" fill="rgb(225,39,36)" rx="2" ry="2" />
+<text  x="1186.44" y="223.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 0.02%)</title><rect x="1185.9" y="53" width="0.3" height="15.0" fill="rgb(228,166,7)" rx="2" ry="2" />
+<text  x="1188.89" y="63.5" ></text>
+</g>
+<g >
+<title>Timer::Start (3 samples, 0.02%)</title><rect x="1177.5" y="133" width="0.3" height="15.0" fill="rgb(240,197,34)" rx="2" ry="2" />
+<text  x="1180.46" y="143.5" ></text>
+</g>
+<g >
+<title>sal_detail_log_report (3 samples, 0.02%)</title><rect x="1177.5" y="101" width="0.3" height="15.0" fill="rgb(219,204,39)" rx="2" ry="2" />
+<text  x="1180.46" y="111.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 0.02%)</title><rect x="12.5" y="309" width="0.2" height="15.0" fill="rgb(213,89,8)" rx="2" ry="2" />
+<text  x="15.55" y="319.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.02%)</title><rect x="1177.5" y="53" width="0.2" height="15.0" fill="rgb(216,119,16)" rx="2" ry="2" />
+<text  x="1180.46" y="63.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (7 samples, 0.06%)</title><rect x="1184.5" y="213" width="0.7" height="15.0" fill="rgb(237,61,40)" rx="2" ry="2" />
+<text  x="1187.51" y="223.5" ></text>
+</g>
+<g >
+<title>sal_detail_log_report (4 samples, 0.03%)</title><rect x="1178.9" y="165" width="0.4" height="15.0" fill="rgb(221,176,28)" rx="2" ry="2" />
+<text  x="1181.93" y="175.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 0.02%)</title><rect x="13.0" y="325" width="0.3" height="15.0" fill="rgb(232,39,4)" rx="2" ry="2" />
+<text  x="16.04" y="335.5" ></text>
+</g>
+<g >
+<title>ScCellRangesBase::SetOnePropertyValue (2 samples, 0.02%)</title><rect x="1186.4" y="85" width="0.2" height="15.0" fill="rgb(206,46,22)" rx="2" ry="2" />
+<text  x="1189.38" y="95.5" ></text>
+</g>
+<g >
+<title>forkKit (35 samples, 0.29%)</title><rect x="1177.8" y="341" width="3.4" height="15.0" fill="rgb(210,218,48)" rx="2" ry="2" />
+<text  x="1180.76" y="351.5" ></text>
+</g>
+<g >
+<title>execute_native_thread_routine (7 samples, 0.06%)</title><rect x="1189.0" y="357" width="0.7" height="15.0" fill="rgb(233,115,2)" rx="2" ry="2" />
+<text  x="1192.02" y="367.5" ></text>
+</g>
+<g >
+<title>SocketPoll::setupPollFds (10 samples, 0.08%)</title><rect x="10.9" y="325" width="1.0" height="15.0" fill="rgb(235,7,49)" rx="2" ry="2" />
+<text  x="13.88" y="335.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (6 samples, 0.05%)</title><rect x="1176.7" y="117" width="0.6" height="15.0" fill="rgb(226,67,45)" rx="2" ry="2" />
+<text  x="1179.68" y="127.5" ></text>
+</g>
+<g >
+<title>lo_runLoop (2 samples, 0.02%)</title><rect x="1188.3" y="357" width="0.2" height="15.0" fill="rgb(244,109,51)" rx="2" ry="2" />
+<text  x="1191.33" y="367.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (6 samples, 0.05%)</title><rect x="1187.6" y="325" width="0.5" height="15.0" fill="rgb(205,125,7)" rx="2" ry="2" />
+<text  x="1190.55" y="335.5" ></text>
+</g>
+<g >
+<title>execute_native_thread_routine (2 samples, 0.02%)</title><rect x="1189.8" y="357" width="0.2" height="15.0" fill="rgb(225,38,53)" rx="2" ry="2" />
+<text  x="1192.80" y="367.5" ></text>
+</g>
+<g >
+<title>createLibreOfficeKit (35 samples, 0.29%)</title><rect x="1177.8" y="357" width="3.4" height="15.0" fill="rgb(227,149,48)" rx="2" ry="2" />
+<text  x="1180.76" y="367.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; (3 samples, 0.02%)</title><rect x="10.0" y="293" width="0.3" height="15.0" fill="rgb(241,42,45)" rx="2" ry="2" />
+<text  x="13.00" y="303.5" ></text>
+</g>
+<g >
+<title>SvpSalYieldMutex::doRelease (2 samples, 0.02%)</title><rect x="1180.3" y="213" width="0.2" height="15.0" fill="rgb(239,122,31)" rx="2" ry="2" />
+<text  x="1183.30" y="223.5" ></text>
+</g>
+<g >
+<title>killing (11,863 samples, 98.48%)</title><rect x="13.4" y="405" width="1162.1" height="15.0" fill="rgb(236,40,47)" rx="2" ry="2" />
+<text  x="16.43" y="415.5" >killing</text>
+</g>
+<g >
+<title>SvxShape::_setPropertyValue (3 samples, 0.02%)</title><rect x="1185.9" y="261" width="0.3" height="15.0" fill="rgb(215,24,52)" rx="2" ry="2" />
+<text  x="1188.89" y="271.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 0.02%)</title><rect x="1184.3" y="197" width="0.2" height="15.0" fill="rgb(254,202,5)" rx="2" ry="2" />
+<text  x="1187.32" y="207.5" ></text>
+</g>
+<g >
+<title>WebSocketHandler::handleIncomingMessage (4 samples, 0.03%)</title><rect x="1186.6" y="341" width="0.4" height="15.0" fill="rgb(248,144,18)" rx="2" ry="2" />
+<text  x="1189.57" y="351.5" ></text>
+</g>
+<g >
+<title>ChildSession::_handleInput (19 samples, 0.16%)</title><rect x="1181.6" y="325" width="1.8" height="15.0" fill="rgb(254,122,54)" rx="2" ry="2" />
+<text  x="1184.58" y="335.5" ></text>
+</g>
+<g >
+<title>[unknown] (4 samples, 0.03%)</title><rect x="10.0" y="389" width="0.4" height="15.0" fill="rgb(247,107,17)" rx="2" ry="2" />
+<text  x="13.00" y="399.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::forwardToChild (3 samples, 0.02%)</title><rect x="10.0" y="309" width="0.3" height="15.0" fill="rgb(226,37,52)" rx="2" ry="2" />
+<text  x="13.00" y="319.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::parseStream (3 samples, 0.02%)</title><rect x="1185.9" y="341" width="0.3" height="15.0" fill="rgb(235,127,38)" rx="2" ry="2" />
+<text  x="1188.89" y="351.5" ></text>
+</g>
+<g >
+<title>SvpSalYieldMutex::IsCurrentThread (2 samples, 0.02%)</title><rect x="1180.0" y="213" width="0.2" height="15.0" fill="rgb(230,60,14)" rx="2" ry="2" />
+<text  x="1183.01" y="223.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__vmi_class_type_info::__do_dyncast (19 samples, 0.16%)</title><rect x="1183.4" y="293" width="1.9" height="15.0" fill="rgb(239,216,23)" rx="2" ry="2" />
+<text  x="1186.44" y="303.5" ></text>
+</g>
+<g >
+<title>SvpSalInstance::DoYield (4 samples, 0.03%)</title><rect x="1187.6" y="197" width="0.3" height="15.0" fill="rgb(216,161,44)" rx="2" ry="2" />
+<text  x="1190.55" y="207.5" ></text>
+</g>
+<g >
+<title>Scheduler::Lock (3 samples, 0.02%)</title><rect x="1177.9" y="133" width="0.2" height="15.0" fill="rgb(239,24,22)" rx="2" ry="2" />
+<text  x="1180.85" y="143.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_trylock@plt (3 samples, 0.02%)</title><rect x="1187.6" y="133" width="0.2" height="15.0" fill="rgb(207,116,25)" rx="2" ry="2" />
+<text  x="1190.55" y="143.5" ></text>
+</g>
+<g >
+<title>WebSocketHandler::handleTCPStream (3 samples, 0.02%)</title><rect x="1185.5" y="309" width="0.3" height="15.0" fill="rgb(218,52,17)" rx="2" ry="2" />
+<text  x="1188.49" y="319.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 0.03%)</title><rect x="1189.3" y="261" width="0.4" height="15.0" fill="rgb(237,29,22)" rx="2" ry="2" />
+<text  x="1192.31" y="271.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 0.02%)</title><rect x="10.6" y="277" width="0.2" height="15.0" fill="rgb(229,128,19)" rx="2" ry="2" />
+<text  x="13.59" y="287.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 0.02%)</title><rect x="1189.1" y="293" width="0.2" height="15.0" fill="rgb(210,197,51)" rx="2" ry="2" />
+<text  x="1192.12" y="303.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__vmi_class_type_info::__do_dyncast (19 samples, 0.16%)</title><rect x="1183.4" y="277" width="1.9" height="15.0" fill="rgb(221,1,49)" rx="2" ry="2" />
+<text  x="1186.44" y="287.5" ></text>
+</g>
+<g >
+<title>__memcpy_avx_unaligned_erms (2 samples, 0.02%)</title><rect x="1188.8" y="341" width="0.2" height="15.0" fill="rgb(226,77,20)" rx="2" ry="2" />
+<text  x="1191.82" y="351.5" ></text>
+</g>
+<g >
+<title>SvpSalInstance::DoYield (23 samples, 0.19%)</title><rect x="1175.5" y="213" width="2.3" height="15.0" fill="rgb(252,210,0)" rx="2" ry="2" />
+<text  x="1178.50" y="223.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.02%)</title><rect x="13.0" y="309" width="0.3" height="15.0" fill="rgb(220,101,46)" rx="2" ry="2" />
+<text  x="16.04" y="319.5" ></text>
+</g>
+<g >
+<title>SvpSalInstance::ImplYield (6 samples, 0.05%)</title><rect x="1187.0" y="197" width="0.6" height="15.0" fill="rgb(241,150,10)" rx="2" ry="2" />
+<text  x="1189.96" y="207.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.02%)</title><rect x="10.6" y="261" width="0.2" height="15.0" fill="rgb(206,178,21)" rx="2" ry="2" />
+<text  x="13.59" y="271.5" ></text>
+</g>
+<g >
+<title>SvpSalInstance::CheckTimeout (23 samples, 0.19%)</title><rect x="1175.5" y="181" width="2.3" height="15.0" fill="rgb(226,210,1)" rx="2" ry="2" />
+<text  x="1178.50" y="191.5" ></text>
+</g>
+<g >
+<title>operator new (3 samples, 0.02%)</title><rect x="10.0" y="229" width="0.3" height="15.0" fill="rgb(247,2,40)" rx="2" ry="2" />
+<text  x="13.00" y="239.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__si_class_type_info::__do_dyncast (3 samples, 0.02%)</title><rect x="1182.9" y="245" width="0.3" height="15.0" fill="rgb(208,41,6)" rx="2" ry="2" />
+<text  x="1185.95" y="255.5" ></text>
+</g>
+<g >
+<title>desktop::Desktop::Main (6 samples, 0.05%)</title><rect x="1187.6" y="245" width="0.5" height="15.0" fill="rgb(210,60,53)" rx="2" ry="2" />
+<text  x="1190.55" y="255.5" ></text>
+</g>
+<g >
+<title>ScMyTables::DeleteTable (2 samples, 0.02%)</title><rect x="1186.4" y="229" width="0.2" height="15.0" fill="rgb(241,104,27)" rx="2" ry="2" />
+<text  x="1189.38" y="239.5" ></text>
+</g>
+<g >
+<title>lokit_main (35 samples, 0.29%)</title><rect x="1177.8" y="309" width="3.4" height="15.0" fill="rgb(225,29,22)" rx="2" ry="2" />
+<text  x="1180.76" y="319.5" ></text>
+</g>
+<g >
+<title>forkit_main (3 samples, 0.02%)</title><rect x="10.5" y="373" width="0.3" height="15.0" fill="rgb(245,221,26)" rx="2" ry="2" />
+<text  x="13.49" y="383.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (6 samples, 0.05%)</title><rect x="12.0" y="309" width="0.5" height="15.0" fill="rgb(227,208,45)" rx="2" ry="2" />
+<text  x="14.96" y="319.5" ></text>
+</g>
+<g >
+<title>SvpSalInstance::ImplYield (23 samples, 0.19%)</title><rect x="1175.5" y="197" width="2.3" height="15.0" fill="rgb(236,204,50)" rx="2" ry="2" />
+<text  x="1178.50" y="207.5" ></text>
+</g>
+<g >
+<title>StreamSocket::handlePoll (3 samples, 0.02%)</title><rect x="10.5" y="341" width="0.3" height="15.0" fill="rgb(209,29,25)" rx="2" ry="2" />
+<text  x="13.49" y="351.5" ></text>
+</g>
+<g >
+<title>lokit_main (6 samples, 0.05%)</title><rect x="1187.0" y="325" width="0.6" height="15.0" fill="rgb(211,147,21)" rx="2" ry="2" />
+<text  x="1189.96" y="335.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 0.02%)</title><rect x="1188.8" y="325" width="0.2" height="15.0" fill="rgb(242,11,54)" rx="2" ry="2" />
+<text  x="1191.82" y="335.5" ></text>
+</g>
+<g >
+<title>desktop::Desktop::Main (6 samples, 0.05%)</title><rect x="1187.0" y="261" width="0.6" height="15.0" fill="rgb(248,95,26)" rx="2" ry="2" />
+<text  x="1189.96" y="271.5" ></text>
+</g>
+<g >
+<title>doc_getCommandValues (18 samples, 0.15%)</title><rect x="1181.7" y="309" width="1.7" height="15.0" fill="rgb(246,121,1)" rx="2" ry="2" />
+<text  x="1184.67" y="319.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (6 samples, 0.05%)</title><rect x="1179.4" y="181" width="0.6" height="15.0" fill="rgb(236,56,54)" rx="2" ry="2" />
+<text  x="1182.42" y="191.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::LoadOwnFormat (2 samples, 0.02%)</title><rect x="1186.4" y="373" width="0.2" height="15.0" fill="rgb(205,66,12)" rx="2" ry="2" />
+<text  x="1189.38" y="383.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 0.02%)</title><rect x="1182.7" y="229" width="0.2" height="15.0" fill="rgb(213,68,47)" rx="2" ry="2" />
+<text  x="1185.65" y="239.5" ></text>
+</g>
+<g >
+<title>syscall (8 samples, 0.07%)</title><rect x="11.1" y="277" width="0.8" height="15.0" fill="rgb(206,38,48)" rx="2" ry="2" />
+<text  x="14.08" y="287.5" ></text>
+</g>
+<g >
+<title>Document::drainQueue (19 samples, 0.16%)</title><rect x="1181.6" y="373" width="1.8" height="15.0" fill="rgb(235,136,48)" rx="2" ry="2" />
+<text  x="1184.58" y="383.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.02%)</title><rect x="1188.8" y="293" width="0.2" height="15.0" fill="rgb(236,62,9)" rx="2" ry="2" />
+<text  x="1191.82" y="303.5" ></text>
+</g>
+<g >
+<title>ScXMLTableContext::endFastElement (2 samples, 0.02%)</title><rect x="1186.4" y="245" width="0.2" height="15.0" fill="rgb(208,102,50)" rx="2" ry="2" />
+<text  x="1189.38" y="255.5" ></text>
+</g>
+<g >
+<title>SvpSalInstance::DoYield (6 samples, 0.05%)</title><rect x="1187.0" y="213" width="0.6" height="15.0" fill="rgb(215,133,9)" rx="2" ry="2" />
+<text  x="1189.96" y="223.5" ></text>
+</g>
+<g >
+<title>vcl::graphic::MemoryManager::ReduceMemoryTimerHandler (5 samples, 0.04%)</title><rect x="1177.3" y="149" width="0.5" height="15.0" fill="rgb(237,180,52)" rx="2" ry="2" />
+<text  x="1180.27" y="159.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__si_class_type_info::__do_dyncast (8 samples, 0.07%)</title><rect x="1181.9" y="261" width="0.8" height="15.0" fill="rgb(231,18,20)" rx="2" ry="2" />
+<text  x="1184.87" y="271.5" ></text>
+</g>
+<g >
+<title>osl_tryToAcquireMutex (3 samples, 0.02%)</title><rect x="1187.6" y="149" width="0.2" height="15.0" fill="rgb(233,186,33)" rx="2" ry="2" />
+<text  x="1190.55" y="159.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.02%)</title><rect x="10.9" y="261" width="0.2" height="15.0" fill="rgb(217,229,46)" rx="2" ry="2" />
+<text  x="13.88" y="271.5" ></text>
+</g>
+<g >
+<title>ScMyStyleRanges::SetStylesToRanges (2 samples, 0.02%)</title><rect x="1186.4" y="197" width="0.2" height="15.0" fill="rgb(242,146,46)" rx="2" ry="2" />
+<text  x="1189.38" y="207.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__vmi_class_type_info::__do_dyncast (6 samples, 0.05%)</title><rect x="1182.7" y="261" width="0.5" height="15.0" fill="rgb(228,66,37)" rx="2" ry="2" />
+<text  x="1185.65" y="271.5" ></text>
+</g>
+<g >
+<title>StreamSocket::handlePoll (3 samples, 0.02%)</title><rect x="1185.5" y="341" width="0.3" height="15.0" fill="rgb(238,0,44)" rx="2" ry="2" />
+<text  x="1188.49" y="351.5" ></text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (3 samples, 0.02%)</title><rect x="1185.9" y="325" width="0.3" height="15.0" fill="rgb(247,40,20)" rx="2" ry="2" />
+<text  x="1188.89" y="335.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (9 samples, 0.07%)</title><rect x="1183.4" y="229" width="0.9" height="15.0" fill="rgb(236,80,48)" rx="2" ry="2" />
+<text  x="1186.44" y="239.5" ></text>
+</g>
+<g >
+<title>ScXMLImport::SetStyleToRanges (2 samples, 0.02%)</title><rect x="1186.4" y="181" width="0.2" height="15.0" fill="rgb(207,227,42)" rx="2" ry="2" />
+<text  x="1189.38" y="191.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 0.02%)</title><rect x="10.0" y="197" width="0.3" height="15.0" fill="rgb(252,142,38)" rx="2" ry="2" />
+<text  x="13.00" y="207.5" ></text>
+</g>
+<g >
+<title>syscall (5 samples, 0.04%)</title><rect x="1180.7" y="149" width="0.5" height="15.0" fill="rgb(227,120,9)" rx="2" ry="2" />
+<text  x="1183.69" y="159.5" ></text>
+</g>
+<g >
+<title>lo_runLoop (35 samples, 0.29%)</title><rect x="1177.8" y="293" width="3.4" height="15.0" fill="rgb(236,139,41)" rx="2" ry="2" />
+<text  x="1180.76" y="303.5" ></text>
+</g>
+<g >
+<title>ImplYield (23 samples, 0.19%)</title><rect x="1177.8" y="213" width="2.2" height="15.0" fill="rgb(235,42,45)" rx="2" ry="2" />
+<text  x="1180.76" y="223.5" ></text>
+</g>
+<g >
+<title>syscall (6 samples, 0.05%)</title><rect x="1181.9" y="213" width="0.6" height="15.0" fill="rgb(227,0,20)" rx="2" ry="2" />
+<text  x="1184.87" y="223.5" ></text>
+</g>
+<g >
+<title>syscall (6 samples, 0.05%)</title><rect x="12.0" y="277" width="0.5" height="15.0" fill="rgb(211,93,49)" rx="2" ry="2" />
+<text  x="14.96" y="287.5" ></text>
+</g>
+<g >
+<title>ScShapeObj::setPropertyValue (3 samples, 0.02%)</title><rect x="1185.9" y="277" width="0.3" height="15.0" fill="rgb(228,114,3)" rx="2" ry="2" />
+<text  x="1188.89" y="287.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 0.02%)</title><rect x="1187.6" y="101" width="0.2" height="15.0" fill="rgb(252,196,9)" rx="2" ry="2" />
+<text  x="1190.55" y="111.5" ></text>
+</g>
+<g >
+<title>WebSocketHandler::handleTCPStream (2 samples, 0.02%)</title><rect x="1188.5" y="309" width="0.2" height="15.0" fill="rgb(239,49,24)" rx="2" ry="2" />
+<text  x="1191.53" y="319.5" ></text>
+</g>
+<g >
+<title>SocketPoll::poll (2 samples, 0.02%)</title><rect x="1189.8" y="325" width="0.2" height="15.0" fill="rgb(235,43,19)" rx="2" ry="2" />
+<text  x="1192.80" y="335.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (6 samples, 0.05%)</title><rect x="1181.9" y="229" width="0.6" height="15.0" fill="rgb(213,33,11)" rx="2" ry="2" />
+<text  x="1184.87" y="239.5" ></text>
+</g>
+<g >
+<title>lo_runLoop (6 samples, 0.05%)</title><rect x="1187.0" y="309" width="0.6" height="15.0" fill="rgb(233,103,8)" rx="2" ry="2" />
+<text  x="1189.96" y="319.5" ></text>
+</g>
+<g >
+<title>utl::lcl_CreateStream (3 samples, 0.02%)</title><rect x="1185.9" y="149" width="0.3" height="15.0" fill="rgb(240,192,25)" rx="2" ry="2" />
+<text  x="1188.89" y="159.5" ></text>
+</g>
+<g >
+<title>Application::Execute (23 samples, 0.19%)</title><rect x="1175.5" y="245" width="2.3" height="15.0" fill="rgb(217,144,8)" rx="2" ry="2" />
+<text  x="1178.50" y="255.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 0.02%)</title><rect x="1185.9" y="69" width="0.3" height="15.0" fill="rgb(227,152,28)" rx="2" ry="2" />
+<text  x="1188.89" y="79.5" ></text>
+</g>
+<g >
+<title>ClientSession::forwardToChild (3 samples, 0.02%)</title><rect x="10.0" y="325" width="0.3" height="15.0" fill="rgb(240,154,39)" rx="2" ry="2" />
+<text  x="13.00" y="335.5" ></text>
+</g>
+<g >
+<title>ChildSession::_handleInput (2 samples, 0.02%)</title><rect x="1181.2" y="373" width="0.2" height="15.0" fill="rgb(252,155,31)" rx="2" ry="2" />
+<text  x="1184.18" y="383.5" ></text>
+</g>
+<g >
+<title>std::string::_Rep::_M_clone (3 samples, 0.02%)</title><rect x="10.0" y="261" width="0.3" height="15.0" fill="rgb(248,26,1)" rx="2" ry="2" />
+<text  x="13.00" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.02%)</title><rect x="1182.9" y="197" width="0.2" height="15.0" fill="rgb(224,64,4)" rx="2" ry="2" />
+<text  x="1185.95" y="207.5" ></text>
+</g>
+<g >
+<title>lokit_main (2 samples, 0.02%)</title><rect x="1188.3" y="373" width="0.2" height="15.0" fill="rgb(229,5,47)" rx="2" ry="2" />
+<text  x="1191.33" y="383.5" ></text>
+</g>
+<g >
+<title>SvpSalYieldMutex::doAcquire (2 samples, 0.02%)</title><rect x="1187.9" y="213" width="0.2" height="15.0" fill="rgb(224,153,39)" rx="2" ry="2" />
+<text  x="1190.94" y="223.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 0.02%)</title><rect x="1177.5" y="69" width="0.2" height="15.0" fill="rgb(207,208,40)" rx="2" ry="2" />
+<text  x="1180.46" y="79.5" ></text>
+</g>
+<g >
+<title>[unknown] (5 samples, 0.04%)</title><rect x="1188.5" y="389" width="0.5" height="15.0" fill="rgb(211,121,51)" rx="2" ry="2" />
+<text  x="1191.53" y="399.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (4 samples, 0.03%)</title><rect x="1189.3" y="277" width="0.4" height="15.0" fill="rgb(234,189,20)" rx="2" ry="2" />
+<text  x="1192.31" y="287.5" ></text>
+</g>
+<g >
+<title>[unknown] (58 samples, 0.48%)</title><rect x="1175.5" y="389" width="5.7" height="15.0" fill="rgb(247,176,4)" rx="2" ry="2" />
+<text  x="1178.50" y="399.5" ></text>
+</g>
+<g >
+<title>forkit (31 samples, 0.26%)</title><rect x="10.4" y="405" width="3.0" height="15.0" fill="rgb(215,35,44)" rx="2" ry="2" />
+<text  x="13.39" y="415.5" ></text>
+</g>
+<g >
+<title>websrv_poll (2 samples, 0.02%)</title><rect x="1189.8" y="405" width="0.2" height="15.0" fill="rgb(232,56,38)" rx="2" ry="2" />
+<text  x="1192.80" y="415.5" ></text>
+</g>
+<g >
+<title>Application::Execute (35 samples, 0.29%)</title><rect x="1177.8" y="229" width="3.4" height="15.0" fill="rgb(251,224,53)" rx="2" ry="2" />
+<text  x="1180.76" y="239.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__vmi_class_type_info::__do_dyncast (19 samples, 0.16%)</title><rect x="1183.4" y="261" width="1.9" height="15.0" fill="rgb(234,39,52)" rx="2" ry="2" />
+<text  x="1186.44" y="271.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (5 samples, 0.04%)</title><rect x="1180.7" y="181" width="0.5" height="15.0" fill="rgb(238,158,13)" rx="2" ry="2" />
+<text  x="1183.69" y="191.5" ></text>
+</g>
+<g >
+<title>lo_runLoop (23 samples, 0.19%)</title><rect x="1175.5" y="309" width="2.3" height="15.0" fill="rgb(247,168,24)" rx="2" ry="2" />
+<text  x="1178.50" y="319.5" ></text>
+</g>
+<g >
+<title>WebSocketHandler::buildFrame (3 samples, 0.02%)</title><rect x="1188.7" y="373" width="0.3" height="15.0" fill="rgb(209,53,29)" rx="2" ry="2" />
+<text  x="1191.73" y="383.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 0.02%)</title><rect x="1188.8" y="309" width="0.2" height="15.0" fill="rgb(223,51,6)" rx="2" ry="2" />
+<text  x="1191.82" y="319.5" ></text>
+</g>
+<g >
+<title>osl_setCondition (5 samples, 0.04%)</title><rect x="1180.7" y="213" width="0.5" height="15.0" fill="rgb(248,136,10)" rx="2" ry="2" />
+<text  x="1183.69" y="223.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 0.02%)</title><rect x="1189.1" y="261" width="0.2" height="15.0" fill="rgb(232,137,13)" rx="2" ry="2" />
+<text  x="1192.12" y="271.5" ></text>
+</g>
+<g >
+<title>Scheduler::ImplStartTimer (2 samples, 0.02%)</title><rect x="1187.0" y="149" width="0.2" height="15.0" fill="rgb(247,106,3)" rx="2" ry="2" />
+<text  x="1189.96" y="159.5" ></text>
+</g>
+<g >
+<title>syscall (8 samples, 0.07%)</title><rect x="1175.9" y="101" width="0.8" height="15.0" fill="rgb(227,80,25)" rx="2" ry="2" />
+<text  x="1178.89" y="111.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 0.02%)</title><rect x="1187.6" y="85" width="0.2" height="15.0" fill="rgb(249,124,26)" rx="2" ry="2" />
+<text  x="1190.55" y="95.5" ></text>
+</g>
+<g >
+<title>_start (27 samples, 0.22%)</title><rect x="10.8" y="389" width="2.6" height="15.0" fill="rgb(246,16,53)" rx="2" ry="2" />
+<text  x="13.78" y="399.5" ></text>
+</g>
+<g >
+<title>StreamSocket::handlePoll (2 samples, 0.02%)</title><rect x="1188.5" y="341" width="0.2" height="15.0" fill="rgb(211,68,21)" rx="2" ry="2" />
+<text  x="1191.53" y="351.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 0.02%)</title><rect x="1177.5" y="85" width="0.2" height="15.0" fill="rgb(211,136,0)" rx="2" ry="2" />
+<text  x="1180.46" y="95.5" ></text>
+</g>
+<g >
+<title>ImplSVMain (23 samples, 0.19%)</title><rect x="1175.5" y="277" width="2.3" height="15.0" fill="rgb(213,79,38)" rx="2" ry="2" />
+<text  x="1178.50" y="287.5" ></text>
+</g>
+<g >
+<title>SocketPoll::setupPollFds (3 samples, 0.02%)</title><rect x="1189.0" y="309" width="0.3" height="15.0" fill="rgb(233,73,18)" rx="2" ry="2" />
+<text  x="1192.02" y="319.5" ></text>
+</g>
+<g >
+<title>KitWebSocketHandler::handleMessage (4 samples, 0.03%)</title><rect x="1186.6" y="309" width="0.4" height="15.0" fill="rgb(252,186,25)" rx="2" ry="2" />
+<text  x="1189.57" y="319.5" ></text>
+</g>
+<g >
+<title>ImplYield (2 samples, 0.02%)</title><rect x="1188.3" y="277" width="0.2" height="15.0" fill="rgb(230,110,30)" rx="2" ry="2" />
+<text  x="1191.33" y="287.5" ></text>
+</g>
+</g>
+</svg>
