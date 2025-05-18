@@ -1,0 +1,1753 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="1206" onload="init(evt)" viewBox="0 0 1200 1206" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="1206.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >StagingPerf.eu do_wp_page Profile (2025-05-17T14:50:01.639880)</text>
+<text id="details" x="10.00" y="1189" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="1189" > </text>
+<g id="frames">
+<g >
+<title>i18npool::LocaleDataImpl::getAllFormats (1 samples, 6.25%)</title><rect x="1042.5" y="229" width="73.7" height="15.0" fill="rgb(247,65,16)" rx="2" ry="2" />
+<text  x="1045.50" y="239.5" >i18npool..</text>
+</g>
+<g >
+<title>framework::Desktop::loadComponentFromURL (4 samples, 25.00%)</title><rect x="895.0" y="725" width="295.0" height="15.0" fill="rgb(240,113,34)" rx="2" ry="2" />
+<text  x="898.00" y="735.5" >framework::Desktop::loadComponentFromURL</text>
+</g>
+<g >
+<title>_int_malloc (2 samples, 12.50%)</title><rect x="305.0" y="501" width="147.5" height="15.0" fill="rgb(206,146,0)" rx="2" ry="2" />
+<text  x="308.00" y="511.5" >_int_malloc</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (6 samples, 37.50%)</title><rect x="231.2" y="773" width="442.6" height="15.0" fill="rgb(239,158,31)" rx="2" ry="2" />
+<text  x="234.25" y="783.5" >std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alter..</text>
+</g>
+<g >
+<title>std::__detail::_BracketMatcher&lt;std::regex_traits&lt;char&gt;, false, false&gt;::_M_apply (1 samples, 6.25%)</title><rect x="231.2" y="581" width="73.8" height="15.0" fill="rgb(208,98,47)" rx="2" ry="2" />
+<text  x="234.25" y="591.5" >std::__d..</text>
+</g>
+<g >
+<title>malloc (1 samples, 6.25%)</title><rect x="452.5" y="485" width="73.7" height="15.0" fill="rgb(225,160,21)" rx="2" ry="2" />
+<text  x="455.50" y="495.5" >malloc</text>
+</g>
+<g >
+<title>operator new (1 samples, 6.25%)</title><rect x="747.5" y="869" width="73.7" height="15.0" fill="rgb(207,113,52)" rx="2" ry="2" />
+<text  x="750.50" y="879.5" >operator..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 6.25%)</title><rect x="1042.5" y="117" width="73.7" height="15.0" fill="rgb(227,178,11)" rx="2" ry="2" />
+<text  x="1045.50" y="127.5" >asm_exc_..</text>
+</g>
+<g >
+<title>rtl::str::newFromStr_WithLength&lt;_rtl_uString, char16_t&gt; (1 samples, 6.25%)</title><rect x="895.0" y="245" width="73.8" height="15.0" fill="rgb(231,45,30)" rx="2" ry="2" />
+<text  x="898.00" y="255.5" >rtl::str..</text>
+</g>
+<g >
+<title>std::string::_Rep::_M_clone (1 samples, 6.25%)</title><rect x="673.8" y="661" width="73.7" height="15.0" fill="rgb(238,80,53)" rx="2" ry="2" />
+<text  x="676.75" y="671.5" >std::str..</text>
+</g>
+<g >
+<title>unlink_chunk.isra.3 (1 samples, 6.25%)</title><rect x="673.8" y="581" width="73.7" height="15.0" fill="rgb(251,142,10)" rx="2" ry="2" />
+<text  x="676.75" y="591.5" >unlink_c..</text>
+</g>
+<g >
+<title>contentProcessor (1 samples, 6.25%)</title><rect x="895.0" y="357" width="73.8" height="15.0" fill="rgb(245,208,53)" rx="2" ry="2" />
+<text  x="898.00" y="367.5" >contentP..</text>
+</g>
+<g >
+<title>framework::LoadEnv::start (4 samples, 25.00%)</title><rect x="895.0" y="677" width="295.0" height="15.0" fill="rgb(210,106,15)" rx="2" ry="2" />
+<text  x="898.00" y="687.5" >framework::LoadEnv::start</text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 6.25%)</title><rect x="821.2" y="565" width="73.8" height="15.0" fill="rgb(231,51,5)" rx="2" ry="2" />
+<text  x="824.25" y="575.5" >do_user_..</text>
+</g>
+<g >
+<title>SvXMLStylesContext::createFastChildContext (1 samples, 6.25%)</title><rect x="1042.5" y="485" width="73.7" height="15.0" fill="rgb(240,186,4)" rx="2" ry="2" />
+<text  x="1045.50" y="495.5" >SvXMLSty..</text>
+</g>
+<g >
+<title>std::string::_Rep::_S_create (1 samples, 6.25%)</title><rect x="673.8" y="645" width="73.7" height="15.0" fill="rgb(222,33,49)" rx="2" ry="2" />
+<text  x="676.75" y="655.5" >std::str..</text>
+</g>
+<g >
+<title>Document::drainQueue (5 samples, 31.25%)</title><rect x="821.2" y="853" width="368.8" height="15.0" fill="rgb(241,130,10)" rx="2" ry="2" />
+<text  x="824.25" y="863.5" >Document::drainQueue</text>
+</g>
+<g >
+<title>unlink_chunk.isra.3 (1 samples, 6.25%)</title><rect x="1116.2" y="405" width="73.8" height="15.0" fill="rgb(214,108,38)" rx="2" ry="2" />
+<text  x="1119.25" y="415.5" >unlink_c..</text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 6.25%)</title><rect x="821.2" y="533" width="73.8" height="15.0" fill="rgb(246,158,31)" rx="2" ry="2" />
+<text  x="824.25" y="543.5" >__handle..</text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 6.25%)</title><rect x="673.8" y="517" width="73.7" height="15.0" fill="rgb(230,143,9)" rx="2" ry="2" />
+<text  x="676.75" y="527.5" >handle_m..</text>
+</g>
+<g >
+<title>Calc_XMLOasisMetaImporter_get_implementation (1 samples, 6.25%)</title><rect x="1116.2" y="485" width="73.8" height="15.0" fill="rgb(250,64,43)" rx="2" ry="2" />
+<text  x="1119.25" y="495.5" >Calc_XML..</text>
+</g>
+<g >
+<title>do_wp_page (1 samples, 6.25%)</title><rect x="821.2" y="517" width="73.8" height="15.0" fill="rgb(222,85,14)" rx="2" ry="2" />
+<text  x="824.25" y="527.5" >do_wp_page</text>
+</g>
+<g >
+<title>LocaleDataWrapper::loadCurrencyFormats (1 samples, 6.25%)</title><rect x="1042.5" y="277" width="73.7" height="15.0" fill="rgb(245,35,4)" rx="2" ry="2" />
+<text  x="1045.50" y="287.5" >LocaleDa..</text>
+</g>
+<g >
+<title>cppuhelper::ServiceManager::Data::Implementation::doCreateInstanceWithArguments (1 samples, 6.25%)</title><rect x="895.0" y="501" width="73.8" height="15.0" fill="rgb(215,21,40)" rx="2" ry="2" />
+<text  x="898.00" y="511.5" >cppuhelp..</text>
+</g>
+<g >
+<title>forkLibreOfficeKit (5 samples, 31.25%)</title><rect x="821.2" y="1077" width="368.8" height="15.0" fill="rgb(230,22,36)" rx="2" ry="2" />
+<text  x="824.25" y="1087.5" >forkLibreOfficeKit</text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 6.25%)</title><rect x="452.5" y="405" width="73.7" height="15.0" fill="rgb(226,4,27)" rx="2" ry="2" />
+<text  x="455.50" y="415.5" >do_user_..</text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (3 samples, 18.75%)</title><rect x="968.8" y="629" width="221.2" height="15.0" fill="rgb(209,17,24)" rx="2" ry="2" />
+<text  x="971.75" y="639.5" >SfxObjectShell::DoLoad</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_insert_bracket_matcher&lt;false, false&gt; (1 samples, 6.25%)</title><rect x="231.2" y="613" width="73.8" height="15.0" fill="rgb(243,227,12)" rx="2" ry="2" />
+<text  x="234.25" y="623.5" >std::__d..</text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 6.25%)</title><rect x="747.5" y="757" width="73.7" height="15.0" fill="rgb(251,188,3)" rx="2" ry="2" />
+<text  x="750.50" y="767.5" >handle_m..</text>
+</g>
+<g >
+<title>framework::LoadEnv::loadComponentFromURL (4 samples, 25.00%)</title><rect x="895.0" y="709" width="295.0" height="15.0" fill="rgb(254,21,1)" rx="2" ry="2" />
+<text  x="898.00" y="719.5" >framework::LoadEnv::loadComponentFromURL</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 6.25%)</title><rect x="600.0" y="661" width="73.8" height="15.0" fill="rgb(208,48,7)" rx="2" ry="2" />
+<text  x="603.00" y="671.5" >_int_mal..</text>
+</g>
+<g >
+<title>std::regex_traits&lt;char&gt;::transform_primary&lt;char const*&gt; (1 samples, 6.25%)</title><rect x="526.2" y="693" width="73.8" height="15.0" fill="rgb(208,92,10)" rx="2" ry="2" />
+<text  x="529.25" y="703.5" >std::reg..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 6.25%)</title><rect x="673.8" y="565" width="73.7" height="15.0" fill="rgb(213,187,2)" rx="2" ry="2" />
+<text  x="676.75" y="575.5" >asm_exc_..</text>
+</g>
+<g >
+<title>_start (5 samples, 31.25%)</title><rect x="821.2" y="1125" width="368.8" height="15.0" fill="rgb(229,203,49)" rx="2" ry="2" />
+<text  x="824.25" y="1135.5" >_start</text>
+</g>
+<g >
+<title>SvpSalInstance::ImplYield (5 samples, 31.25%)</title><rect x="821.2" y="885" width="368.8" height="15.0" fill="rgb(242,210,38)" rx="2" ry="2" />
+<text  x="824.25" y="895.5" >SvpSalInstance::ImplYield</text>
+</g>
+<g >
+<title>unlink_chunk.isra.3 (1 samples, 6.25%)</title><rect x="747.5" y="821" width="73.7" height="15.0" fill="rgb(228,142,5)" rx="2" ry="2" />
+<text  x="750.50" y="831.5" >unlink_c..</text>
+</g>
+<g >
+<title>lo_runLoop (5 samples, 31.25%)</title><rect x="821.2" y="997" width="368.8" height="15.0" fill="rgb(215,6,50)" rx="2" ry="2" />
+<text  x="824.25" y="1007.5" >lo_runLoop</text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 6.25%)</title><rect x="452.5" y="437" width="73.7" height="15.0" fill="rgb(231,1,38)" rx="2" ry="2" />
+<text  x="455.50" y="447.5" >asm_exc_..</text>
+</g>
+<g >
+<title>do_wp_page (2 samples, 12.50%)</title><rect x="83.8" y="757" width="147.4" height="15.0" fill="rgb(225,89,48)" rx="2" ry="2" />
+<text  x="86.75" y="767.5" >do_wp_page</text>
+</g>
+<g >
+<title>std::string::_Rep::_M_clone (1 samples, 6.25%)</title><rect x="452.5" y="533" width="73.7" height="15.0" fill="rgb(226,199,25)" rx="2" ry="2" />
+<text  x="455.50" y="543.5" >std::str..</text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 6.25%)</title><rect x="600.0" y="597" width="73.8" height="15.0" fill="rgb(218,160,52)" rx="2" ry="2" />
+<text  x="603.00" y="607.5" >do_user_..</text>
+</g>
+<g >
+<title>operator new (1 samples, 6.25%)</title><rect x="452.5" y="501" width="73.7" height="15.0" fill="rgb(206,26,50)" rx="2" ry="2" />
+<text  x="455.50" y="511.5" >operator..</text>
+</g>
+<g >
+<title>std::string::reserve (1 samples, 6.25%)</title><rect x="747.5" y="917" width="73.7" height="15.0" fill="rgb(250,90,45)" rx="2" ry="2" />
+<text  x="750.50" y="927.5" >std::str..</text>
+</g>
+<g >
+<title>std::string::_Rep::_S_create (2 samples, 12.50%)</title><rect x="305.0" y="549" width="147.5" height="15.0" fill="rgb(252,167,24)" rx="2" ry="2" />
+<text  x="308.00" y="559.5" >std::string::_Rep:..</text>
+</g>
+<g >
+<title>unlink_chunk.isra.3 (1 samples, 6.25%)</title><rect x="526.2" y="597" width="73.8" height="15.0" fill="rgb(206,140,25)" rx="2" ry="2" />
+<text  x="529.25" y="607.5" >unlink_c..</text>
+</g>
+<g >
+<title>unlink_chunk.isra.3 (1 samples, 6.25%)</title><rect x="600.0" y="645" width="73.8" height="15.0" fill="rgb(253,105,36)" rx="2" ry="2" />
+<text  x="603.00" y="655.5" >unlink_c..</text>
+</g>
+<g >
+<title>do_wp_page (1 samples, 6.25%)</title><rect x="231.2" y="325" width="73.8" height="15.0" fill="rgb(220,16,34)" rx="2" ry="2" />
+<text  x="234.25" y="335.5" >do_wp_page</text>
+</g>
+<g >
+<title>exc_page_fault (2 samples, 12.50%)</title><rect x="83.8" y="821" width="147.4" height="15.0" fill="rgb(211,167,22)" rx="2" ry="2" />
+<text  x="86.75" y="831.5" >exc_page_fault</text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 6.25%)</title><rect x="673.8" y="533" width="73.7" height="15.0" fill="rgb(209,223,36)" rx="2" ry="2" />
+<text  x="676.75" y="543.5" >do_user_..</text>
+</g>
+<g >
+<title>__libc_start_main (5 samples, 31.25%)</title><rect x="821.2" y="1109" width="368.8" height="15.0" fill="rgb(254,187,46)" rx="2" ry="2" />
+<text  x="824.25" y="1119.5" >__libc_start_main</text>
+</g>
+<g >
+<title>std::__detail::_BracketMatcher&lt;std::regex_traits&lt;char&gt;, false, false&gt;::_M_ready (1 samples, 6.25%)</title><rect x="526.2" y="725" width="73.8" height="15.0" fill="rgb(249,150,18)" rx="2" ry="2" />
+<text  x="529.25" y="735.5" >std::__d..</text>
+</g>
+<g >
+<title>ScModelObj::GetFormatter (1 samples, 6.25%)</title><rect x="1042.5" y="405" width="73.7" height="15.0" fill="rgb(213,73,38)" rx="2" ry="2" />
+<text  x="1045.50" y="415.5" >ScModelO..</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 6.25%)</title><rect x="821.2" y="613" width="73.8" height="15.0" fill="rgb(222,0,7)" rx="2" ry="2" />
+<text  x="824.25" y="623.5" >_int_mal..</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 6.25%)</title><rect x="526.2" y="613" width="73.8" height="15.0" fill="rgb(227,36,34)" rx="2" ry="2" />
+<text  x="529.25" y="623.5" >_int_mal..</text>
+</g>
+<g >
+<title>Session::handleMessage (5 samples, 31.25%)</title><rect x="821.2" y="821" width="368.8" height="15.0" fill="rgb(238,129,6)" rx="2" ry="2" />
+<text  x="824.25" y="831.5" >Session::handleMessage</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 6.25%)</title><rect x="895.0" y="213" width="73.8" height="15.0" fill="rgb(205,215,2)" rx="2" ry="2" />
+<text  x="898.00" y="223.5" >_int_mal..</text>
+</g>
+<g >
+<title>SvXMLStylesContext::CreateStyleChildContext (1 samples, 6.25%)</title><rect x="1042.5" y="469" width="73.7" height="15.0" fill="rgb(225,176,27)" rx="2" ry="2" />
+<text  x="1045.50" y="479.5" >SvXMLSty..</text>
+</g>
+<g >
+<title>do_wp_page (1 samples, 6.25%)</title><rect x="452.5" y="357" width="73.7" height="15.0" fill="rgb(242,88,52)" rx="2" ry="2" />
+<text  x="455.50" y="367.5" >do_wp_page</text>
+</g>
+<g >
+<title>OStorage_Impl::OpenOwnPackage (1 samples, 6.25%)</title><rect x="895.0" y="549" width="73.8" height="15.0" fill="rgb(245,151,25)" rx="2" ry="2" />
+<text  x="898.00" y="559.5" >OStorage..</text>
+</g>
+<g >
+<title>std::string::reserve (1 samples, 6.25%)</title><rect x="231.2" y="517" width="73.8" height="15.0" fill="rgb(217,205,21)" rx="2" ry="2" />
+<text  x="234.25" y="527.5" >std::str..</text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 6.25%)</title><rect x="1042.5" y="53" width="73.7" height="15.0" fill="rgb(220,58,1)" rx="2" ry="2" />
+<text  x="1045.50" y="63.5" >__handle..</text>
+</g>
+<g >
+<title>SvXMLImport::CreateNumberFormatsSupplier_ (1 samples, 6.25%)</title><rect x="1042.5" y="437" width="73.7" height="15.0" fill="rgb(231,6,46)" rx="2" ry="2" />
+<text  x="1045.50" y="447.5" >SvXMLImp..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (4 samples, 25.00%)</title><rect x="231.2" y="709" width="295.0" height="15.0" fill="rgb(253,73,0)" rx="2" ry="2" />
+<text  x="234.25" y="719.5" >std::__detail::_Compiler&lt;std::regex_tra..</text>
+</g>
+<g >
+<title>Poco::Path::parseUnix (1 samples, 6.25%)</title><rect x="747.5" y="933" width="73.7" height="15.0" fill="rgb(228,80,32)" rx="2" ry="2" />
+<text  x="750.50" y="943.5" >Poco::Pa..</text>
+</g>
+<g >
+<title>std::__detail::_BracketMatcher&lt;std::regex_traits&lt;char&gt;, false, false&gt;::_M_apply (1 samples, 6.25%)</title><rect x="526.2" y="709" width="73.8" height="15.0" fill="rgb(244,112,39)" rx="2" ry="2" />
+<text  x="529.25" y="719.5" >std::__d..</text>
+</g>
+<g >
+<title>std::regex_traits&lt;char&gt;::transform_primary&lt;char const*&gt; (3 samples, 18.75%)</title><rect x="305.0" y="597" width="221.2" height="15.0" fill="rgb(209,171,45)" rx="2" ry="2" />
+<text  x="308.00" y="607.5" >std::regex_traits&lt;char&gt;::tran..</text>
+</g>
+<g >
+<title>forkLibreOfficeKit (11 samples, 68.75%)</title><rect x="10.0" y="1077" width="811.2" height="15.0" fill="rgb(221,149,15)" rx="2" ry="2" />
+<text  x="13.00" y="1087.5" >forkLibreOfficeKit</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_cur_int_value (1 samples, 6.25%)</title><rect x="600.0" y="741" width="73.8" height="15.0" fill="rgb(224,85,11)" rx="2" ry="2" />
+<text  x="603.00" y="751.5" >std::__d..</text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 6.25%)</title><rect x="1116.2" y="341" width="73.8" height="15.0" fill="rgb(234,136,35)" rx="2" ry="2" />
+<text  x="1119.25" y="351.5" >handle_m..</text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 6.25%)</title><rect x="673.8" y="549" width="73.7" height="15.0" fill="rgb(254,146,53)" rx="2" ry="2" />
+<text  x="676.75" y="559.5" >exc_page..</text>
+</g>
+<g >
+<title>ManifestImport::PushNameAndNamespaces (1 samples, 6.25%)</title><rect x="895.0" y="293" width="73.8" height="15.0" fill="rgb(214,45,30)" rx="2" ry="2" />
+<text  x="898.00" y="303.5" >Manifest..</text>
+</g>
+<g >
+<title>forkit_main (5 samples, 31.25%)</title><rect x="821.2" y="1093" width="368.8" height="15.0" fill="rgb(224,46,1)" rx="2" ry="2" />
+<text  x="824.25" y="1103.5" >forkit_main</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (4 samples, 25.00%)</title><rect x="231.2" y="693" width="295.0" height="15.0" fill="rgb(243,92,5)" rx="2" ry="2" />
+<text  x="234.25" y="703.5" >std::__detail::_Compiler&lt;std::regex_tra..</text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 6.25%)</title><rect x="1116.2" y="357" width="73.8" height="15.0" fill="rgb(217,60,35)" rx="2" ry="2" />
+<text  x="1119.25" y="367.5" >do_user_..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_disjunction (7 samples, 43.75%)</title><rect x="231.2" y="933" width="516.3" height="15.0" fill="rgb(227,156,5)" rx="2" ry="2" />
+<text  x="234.25" y="943.5" >std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_disjunction</text>
+</g>
+<g >
+<title>operator new (1 samples, 6.25%)</title><rect x="526.2" y="645" width="73.8" height="15.0" fill="rgb(239,195,32)" rx="2" ry="2" />
+<text  x="529.25" y="655.5" >operator..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_insert_bracket_matcher&lt;false, false&gt; (1 samples, 6.25%)</title><rect x="673.8" y="773" width="73.7" height="15.0" fill="rgb(231,128,54)" rx="2" ry="2" />
+<text  x="676.75" y="783.5" >std::__d..</text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 6.25%)</title><rect x="1042.5" y="101" width="73.7" height="15.0" fill="rgb(248,135,36)" rx="2" ry="2" />
+<text  x="1045.50" y="111.5" >exc_page..</text>
+</g>
+<g >
+<title>StorageFilterDetect::detect (1 samples, 6.25%)</title><rect x="895.0" y="597" width="73.8" height="15.0" fill="rgb(234,78,43)" rx="2" ry="2" />
+<text  x="898.00" y="607.5" >StorageF..</text>
+</g>
+<g >
+<title>malloc (1 samples, 6.25%)</title><rect x="747.5" y="853" width="73.7" height="15.0" fill="rgb(212,71,50)" rx="2" ry="2" />
+<text  x="750.50" y="863.5" >malloc</text>
+</g>
+<g >
+<title>ScDocShell::Load (3 samples, 18.75%)</title><rect x="968.8" y="597" width="221.2" height="15.0" fill="rgb(233,39,19)" rx="2" ry="2" />
+<text  x="971.75" y="607.5" >ScDocShell::Load</text>
+</g>
+<g >
+<title>forkKit (5 samples, 31.25%)</title><rect x="821.2" y="1045" width="368.8" height="15.0" fill="rgb(226,15,4)" rx="2" ry="2" />
+<text  x="824.25" y="1055.5" >forkKit</text>
+</g>
+<g >
+<title>malloc (1 samples, 6.25%)</title><rect x="526.2" y="629" width="73.8" height="15.0" fill="rgb(246,5,46)" rx="2" ry="2" />
+<text  x="529.25" y="639.5" >malloc</text>
+</g>
+<g >
+<title>cppuhelper::ServiceManager::Data::Implementation::createInstanceWithArguments (1 samples, 6.25%)</title><rect x="895.0" y="517" width="73.8" height="15.0" fill="rgb(222,161,1)" rx="2" ry="2" />
+<text  x="898.00" y="527.5" >cppuhelp..</text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 6.25%)</title><rect x="452.5" y="373" width="73.7" height="15.0" fill="rgb(221,72,44)" rx="2" ry="2" />
+<text  x="455.50" y="383.5" >__handle..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (7 samples, 43.75%)</title><rect x="231.2" y="805" width="516.3" height="15.0" fill="rgb(219,29,32)" rx="2" ry="2" />
+<text  x="234.25" y="815.5" >std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative</text>
+</g>
+<g >
+<title>lt_region_db_parse.constprop.0 (1 samples, 6.25%)</title><rect x="821.2" y="677" width="73.8" height="15.0" fill="rgb(205,61,40)" rx="2" ry="2" />
+<text  x="824.25" y="687.5" >lt_regio..</text>
+</g>
+<g >
+<title>std::codecvt_byname&lt;char, char, __mbstate_t&gt;::~codecvt_byname (2 samples, 12.50%)</title><rect x="305.0" y="565" width="147.5" height="15.0" fill="rgb(226,78,14)" rx="2" ry="2" />
+<text  x="308.00" y="575.5" >std::codecvt_bynam..</text>
+</g>
+<g >
+<title>ZipPackage::getZipFileContents (1 samples, 6.25%)</title><rect x="895.0" y="469" width="73.8" height="15.0" fill="rgb(233,94,3)" rx="2" ry="2" />
+<text  x="898.00" y="479.5" >ZipPacka..</text>
+</g>
+<g >
+<title>callProcessor.constprop.0 (1 samples, 6.25%)</title><rect x="895.0" y="405" width="73.8" height="15.0" fill="rgb(230,144,23)" rx="2" ry="2" />
+<text  x="898.00" y="415.5" >callProc..</text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 6.25%)</title><rect x="526.2" y="517" width="73.8" height="15.0" fill="rgb(207,4,10)" rx="2" ry="2" />
+<text  x="529.25" y="527.5" >__handle..</text>
+</g>
+<g >
+<title>SvNumberFormatter::PrepForRoMode (1 samples, 6.25%)</title><rect x="1042.5" y="373" width="73.7" height="15.0" fill="rgb(239,70,54)" rx="2" ry="2" />
+<text  x="1045.50" y="383.5" >SvNumber..</text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 6.25%)</title><rect x="968.8" y="501" width="73.7" height="15.0" fill="rgb(238,33,39)" rx="2" ry="2" />
+<text  x="971.75" y="511.5" >handle_m..</text>
+</g>
+<g >
+<title>ScDocShell::SetFormulaOptions (1 samples, 6.25%)</title><rect x="968.8" y="565" width="73.7" height="15.0" fill="rgb(233,60,1)" rx="2" ry="2" />
+<text  x="971.75" y="575.5" >ScDocShe..</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 6.25%)</title><rect x="747.5" y="837" width="73.7" height="15.0" fill="rgb(247,159,14)" rx="2" ry="2" />
+<text  x="750.50" y="847.5" >_int_mal..</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 6.25%)</title><rect x="673.8" y="597" width="73.7" height="15.0" fill="rgb(226,36,11)" rx="2" ry="2" />
+<text  x="676.75" y="607.5" >_int_mal..</text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 6.25%)</title><rect x="895.0" y="165" width="73.8" height="15.0" fill="rgb(235,41,14)" rx="2" ry="2" />
+<text  x="898.00" y="175.5" >exc_page..</text>
+</g>
+<g >
+<title>Poco::Path::parseUnix (2 samples, 12.50%)</title><rect x="83.8" y="965" width="147.4" height="15.0" fill="rgb(228,172,20)" rx="2" ry="2" />
+<text  x="86.75" y="975.5" >Poco::Path::parseU..</text>
+</g>
+<g >
+<title>Poco::Path::parseUnix (1 samples, 6.25%)</title><rect x="10.0" y="949" width="73.8" height="15.0" fill="rgb(231,58,36)" rx="2" ry="2" />
+<text  x="13.00" y="959.5" >Poco::Pa..</text>
+</g>
+<g >
+<title>doContent (1 samples, 6.25%)</title><rect x="895.0" y="341" width="73.8" height="15.0" fill="rgb(250,28,28)" rx="2" ry="2" />
+<text  x="898.00" y="351.5" >doContent</text>
+</g>
+<g >
+<title>unlink_chunk.isra.3 (1 samples, 6.25%)</title><rect x="10.0" y="837" width="73.8" height="15.0" fill="rgb(229,73,2)" rx="2" ry="2" />
+<text  x="13.00" y="847.5" >unlink_c..</text>
+</g>
+<g >
+<title>SfxObjectShell::LoadOwnFormat (3 samples, 18.75%)</title><rect x="968.8" y="613" width="221.2" height="15.0" fill="rgb(217,5,46)" rx="2" ry="2" />
+<text  x="971.75" y="623.5" >SfxObjectShell::LoadOwnFormat</text>
+</g>
+<g >
+<title>std::__detail::_BracketMatcher&lt;std::regex_traits&lt;char&gt;, false, false&gt;::_M_apply (1 samples, 6.25%)</title><rect x="673.8" y="741" width="73.7" height="15.0" fill="rgb(254,78,37)" rx="2" ry="2" />
+<text  x="676.75" y="751.5" >std::__d..</text>
+</g>
+<g >
+<title>unlink_chunk.isra.3 (2 samples, 12.50%)</title><rect x="83.8" y="853" width="147.4" height="15.0" fill="rgb(229,14,29)" rx="2" ry="2" />
+<text  x="86.75" y="863.5" >unlink_chunk.isra.3</text>
+</g>
+<g >
+<title>unlink_chunk.isra.3 (1 samples, 6.25%)</title><rect x="231.2" y="421" width="73.8" height="15.0" fill="rgb(222,20,38)" rx="2" ry="2" />
+<text  x="234.25" y="431.5" >unlink_c..</text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 6.25%)</title><rect x="231.2" y="373" width="73.8" height="15.0" fill="rgb(220,79,20)" rx="2" ry="2" />
+<text  x="234.25" y="383.5" >do_user_..</text>
+</g>
+<g >
+<title>std::string::append (1 samples, 6.25%)</title><rect x="231.2" y="533" width="73.8" height="15.0" fill="rgb(226,151,25)" rx="2" ry="2" />
+<text  x="234.25" y="543.5" >std::str..</text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 6.25%)</title><rect x="600.0" y="565" width="73.8" height="15.0" fill="rgb(210,68,31)" rx="2" ry="2" />
+<text  x="603.00" y="575.5" >__handle..</text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_detectTypeAndFilter (1 samples, 6.25%)</title><rect x="895.0" y="661" width="73.8" height="15.0" fill="rgb(225,100,21)" rx="2" ry="2" />
+<text  x="898.00" y="671.5" >framewor..</text>
+</g>
+<g >
+<title>std::string::append (1 samples, 6.25%)</title><rect x="673.8" y="693" width="73.7" height="15.0" fill="rgb(224,123,50)" rx="2" ry="2" />
+<text  x="676.75" y="703.5" >std::str..</text>
+</g>
+<g >
+<title>operator new (1 samples, 6.25%)</title><rect x="231.2" y="469" width="73.8" height="15.0" fill="rgb(229,9,14)" rx="2" ry="2" />
+<text  x="234.25" y="479.5" >operator..</text>
+</g>
+<g >
+<title>std::string::reserve (1 samples, 6.25%)</title><rect x="452.5" y="549" width="73.7" height="15.0" fill="rgb(215,198,38)" rx="2" ry="2" />
+<text  x="455.50" y="559.5" >std::str..</text>
+</g>
+<g >
+<title>std::string::_Rep::_S_create (1 samples, 6.25%)</title><rect x="10.0" y="901" width="73.8" height="15.0" fill="rgb(238,202,42)" rx="2" ry="2" />
+<text  x="13.00" y="911.5" >std::str..</text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 6.25%)</title><rect x="452.5" y="421" width="73.7" height="15.0" fill="rgb(240,221,34)" rx="2" ry="2" />
+<text  x="455.50" y="431.5" >exc_page..</text>
+</g>
+<g >
+<title>SvpSalInstance::DoYield (5 samples, 31.25%)</title><rect x="821.2" y="901" width="368.8" height="15.0" fill="rgb(224,62,53)" rx="2" ry="2" />
+<text  x="824.25" y="911.5" >SvpSalInstance::DoYield</text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 6.25%)</title><rect x="673.8" y="501" width="73.7" height="15.0" fill="rgb(241,48,32)" rx="2" ry="2" />
+<text  x="676.75" y="511.5" >__handle..</text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 6.25%)</title><rect x="600.0" y="613" width="73.8" height="15.0" fill="rgb(249,200,1)" rx="2" ry="2" />
+<text  x="603.00" y="623.5" >exc_page..</text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 6.25%)</title><rect x="231.2" y="389" width="73.8" height="15.0" fill="rgb(212,29,29)" rx="2" ry="2" />
+<text  x="234.25" y="399.5" >exc_page..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (4 samples, 25.00%)</title><rect x="231.2" y="725" width="295.0" height="15.0" fill="rgb(240,13,49)" rx="2" ry="2" />
+<text  x="234.25" y="735.5" >std::__detail::_Compiler&lt;std::regex_tra..</text>
+</g>
+<g >
+<title>rtl_string_alloc (1 samples, 6.25%)</title><rect x="1042.5" y="181" width="73.7" height="15.0" fill="rgb(254,83,47)" rx="2" ry="2" />
+<text  x="1045.50" y="191.5" >rtl_stri..</text>
+</g>
+<g >
+<title>Poco::Path::assign (1 samples, 6.25%)</title><rect x="747.5" y="949" width="73.7" height="15.0" fill="rgb(239,151,10)" rx="2" ry="2" />
+<text  x="750.50" y="959.5" >Poco::Pa..</text>
+</g>
+<g >
+<title>std::string::reserve (1 samples, 6.25%)</title><rect x="673.8" y="677" width="73.7" height="15.0" fill="rgb(205,94,40)" rx="2" ry="2" />
+<text  x="676.75" y="687.5" >std::str..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 6.25%)</title><rect x="1116.2" y="389" width="73.8" height="15.0" fill="rgb(246,42,26)" rx="2" ry="2" />
+<text  x="1119.25" y="399.5" >asm_exc_..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (2 samples, 12.50%)</title><rect x="83.8" y="837" width="147.4" height="15.0" fill="rgb(223,102,44)" rx="2" ry="2" />
+<text  x="86.75" y="847.5" >asm_exc_page_fault</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 6.25%)</title><rect x="1116.2" y="421" width="73.8" height="15.0" fill="rgb(242,75,0)" rx="2" ry="2" />
+<text  x="1119.25" y="431.5" >_int_mal..</text>
+</g>
+<g >
+<title>ScXMLImportWrapper::Import (2 samples, 12.50%)</title><rect x="1042.5" y="565" width="147.5" height="15.0" fill="rgb(229,223,47)" rx="2" ry="2" />
+<text  x="1045.50" y="575.5" >ScXMLImportWrapper..</text>
+</g>
+<g >
+<title>Poco::Path::Path (1 samples, 6.25%)</title><rect x="10.0" y="981" width="73.8" height="15.0" fill="rgb(216,93,5)" rx="2" ry="2" />
+<text  x="13.00" y="991.5" >Poco::Pa..</text>
+</g>
+<g >
+<title>lo_initialize (7 samples, 43.75%)</title><rect x="231.2" y="981" width="516.3" height="15.0" fill="rgb(235,135,9)" rx="2" ry="2" />
+<text  x="234.25" y="991.5" >lo_initialize</text>
+</g>
+<g >
+<title>operator new (1 samples, 6.25%)</title><rect x="10.0" y="885" width="73.8" height="15.0" fill="rgb(241,114,34)" rx="2" ry="2" />
+<text  x="13.00" y="895.5" >operator..</text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 6.25%)</title><rect x="968.8" y="517" width="73.7" height="15.0" fill="rgb(213,122,28)" rx="2" ry="2" />
+<text  x="971.75" y="527.5" >do_user_..</text>
+</g>
+<g >
+<title>operator new (2 samples, 12.50%)</title><rect x="83.8" y="901" width="147.4" height="15.0" fill="rgb(249,50,51)" rx="2" ry="2" />
+<text  x="86.75" y="911.5" >operator new</text>
+</g>
+<g >
+<title>Poco::Path::Path (2 samples, 12.50%)</title><rect x="83.8" y="997" width="147.4" height="15.0" fill="rgb(210,125,20)" rx="2" ry="2" />
+<text  x="86.75" y="1007.5" >Poco::Path::Path</text>
+</g>
+<g >
+<title>malloc (1 samples, 6.25%)</title><rect x="1042.5" y="165" width="73.7" height="15.0" fill="rgb(222,126,20)" rx="2" ry="2" />
+<text  x="1045.50" y="175.5" >malloc</text>
+</g>
+<g >
+<title>Document::forwardToChild (5 samples, 31.25%)</title><rect x="821.2" y="837" width="368.8" height="15.0" fill="rgb(244,95,39)" rx="2" ry="2" />
+<text  x="824.25" y="847.5" >Document::forwardToChild</text>
+</g>
+<g >
+<title>unlink_chunk.isra.3 (1 samples, 6.25%)</title><rect x="1042.5" y="133" width="73.7" height="15.0" fill="rgb(243,176,26)" rx="2" ry="2" />
+<text  x="1045.50" y="143.5" >unlink_c..</text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 6.25%)</title><rect x="10.0" y="789" width="73.8" height="15.0" fill="rgb(251,110,9)" rx="2" ry="2" />
+<text  x="13.00" y="799.5" >do_user_..</text>
+</g>
+<g >
+<title>unlink_chunk.isra.3 (1 samples, 6.25%)</title><rect x="895.0" y="197" width="73.8" height="15.0" fill="rgb(251,208,36)" rx="2" ry="2" />
+<text  x="898.00" y="207.5" >unlink_c..</text>
+</g>
+<g >
+<title>createLibreOfficeKit (5 samples, 31.25%)</title><rect x="821.2" y="1061" width="368.8" height="15.0" fill="rgb(248,192,14)" rx="2" ry="2" />
+<text  x="824.25" y="1071.5" >createLibreOfficeKit</text>
+</g>
+<g >
+<title>calloc (1 samples, 6.25%)</title><rect x="821.2" y="629" width="73.8" height="15.0" fill="rgb(217,125,11)" rx="2" ry="2" />
+<text  x="824.25" y="639.5" >calloc</text>
+</g>
+<g >
+<title>malloc (1 samples, 6.25%)</title><rect x="1116.2" y="437" width="73.8" height="15.0" fill="rgb(250,181,48)" rx="2" ry="2" />
+<text  x="1119.25" y="447.5" >malloc</text>
+</g>
+<g >
+<title>desktop::Desktop::Main (5 samples, 31.25%)</title><rect x="821.2" y="949" width="368.8" height="15.0" fill="rgb(210,207,2)" rx="2" ry="2" />
+<text  x="824.25" y="959.5" >desktop::Desktop::Main</text>
+</g>
+<g >
+<title>ScDocShell::LoadXML (2 samples, 12.50%)</title><rect x="1042.5" y="581" width="147.5" height="15.0" fill="rgb(224,178,23)" rx="2" ry="2" />
+<text  x="1045.50" y="591.5" >ScDocShell::LoadXML</text>
+</g>
+<g >
+<title>ChildSession::_handleInput (5 samples, 31.25%)</title><rect x="821.2" y="805" width="368.8" height="15.0" fill="rgb(238,32,53)" rx="2" ry="2" />
+<text  x="824.25" y="815.5" >ChildSession::_handleInput</text>
+</g>
+<g >
+<title>doProlog (1 samples, 6.25%)</title><rect x="895.0" y="373" width="73.8" height="15.0" fill="rgb(239,19,40)" rx="2" ry="2" />
+<text  x="898.00" y="383.5" >doProlog</text>
+</g>
+<g >
+<title>ScXMLImport::ScXMLImport (1 samples, 6.25%)</title><rect x="1116.2" y="469" width="73.8" height="15.0" fill="rgb(250,160,44)" rx="2" ry="2" />
+<text  x="1119.25" y="479.5" >ScXMLImp..</text>
+</g>
+<g >
+<title>std::regex_traits&lt;char&gt;::transform_primary&lt;char const*&gt; (1 samples, 6.25%)</title><rect x="231.2" y="565" width="73.8" height="15.0" fill="rgb(235,132,0)" rx="2" ry="2" />
+<text  x="234.25" y="575.5" >std::reg..</text>
+</g>
+<g >
+<title>SvXMLImport::parseStream (1 samples, 6.25%)</title><rect x="1042.5" y="533" width="73.7" height="15.0" fill="rgb(226,124,16)" rx="2" ry="2" />
+<text  x="1045.50" y="543.5" >SvXMLImp..</text>
+</g>
+<g >
+<title>OStorage_Impl::ReadContents (1 samples, 6.25%)</title><rect x="895.0" y="565" width="73.8" height="15.0" fill="rgb(237,164,38)" rx="2" ry="2" />
+<text  x="898.00" y="575.5" >OStorage..</text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 6.25%)</title><rect x="231.2" y="357" width="73.8" height="15.0" fill="rgb(227,36,13)" rx="2" ry="2" />
+<text  x="234.25" y="367.5" >handle_m..</text>
+</g>
+<g >
+<title>do_wp_page (1 samples, 6.25%)</title><rect x="526.2" y="501" width="73.8" height="15.0" fill="rgb(250,3,24)" rx="2" ry="2" />
+<text  x="529.25" y="511.5" >do_wp_page</text>
+</g>
+<g >
+<title>framework::LoadEnv::startLoading (4 samples, 25.00%)</title><rect x="895.0" y="693" width="295.0" height="15.0" fill="rgb(221,61,6)" rx="2" ry="2" />
+<text  x="898.00" y="703.5" >framework::LoadEnv::startLoading</text>
+</g>
+<g >
+<title>ImplSVMain (5 samples, 31.25%)</title><rect x="821.2" y="965" width="368.8" height="15.0" fill="rgb(245,115,11)" rx="2" ry="2" />
+<text  x="824.25" y="975.5" >ImplSVMain</text>
+</g>
+<g >
+<title>Poco::File::createDirectories (1 samples, 6.25%)</title><rect x="10.0" y="997" width="73.8" height="15.0" fill="rgb(216,197,43)" rx="2" ry="2" />
+<text  x="13.00" y="1007.5" >Poco::Fi..</text>
+</g>
+<g >
+<title>SvXMLImport::CreateDataStylesImport_ (1 samples, 6.25%)</title><rect x="1042.5" y="453" width="73.7" height="15.0" fill="rgb(209,142,6)" rx="2" ry="2" />
+<text  x="1045.50" y="463.5" >SvXMLImp..</text>
+</g>
+<g >
+<title>_lt_tag_parse (1 samples, 6.25%)</title><rect x="821.2" y="709" width="73.8" height="15.0" fill="rgb(237,159,14)" rx="2" ry="2" />
+<text  x="824.25" y="719.5" >_lt_tag_..</text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 6.25%)</title><rect x="1116.2" y="373" width="73.8" height="15.0" fill="rgb(253,146,2)" rx="2" ry="2" />
+<text  x="1119.25" y="383.5" >exc_page..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_Compiler (7 samples, 43.75%)</title><rect x="231.2" y="949" width="516.3" height="15.0" fill="rgb(252,194,41)" rx="2" ry="2" />
+<text  x="234.25" y="959.5" >std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_Compiler</text>
+</g>
+<g >
+<title>ScModelObj::queryInterface (1 samples, 6.25%)</title><rect x="1042.5" y="421" width="73.7" height="15.0" fill="rgb(250,148,31)" rx="2" ry="2" />
+<text  x="1045.50" y="431.5" >ScModelO..</text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 6.25%)</title><rect x="1116.2" y="325" width="73.8" height="15.0" fill="rgb(249,72,32)" rx="2" ry="2" />
+<text  x="1119.25" y="335.5" >__handle..</text>
+</g>
+<g >
+<title>NumberFormatCodeMapper::getAllFormatCode (1 samples, 6.25%)</title><rect x="1042.5" y="261" width="73.7" height="15.0" fill="rgb(243,181,52)" rx="2" ry="2" />
+<text  x="1045.50" y="271.5" >NumberFo..</text>
+</g>
+<g >
+<title>__handle_mm_fault (2 samples, 12.50%)</title><rect x="83.8" y="773" width="147.4" height="15.0" fill="rgb(216,144,2)" rx="2" ry="2" />
+<text  x="86.75" y="783.5" >__handle_mm_fault</text>
+</g>
+<g >
+<title>cppuhelper::ServiceManager::createInstanceWithArgumentsAndContext (1 samples, 6.25%)</title><rect x="1116.2" y="533" width="73.8" height="15.0" fill="rgb(229,160,11)" rx="2" ry="2" />
+<text  x="1119.25" y="543.5" >cppuhelp..</text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 6.25%)</title><rect x="1042.5" y="85" width="73.7" height="15.0" fill="rgb(229,86,54)" rx="2" ry="2" />
+<text  x="1045.50" y="95.5" >do_user_..</text>
+</g>
+<g >
+<title>SvNumberFormatter::ImpInitCurrencyTable (1 samples, 6.25%)</title><rect x="1042.5" y="341" width="73.7" height="15.0" fill="rgb(252,165,11)" rx="2" ry="2" />
+<text  x="1045.50" y="351.5" >SvNumber..</text>
+</g>
+<g >
+<title>ScXMLImportWrapper::ImportFromComponent (2 samples, 12.50%)</title><rect x="1042.5" y="549" width="147.5" height="15.0" fill="rgb(240,137,9)" rx="2" ry="2" />
+<text  x="1045.50" y="559.5" >ScXMLImportWrapper..</text>
+</g>
+<g >
+<title>__handle_mm_fault (2 samples, 12.50%)</title><rect x="305.0" y="405" width="147.5" height="15.0" fill="rgb(252,14,22)" rx="2" ry="2" />
+<text  x="308.00" y="415.5" >__handle_mm_fault</text>
+</g>
+<g >
+<title>lt_mem_alloc_object (1 samples, 6.25%)</title><rect x="821.2" y="645" width="73.8" height="15.0" fill="rgb(253,12,28)" rx="2" ry="2" />
+<text  x="824.25" y="655.5" >lt_mem_a..</text>
+</g>
+<g >
+<title>kitbroker (5 samples, 31.25%)</title><rect x="821.2" y="1141" width="368.8" height="15.0" fill="rgb(215,189,12)" rx="2" ry="2" />
+<text  x="824.25" y="1151.5" >kitbroker</text>
+</g>
+<g >
+<title>Poco::Path::assign (1 samples, 6.25%)</title><rect x="10.0" y="965" width="73.8" height="15.0" fill="rgb(227,124,1)" rx="2" ry="2" />
+<text  x="13.00" y="975.5" >Poco::Pa..</text>
+</g>
+<g >
+<title>cppuhelper::ServiceManager::Data::Implementation::createInstanceWithArguments (1 samples, 6.25%)</title><rect x="1116.2" y="517" width="73.8" height="15.0" fill="rgb(218,84,8)" rx="2" ry="2" />
+<text  x="1119.25" y="527.5" >cppuhelp..</text>
+</g>
+<g >
+<title>std::string::reserve (1 samples, 6.25%)</title><rect x="10.0" y="933" width="73.8" height="15.0" fill="rgb(212,185,25)" rx="2" ry="2" />
+<text  x="13.00" y="943.5" >std::str..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (7 samples, 43.75%)</title><rect x="231.2" y="837" width="516.3" height="15.0" fill="rgb(224,51,27)" rx="2" ry="2" />
+<text  x="234.25" y="847.5" >std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative</text>
+</g>
+<g >
+<title>handle_mm_fault (2 samples, 12.50%)</title><rect x="83.8" y="789" width="147.4" height="15.0" fill="rgb(230,91,36)" rx="2" ry="2" />
+<text  x="86.75" y="799.5" >handle_mm_fault</text>
+</g>
+<g >
+<title>std::string::_Rep::_S_create (2 samples, 12.50%)</title><rect x="83.8" y="917" width="147.4" height="15.0" fill="rgb(241,123,37)" rx="2" ry="2" />
+<text  x="86.75" y="927.5" >std::string::_Rep:..</text>
+</g>
+<g >
+<title>do_wp_page (1 samples, 6.25%)</title><rect x="1042.5" y="37" width="73.7" height="15.0" fill="rgb(230,87,34)" rx="2" ry="2" />
+<text  x="1045.50" y="47.5" >do_wp_page</text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 6.25%)</title><rect x="747.5" y="805" width="73.7" height="15.0" fill="rgb(234,0,0)" rx="2" ry="2" />
+<text  x="750.50" y="815.5" >asm_exc_..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (1 samples, 6.25%)</title><rect x="231.2" y="645" width="73.8" height="15.0" fill="rgb(238,228,15)" rx="2" ry="2" />
+<text  x="234.25" y="655.5" >std::__d..</text>
+</g>
+<g >
+<title>Document::load (5 samples, 31.25%)</title><rect x="821.2" y="757" width="368.8" height="15.0" fill="rgb(211,127,23)" rx="2" ry="2" />
+<text  x="824.25" y="767.5" >Document::load</text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (11 samples, 68.75%)</title><rect x="10.0" y="1029" width="811.2" height="15.0" fill="rgb(209,113,36)" rx="2" ry="2" />
+<text  x="13.00" y="1039.5" >std::_Function_handler&lt;void </text>
+</g>
+<g >
+<title>do_wp_page (1 samples, 6.25%)</title><rect x="10.0" y="741" width="73.8" height="15.0" fill="rgb(219,151,26)" rx="2" ry="2" />
+<text  x="13.00" y="751.5" >do_wp_page</text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 6.25%)</title><rect x="821.2" y="581" width="73.8" height="15.0" fill="rgb(214,38,29)" rx="2" ry="2" />
+<text  x="824.25" y="591.5" >exc_page..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 6.25%)</title><rect x="526.2" y="581" width="73.8" height="15.0" fill="rgb(216,36,15)" rx="2" ry="2" />
+<text  x="529.25" y="591.5" >asm_exc_..</text>
+</g>
+<g >
+<title>std::collate&lt;char&gt;::do_transform (1 samples, 6.25%)</title><rect x="231.2" y="549" width="73.8" height="15.0" fill="rgb(218,100,27)" rx="2" ry="2" />
+<text  x="234.25" y="559.5" >std::col..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (7 samples, 43.75%)</title><rect x="231.2" y="869" width="516.3" height="15.0" fill="rgb(246,204,20)" rx="2" ry="2" />
+<text  x="234.25" y="879.5" >std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (7 samples, 43.75%)</title><rect x="231.2" y="853" width="516.3" height="15.0" fill="rgb(215,36,14)" rx="2" ry="2" />
+<text  x="234.25" y="863.5" >std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative</text>
+</g>
+<g >
+<title>std::__detail::_BracketMatcher&lt;std::regex_traits&lt;char&gt;, false, false&gt;::_M_ready (3 samples, 18.75%)</title><rect x="305.0" y="629" width="221.2" height="15.0" fill="rgb(250,118,13)" rx="2" ry="2" />
+<text  x="308.00" y="639.5" >std::__detail::_BracketMatche..</text>
+</g>
+<g >
+<title>std::string::_Rep::_M_clone (1 samples, 6.25%)</title><rect x="10.0" y="917" width="73.8" height="15.0" fill="rgb(221,184,3)" rx="2" ry="2" />
+<text  x="13.00" y="927.5" >std::str..</text>
+</g>
+<g >
+<title>lo_documentLoadWithOptions (5 samples, 31.25%)</title><rect x="821.2" y="741" width="368.8" height="15.0" fill="rgb(250,53,39)" rx="2" ry="2" />
+<text  x="824.25" y="751.5" >lo_documentLoadWithOptions</text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 6.25%)</title><rect x="895.0" y="117" width="73.8" height="15.0" fill="rgb(207,220,49)" rx="2" ry="2" />
+<text  x="898.00" y="127.5" >__handle..</text>
+</g>
+<g >
+<title>kit_spare (11 samples, 68.75%)</title><rect x="10.0" y="1141" width="811.2" height="15.0" fill="rgb(233,73,9)" rx="2" ry="2" />
+<text  x="13.00" y="1151.5" >kit_spare</text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 6.25%)</title><rect x="526.2" y="533" width="73.8" height="15.0" fill="rgb(253,66,21)" rx="2" ry="2" />
+<text  x="529.25" y="543.5" >handle_m..</text>
+</g>
+<g >
+<title>Poco::File::createDirectories (1 samples, 6.25%)</title><rect x="747.5" y="981" width="73.7" height="15.0" fill="rgb(229,149,14)" rx="2" ry="2" />
+<text  x="750.50" y="991.5" >Poco::Fi..</text>
+</g>
+<g >
+<title>lokit_main (1 samples, 6.25%)</title><rect x="747.5" y="997" width="73.7" height="15.0" fill="rgb(206,40,9)" rx="2" ry="2" />
+<text  x="750.50" y="1007.5" >lokit_main</text>
+</g>
+<g >
+<title>std::string::_Rep::_M_clone (2 samples, 12.50%)</title><rect x="83.8" y="933" width="147.4" height="15.0" fill="rgb(252,160,47)" rx="2" ry="2" />
+<text  x="86.75" y="943.5" >std::string::_Rep:..</text>
+</g>
+<g >
+<title>do_user_addr_fault (2 samples, 12.50%)</title><rect x="305.0" y="437" width="147.5" height="15.0" fill="rgb(233,50,16)" rx="2" ry="2" />
+<text  x="308.00" y="447.5" >do_user_addr_fault</text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 6.25%)</title><rect x="600.0" y="581" width="73.8" height="15.0" fill="rgb(234,198,8)" rx="2" ry="2" />
+<text  x="603.00" y="591.5" >handle_m..</text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 6.25%)</title><rect x="895.0" y="149" width="73.8" height="15.0" fill="rgb(251,19,33)" rx="2" ry="2" />
+<text  x="898.00" y="159.5" >do_user_..</text>
+</g>
+<g >
+<title>std::regex_traits&lt;char&gt;::value (1 samples, 6.25%)</title><rect x="600.0" y="725" width="73.8" height="15.0" fill="rgb(232,109,0)" rx="2" ry="2" />
+<text  x="603.00" y="735.5" >std::reg..</text>
+</g>
+<g >
+<title>ImplYield (5 samples, 31.25%)</title><rect x="821.2" y="917" width="368.8" height="15.0" fill="rgb(239,114,29)" rx="2" ry="2" />
+<text  x="824.25" y="927.5" >ImplYield</text>
+</g>
+<g >
+<title>do_wp_page (1 samples, 6.25%)</title><rect x="968.8" y="469" width="73.7" height="15.0" fill="rgb(238,218,6)" rx="2" ry="2" />
+<text  x="971.75" y="479.5" >do_wp_page</text>
+</g>
+<g >
+<title>forkit_main (11 samples, 68.75%)</title><rect x="10.0" y="1093" width="811.2" height="15.0" fill="rgb(239,45,52)" rx="2" ry="2" />
+<text  x="13.00" y="1103.5" >forkit_main</text>
+</g>
+<g >
+<title>unlink_chunk.isra.3 (2 samples, 12.50%)</title><rect x="305.0" y="485" width="147.5" height="15.0" fill="rgb(221,35,37)" rx="2" ry="2" />
+<text  x="308.00" y="495.5" >unlink_chunk.isra.3</text>
+</g>
+<g >
+<title>Poco::Path::assign (2 samples, 12.50%)</title><rect x="83.8" y="981" width="147.4" height="15.0" fill="rgb(209,71,23)" rx="2" ry="2" />
+<text  x="86.75" y="991.5" >Poco::Path::assign</text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 6.25%)</title><rect x="968.8" y="533" width="73.7" height="15.0" fill="rgb(226,80,9)" rx="2" ry="2" />
+<text  x="971.75" y="543.5" >exc_page..</text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 6.25%)</title><rect x="895.0" y="133" width="73.8" height="15.0" fill="rgb(218,174,24)" rx="2" ry="2" />
+<text  x="898.00" y="143.5" >handle_m..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (7 samples, 43.75%)</title><rect x="231.2" y="885" width="516.3" height="15.0" fill="rgb(251,99,4)" rx="2" ry="2" />
+<text  x="234.25" y="895.5" >std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative</text>
+</g>
+<g >
+<title>std::string::_Rep::_M_clone (1 samples, 6.25%)</title><rect x="747.5" y="901" width="73.7" height="15.0" fill="rgb(226,102,40)" rx="2" ry="2" />
+<text  x="750.50" y="911.5" >std::str..</text>
+</g>
+<g >
+<title>prologProcessor (1 samples, 6.25%)</title><rect x="895.0" y="389" width="73.8" height="15.0" fill="rgb(213,112,5)" rx="2" ry="2" />
+<text  x="898.00" y="399.5" >prologPr..</text>
+</g>
+<g >
+<title>malloc (1 samples, 6.25%)</title><rect x="10.0" y="869" width="73.8" height="15.0" fill="rgb(234,128,1)" rx="2" ry="2" />
+<text  x="13.00" y="879.5" >malloc</text>
+</g>
+<g >
+<title>std::string::_Rep::_S_create (1 samples, 6.25%)</title><rect x="526.2" y="661" width="73.8" height="15.0" fill="rgb(214,2,30)" rx="2" ry="2" />
+<text  x="529.25" y="671.5" >std::str..</text>
+</g>
+<g >
+<title>OStorage::getPropertyValue (1 samples, 6.25%)</title><rect x="895.0" y="581" width="73.8" height="15.0" fill="rgb(228,6,16)" rx="2" ry="2" />
+<text  x="898.00" y="591.5" >OStorage..</text>
+</g>
+<g >
+<title>malloc (2 samples, 12.50%)</title><rect x="305.0" y="517" width="147.5" height="15.0" fill="rgb(230,181,9)" rx="2" ry="2" />
+<text  x="308.00" y="527.5" >malloc</text>
+</g>
+<g >
+<title>libreofficekit_hook_2 (7 samples, 43.75%)</title><rect x="231.2" y="997" width="516.3" height="15.0" fill="rgb(246,47,16)" rx="2" ry="2" />
+<text  x="234.25" y="1007.5" >libreofficekit_hook_2</text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 6.25%)</title><rect x="526.2" y="549" width="73.8" height="15.0" fill="rgb(214,189,17)" rx="2" ry="2" />
+<text  x="529.25" y="559.5" >do_user_..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_insert_bracket_matcher&lt;false, false&gt; (3 samples, 18.75%)</title><rect x="305.0" y="645" width="221.2" height="15.0" fill="rgb(242,164,44)" rx="2" ry="2" />
+<text  x="308.00" y="655.5" >std::__detail::_Compiler&lt;std:..</text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (5 samples, 31.25%)</title><rect x="821.2" y="1029" width="368.8" height="15.0" fill="rgb(250,173,4)" rx="2" ry="2" />
+<text  x="824.25" y="1039.5" >std::_Function_handler&lt;void </text>
+</g>
+<g >
+<title>createLibreOfficeKit (11 samples, 68.75%)</title><rect x="10.0" y="1061" width="811.2" height="15.0" fill="rgb(215,69,26)" rx="2" ry="2" />
+<text  x="13.00" y="1071.5" >createLibreOfficeKit</text>
+</g>
+<g >
+<title>unlink_chunk.isra.3 (1 samples, 6.25%)</title><rect x="452.5" y="453" width="73.7" height="15.0" fill="rgb(206,203,35)" rx="2" ry="2" />
+<text  x="455.50" y="463.5" >unlink_c..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (4 samples, 25.00%)</title><rect x="231.2" y="757" width="295.0" height="15.0" fill="rgb(244,105,21)" rx="2" ry="2" />
+<text  x="234.25" y="767.5" >std::__detail::_Compiler&lt;std::regex_tra..</text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 6.25%)</title><rect x="10.0" y="757" width="73.8" height="15.0" fill="rgb(239,104,44)" rx="2" ry="2" />
+<text  x="13.00" y="767.5" >__handle..</text>
+</g>
+<g >
+<title>handle_mm_fault (2 samples, 12.50%)</title><rect x="305.0" y="421" width="147.5" height="15.0" fill="rgb(209,38,9)" rx="2" ry="2" />
+<text  x="308.00" y="431.5" >handle_mm_fault</text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 6.25%)</title><rect x="895.0" y="181" width="73.8" height="15.0" fill="rgb(212,228,14)" rx="2" ry="2" />
+<text  x="898.00" y="191.5" >asm_exc_..</text>
+</g>
+<g >
+<title>ChildSession::loadDocument (5 samples, 31.25%)</title><rect x="821.2" y="789" width="368.8" height="15.0" fill="rgb(251,36,18)" rx="2" ry="2" />
+<text  x="824.25" y="799.5" >ChildSession::loadDocument</text>
+</g>
+<g >
+<title>std::string::_Rep::_M_clone (1 samples, 6.25%)</title><rect x="231.2" y="501" width="73.8" height="15.0" fill="rgb(206,194,7)" rx="2" ry="2" />
+<text  x="234.25" y="511.5" >std::str..</text>
+</g>
+<g >
+<title>LocaleDataWrapper::LocaleDataWrapper (1 samples, 6.25%)</title><rect x="1042.5" y="309" width="73.7" height="15.0" fill="rgb(250,109,24)" rx="2" ry="2" />
+<text  x="1045.50" y="319.5" >LocaleDa..</text>
+</g>
+<g >
+<title>do_wp_page (1 samples, 6.25%)</title><rect x="1116.2" y="309" width="73.8" height="15.0" fill="rgb(227,25,23)" rx="2" ry="2" />
+<text  x="1119.25" y="319.5" >do_wp_page</text>
+</g>
+<g >
+<title>i18npool::LocaleDataImpl::getFunctionSymbol (1 samples, 6.25%)</title><rect x="1042.5" y="213" width="73.7" height="15.0" fill="rgb(210,197,47)" rx="2" ry="2" />
+<text  x="1045.50" y="223.5" >i18npool..</text>
+</g>
+<g >
+<title>ManifestImport::startElement (1 samples, 6.25%)</title><rect x="895.0" y="309" width="73.8" height="15.0" fill="rgb(214,97,35)" rx="2" ry="2" />
+<text  x="898.00" y="319.5" >Manifest..</text>
+</g>
+<g >
+<title>malloc (1 samples, 6.25%)</title><rect x="231.2" y="453" width="73.8" height="15.0" fill="rgb(248,35,40)" rx="2" ry="2" />
+<text  x="234.25" y="463.5" >malloc</text>
+</g>
+<g >
+<title>LocaleDataWrapper::loadData (1 samples, 6.25%)</title><rect x="1042.5" y="293" width="73.7" height="15.0" fill="rgb(213,53,28)" rx="2" ry="2" />
+<text  x="1045.50" y="303.5" >LocaleDa..</text>
+</g>
+<g >
+<title>std::__detail::_BracketMatcher&lt;std::regex_traits&lt;char&gt;, false, false&gt;::_M_ready (1 samples, 6.25%)</title><rect x="231.2" y="597" width="73.8" height="15.0" fill="rgb(226,166,48)" rx="2" ry="2" />
+<text  x="234.25" y="607.5" >std::__d..</text>
+</g>
+<g >
+<title>ManifestImport::ConvertName (1 samples, 6.25%)</title><rect x="895.0" y="277" width="73.8" height="15.0" fill="rgb(229,86,3)" rx="2" ry="2" />
+<text  x="898.00" y="287.5" >Manifest..</text>
+</g>
+<g >
+<title>Document::onLoad (5 samples, 31.25%)</title><rect x="821.2" y="773" width="368.8" height="15.0" fill="rgb(232,227,25)" rx="2" ry="2" />
+<text  x="824.25" y="783.5" >Document::onLoad</text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 6.25%)</title><rect x="452.5" y="389" width="73.7" height="15.0" fill="rgb(217,58,43)" rx="2" ry="2" />
+<text  x="455.50" y="399.5" >handle_m..</text>
+</g>
+<g >
+<title>Poco::Path::Path (1 samples, 6.25%)</title><rect x="747.5" y="965" width="73.7" height="15.0" fill="rgb(229,219,21)" rx="2" ry="2" />
+<text  x="750.50" y="975.5" >Poco::Pa..</text>
+</g>
+<g >
+<title>malloc (1 samples, 6.25%)</title><rect x="895.0" y="229" width="73.8" height="15.0" fill="rgb(240,38,30)" rx="2" ry="2" />
+<text  x="898.00" y="239.5" >malloc</text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 6.25%)</title><rect x="10.0" y="821" width="73.8" height="15.0" fill="rgb(223,128,35)" rx="2" ry="2" />
+<text  x="13.00" y="831.5" >asm_exc_..</text>
+</g>
+<g >
+<title>call_callbackStartElement (1 samples, 6.25%)</title><rect x="895.0" y="325" width="73.8" height="15.0" fill="rgb(243,6,46)" rx="2" ry="2" />
+<text  x="898.00" y="335.5" >call_cal..</text>
+</g>
+<g >
+<title>ScInterpreterContext::prepFormatterForRoMode (1 samples, 6.25%)</title><rect x="1042.5" y="389" width="73.7" height="15.0" fill="rgb(216,115,26)" rx="2" ry="2" />
+<text  x="1045.50" y="399.5" >ScInterp..</text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 6.25%)</title><rect x="10.0" y="805" width="73.8" height="15.0" fill="rgb(236,40,19)" rx="2" ry="2" />
+<text  x="13.00" y="815.5" >exc_page..</text>
+</g>
+<g >
+<title>std::string::_Rep::_S_create (1 samples, 6.25%)</title><rect x="600.0" y="709" width="73.8" height="15.0" fill="rgb(211,111,46)" rx="2" ry="2" />
+<text  x="603.00" y="719.5" >std::str..</text>
+</g>
+<g >
+<title>XML_ParseBuffer (1 samples, 6.25%)</title><rect x="895.0" y="421" width="73.8" height="15.0" fill="rgb(241,127,29)" rx="2" ry="2" />
+<text  x="898.00" y="431.5" >XML_Pars..</text>
+</g>
+<g >
+<title>do_wp_page (2 samples, 12.50%)</title><rect x="305.0" y="389" width="147.5" height="15.0" fill="rgb(210,63,12)" rx="2" ry="2" />
+<text  x="308.00" y="399.5" >do_wp_page</text>
+</g>
+<g >
+<title>_start (11 samples, 68.75%)</title><rect x="10.0" y="1125" width="811.2" height="15.0" fill="rgb(206,222,48)" rx="2" ry="2" />
+<text  x="13.00" y="1135.5" >_start</text>
+</g>
+<g >
+<title>asm_exc_page_fault (2 samples, 12.50%)</title><rect x="305.0" y="469" width="147.5" height="15.0" fill="rgb(226,96,29)" rx="2" ry="2" />
+<text  x="308.00" y="479.5" >asm_exc_page_fault</text>
+</g>
+<g >
+<title>std::collate&lt;char&gt;::do_transform (1 samples, 6.25%)</title><rect x="673.8" y="709" width="73.7" height="15.0" fill="rgb(221,185,50)" rx="2" ry="2" />
+<text  x="676.75" y="719.5" >std::col..</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 6.25%)</title><rect x="1042.5" y="149" width="73.7" height="15.0" fill="rgb(217,130,37)" rx="2" ry="2" />
+<text  x="1045.50" y="159.5" >_int_mal..</text>
+</g>
+<g >
+<title>std::string::append (1 samples, 6.25%)</title><rect x="452.5" y="565" width="73.7" height="15.0" fill="rgb(223,153,7)" rx="2" ry="2" />
+<text  x="455.50" y="575.5" >std::str..</text>
+</g>
+<g >
+<title>SvNumberFormatter::GetTheCurrencyTable (1 samples, 6.25%)</title><rect x="1042.5" y="357" width="73.7" height="15.0" fill="rgb(231,105,23)" rx="2" ry="2" />
+<text  x="1045.50" y="367.5" >SvNumber..</text>
+</g>
+<g >
+<title>do_wp_page (1 samples, 6.25%)</title><rect x="895.0" y="101" width="73.8" height="15.0" fill="rgb(230,160,54)" rx="2" ry="2" />
+<text  x="898.00" y="111.5" >do_wp_page</text>
+</g>
+<g >
+<title>all (16 samples, 100%)</title><rect x="10.0" y="1157" width="1180.0" height="15.0" fill="rgb(239,104,47)" rx="2" ry="2" />
+<text  x="13.00" y="1167.5" ></text>
+</g>
+<g >
+<title>std::string::_Rep::_S_create (1 samples, 6.25%)</title><rect x="231.2" y="485" width="73.8" height="15.0" fill="rgb(254,168,7)" rx="2" ry="2" />
+<text  x="234.25" y="495.5" >std::str..</text>
+</g>
+<g >
+<title>std::string::_Rep::_S_create (1 samples, 6.25%)</title><rect x="452.5" y="517" width="73.7" height="15.0" fill="rgb(217,185,41)" rx="2" ry="2" />
+<text  x="455.50" y="527.5" >std::str..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (7 samples, 43.75%)</title><rect x="231.2" y="901" width="516.3" height="15.0" fill="rgb(250,166,6)" rx="2" ry="2" />
+<text  x="234.25" y="911.5" >std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative</text>
+</g>
+<g >
+<title>Application::Execute (5 samples, 31.25%)</title><rect x="821.2" y="933" width="368.8" height="15.0" fill="rgb(235,167,8)" rx="2" ry="2" />
+<text  x="824.25" y="943.5" >Application::Execute</text>
+</g>
+<g >
+<title>cppuhelper::ServiceManager::Data::Implementation::doCreateInstanceWithArguments (1 samples, 6.25%)</title><rect x="1116.2" y="501" width="73.8" height="15.0" fill="rgb(216,5,14)" rx="2" ry="2" />
+<text  x="1119.25" y="511.5" >cppuhelp..</text>
+</g>
+<g >
+<title>lokit_main (11 samples, 68.75%)</title><rect x="10.0" y="1013" width="811.2" height="15.0" fill="rgb(212,208,6)" rx="2" ry="2" />
+<text  x="13.00" y="1023.5" >lokit_main</text>
+</g>
+<g >
+<title>SfxBaseModel::load (3 samples, 18.75%)</title><rect x="968.8" y="645" width="221.2" height="15.0" fill="rgb(249,175,3)" rx="2" ry="2" />
+<text  x="971.75" y="655.5" >SfxBaseModel::load</text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 6.25%)</title><rect x="231.2" y="341" width="73.8" height="15.0" fill="rgb(206,229,21)" rx="2" ry="2" />
+<text  x="234.25" y="351.5" >__handle..</text>
+</g>
+<g >
+<title>malloc (2 samples, 12.50%)</title><rect x="83.8" y="885" width="147.4" height="15.0" fill="rgb(243,4,24)" rx="2" ry="2" />
+<text  x="86.75" y="895.5" >malloc</text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 6.25%)</title><rect x="968.8" y="485" width="73.7" height="15.0" fill="rgb(235,25,12)" rx="2" ry="2" />
+<text  x="971.75" y="495.5" >__handle..</text>
+</g>
+<g >
+<title>std::string::_S_construct&lt;char const*&gt; (1 samples, 6.25%)</title><rect x="526.2" y="677" width="73.8" height="15.0" fill="rgb(217,207,41)" rx="2" ry="2" />
+<text  x="529.25" y="687.5" >std::str..</text>
+</g>
+<g >
+<title>NumberFormatCodeMapper::getFormats (1 samples, 6.25%)</title><rect x="1042.5" y="245" width="73.7" height="15.0" fill="rgb(245,78,8)" rx="2" ry="2" />
+<text  x="1045.50" y="255.5" >NumberFo..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (7 samples, 43.75%)</title><rect x="231.2" y="821" width="516.3" height="15.0" fill="rgb(212,224,7)" rx="2" ry="2" />
+<text  x="234.25" y="831.5" >std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative</text>
+</g>
+<g >
+<title>malloc (1 samples, 6.25%)</title><rect x="673.8" y="613" width="73.7" height="15.0" fill="rgb(239,33,54)" rx="2" ry="2" />
+<text  x="676.75" y="623.5" >malloc</text>
+</g>
+<g >
+<title>ManifestReader::readManifestSequence (1 samples, 6.25%)</title><rect x="895.0" y="437" width="73.8" height="15.0" fill="rgb(213,2,49)" rx="2" ry="2" />
+<text  x="898.00" y="447.5" >Manifest..</text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 6.25%)</title><rect x="747.5" y="741" width="73.7" height="15.0" fill="rgb(237,47,8)" rx="2" ry="2" />
+<text  x="750.50" y="751.5" >__handle..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_bracket_expression (1 samples, 6.25%)</title><rect x="526.2" y="757" width="73.8" height="15.0" fill="rgb(207,133,29)" rx="2" ry="2" />
+<text  x="529.25" y="767.5" >std::__d..</text>
+</g>
+<g >
+<title>std::__detail::_BracketMatcher&lt;std::regex_traits&lt;char&gt;, false, false&gt;::_M_ready (1 samples, 6.25%)</title><rect x="673.8" y="757" width="73.7" height="15.0" fill="rgb(207,188,43)" rx="2" ry="2" />
+<text  x="676.75" y="767.5" >std::__d..</text>
+</g>
+<g >
+<title>std::regex_traits&lt;char&gt;::transform_primary&lt;char const*&gt; (1 samples, 6.25%)</title><rect x="673.8" y="725" width="73.7" height="15.0" fill="rgb(209,199,8)" rx="2" ry="2" />
+<text  x="676.75" y="735.5" >std::reg..</text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 6.25%)</title><rect x="747.5" y="773" width="73.7" height="15.0" fill="rgb(239,145,17)" rx="2" ry="2" />
+<text  x="750.50" y="783.5" >do_user_..</text>
+</g>
+<g >
+<title>_int_malloc (2 samples, 12.50%)</title><rect x="83.8" y="869" width="147.4" height="15.0" fill="rgb(221,62,26)" rx="2" ry="2" />
+<text  x="86.75" y="879.5" >_int_malloc</text>
+</g>
+<g >
+<title>lt_trie_node_add (1 samples, 6.25%)</title><rect x="821.2" y="661" width="73.8" height="15.0" fill="rgb(228,179,53)" rx="2" ry="2" />
+<text  x="824.25" y="671.5" >lt_trie_..</text>
+</g>
+<g >
+<title>exc_page_fault (2 samples, 12.50%)</title><rect x="305.0" y="453" width="147.5" height="15.0" fill="rgb(252,209,17)" rx="2" ry="2" />
+<text  x="308.00" y="463.5" >exc_page_fault</text>
+</g>
+<g >
+<title>filter::config::TypeDetection::queryTypeByDescriptor (1 samples, 6.25%)</title><rect x="895.0" y="645" width="73.8" height="15.0" fill="rgb(246,111,17)" rx="2" ry="2" />
+<text  x="898.00" y="655.5" >filter::..</text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 6.25%)</title><rect x="1042.5" y="69" width="73.7" height="15.0" fill="rgb(221,138,34)" rx="2" ry="2" />
+<text  x="1045.50" y="79.5" >handle_m..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_bracket_expression (3 samples, 18.75%)</title><rect x="305.0" y="661" width="221.2" height="15.0" fill="rgb(234,98,17)" rx="2" ry="2" />
+<text  x="308.00" y="671.5" >std::__detail::_Compiler&lt;std:..</text>
+</g>
+<g >
+<title>SvXMLImport::startFastElement (1 samples, 6.25%)</title><rect x="1042.5" y="501" width="73.7" height="15.0" fill="rgb(222,219,19)" rx="2" ry="2" />
+<text  x="1045.50" y="511.5" >SvXMLImp..</text>
+</g>
+<g >
+<title>soffice_main (5 samples, 31.25%)</title><rect x="821.2" y="981" width="368.8" height="15.0" fill="rgb(225,49,54)" rx="2" ry="2" />
+<text  x="824.25" y="991.5" >soffice_main</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (6 samples, 37.50%)</title><rect x="231.2" y="789" width="442.6" height="15.0" fill="rgb(228,24,52)" rx="2" ry="2" />
+<text  x="234.25" y="799.5" >std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alter..</text>
+</g>
+<g >
+<title>KitSocketPoll::kitPoll (5 samples, 31.25%)</title><rect x="821.2" y="869" width="368.8" height="15.0" fill="rgb(228,162,21)" rx="2" ry="2" />
+<text  x="824.25" y="879.5" >KitSocketPoll::kitPoll</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (7 samples, 43.75%)</title><rect x="231.2" y="917" width="516.3" height="15.0" fill="rgb(224,178,52)" rx="2" ry="2" />
+<text  x="234.25" y="927.5" >std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative</text>
+</g>
+<g >
+<title>cppuhelper::ServiceManager::createInstanceWithArgumentsAndContext (1 samples, 6.25%)</title><rect x="895.0" y="533" width="73.8" height="15.0" fill="rgb(223,67,11)" rx="2" ry="2" />
+<text  x="898.00" y="543.5" >cppuhelp..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (1 samples, 6.25%)</title><rect x="231.2" y="661" width="73.8" height="15.0" fill="rgb(249,0,7)" rx="2" ry="2" />
+<text  x="234.25" y="671.5" >std::__d..</text>
+</g>
+<g >
+<title>ManifestImport::ConvertNameWithNamespace (1 samples, 6.25%)</title><rect x="895.0" y="261" width="73.8" height="15.0" fill="rgb(252,161,27)" rx="2" ry="2" />
+<text  x="898.00" y="271.5" >Manifest..</text>
+</g>
+<g >
+<title>operator new (1 samples, 6.25%)</title><rect x="600.0" y="693" width="73.8" height="15.0" fill="rgb(218,215,35)" rx="2" ry="2" />
+<text  x="603.00" y="703.5" >operator..</text>
+</g>
+<g >
+<title>LanguageTag::isValidBcp47 (1 samples, 6.25%)</title><rect x="821.2" y="725" width="73.8" height="15.0" fill="rgb(251,118,11)" rx="2" ry="2" />
+<text  x="824.25" y="735.5" >Language..</text>
+</g>
+<g >
+<title>operator new (1 samples, 6.25%)</title><rect x="1116.2" y="453" width="73.8" height="15.0" fill="rgb(228,144,21)" rx="2" ry="2" />
+<text  x="1119.25" y="463.5" >operator..</text>
+</g>
+<g >
+<title>do_wp_page (1 samples, 6.25%)</title><rect x="747.5" y="725" width="73.7" height="15.0" fill="rgb(244,162,31)" rx="2" ry="2" />
+<text  x="750.50" y="735.5" >do_wp_page</text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 6.25%)</title><rect x="526.2" y="565" width="73.8" height="15.0" fill="rgb(222,62,9)" rx="2" ry="2" />
+<text  x="529.25" y="575.5" >exc_page..</text>
+</g>
+<g >
+<title>do_wp_page (1 samples, 6.25%)</title><rect x="673.8" y="485" width="73.7" height="15.0" fill="rgb(235,125,36)" rx="2" ry="2" />
+<text  x="676.75" y="495.5" >do_wp_page</text>
+</g>
+<g >
+<title>LocaleDataWrapper::get (1 samples, 6.25%)</title><rect x="1042.5" y="325" width="73.7" height="15.0" fill="rgb(232,162,22)" rx="2" ry="2" />
+<text  x="1045.50" y="335.5" >LocaleDa..</text>
+</g>
+<g >
+<title>operator new (2 samples, 12.50%)</title><rect x="305.0" y="533" width="147.5" height="15.0" fill="rgb(214,1,51)" rx="2" ry="2" />
+<text  x="308.00" y="543.5" >operator new</text>
+</g>
+<g >
+<title>operator new (1 samples, 6.25%)</title><rect x="673.8" y="629" width="73.7" height="15.0" fill="rgb(238,106,51)" rx="2" ry="2" />
+<text  x="676.75" y="639.5" >operator..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (4 samples, 25.00%)</title><rect x="231.2" y="677" width="295.0" height="15.0" fill="rgb(253,16,21)" rx="2" ry="2" />
+<text  x="234.25" y="687.5" >std::__detail::_Compiler&lt;std::regex_tra..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 6.25%)</title><rect x="1042.5" y="517" width="73.7" height="15.0" fill="rgb(224,170,14)" rx="2" ry="2" />
+<text  x="1045.50" y="527.5" >sax_fast..</text>
+</g>
+<g >
+<title>std::collate&lt;char&gt;::do_transform (3 samples, 18.75%)</title><rect x="305.0" y="581" width="221.2" height="15.0" fill="rgb(233,143,47)" rx="2" ry="2" />
+<text  x="308.00" y="591.5" >std::collate&lt;char&gt;::do_transf..</text>
+</g>
+<g >
+<title>malloc (1 samples, 6.25%)</title><rect x="600.0" y="677" width="73.8" height="15.0" fill="rgb(251,68,3)" rx="2" ry="2" />
+<text  x="603.00" y="687.5" >malloc</text>
+</g>
+<g >
+<title>ZipPackage::initialize (1 samples, 6.25%)</title><rect x="895.0" y="485" width="73.8" height="15.0" fill="rgb(250,40,12)" rx="2" ry="2" />
+<text  x="898.00" y="495.5" >ZipPacka..</text>
+</g>
+<g >
+<title>ScDocShell::InitOptions (1 samples, 6.25%)</title><rect x="968.8" y="581" width="73.7" height="15.0" fill="rgb(241,169,19)" rx="2" ry="2" />
+<text  x="971.75" y="591.5" >ScDocShe..</text>
+</g>
+<g >
+<title>forkKit (11 samples, 68.75%)</title><rect x="10.0" y="1045" width="811.2" height="15.0" fill="rgb(251,107,13)" rx="2" ry="2" />
+<text  x="13.00" y="1055.5" >forkKit</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 6.25%)</title><rect x="231.2" y="437" width="73.8" height="15.0" fill="rgb(235,97,49)" rx="2" ry="2" />
+<text  x="234.25" y="447.5" >_int_mal..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_insert_bracket_matcher&lt;false, false&gt; (1 samples, 6.25%)</title><rect x="526.2" y="741" width="73.8" height="15.0" fill="rgb(224,154,23)" rx="2" ry="2" />
+<text  x="529.25" y="751.5" >std::__d..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 6.25%)</title><rect x="600.0" y="629" width="73.8" height="15.0" fill="rgb(209,187,30)" rx="2" ry="2" />
+<text  x="603.00" y="639.5" >asm_exc_..</text>
+</g>
+<g >
+<title>ZipPackage::parseManifest (1 samples, 6.25%)</title><rect x="895.0" y="453" width="73.8" height="15.0" fill="rgb(232,53,35)" rx="2" ry="2" />
+<text  x="898.00" y="463.5" >ZipPacka..</text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 6.25%)</title><rect x="821.2" y="549" width="73.8" height="15.0" fill="rgb(210,165,16)" rx="2" ry="2" />
+<text  x="824.25" y="559.5" >handle_m..</text>
+</g>
+<g >
+<title>std::string::reserve (2 samples, 12.50%)</title><rect x="83.8" y="949" width="147.4" height="15.0" fill="rgb(226,46,31)" rx="2" ry="2" />
+<text  x="86.75" y="959.5" >std::string::reserve</text>
+</g>
+<g >
+<title>std::__detail::_BracketMatcher&lt;std::regex_traits&lt;char&gt;, false, false&gt;::_M_apply (3 samples, 18.75%)</title><rect x="305.0" y="613" width="221.2" height="15.0" fill="rgb(240,38,50)" rx="2" ry="2" />
+<text  x="308.00" y="623.5" >std::__detail::_BracketMatche..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_bracket_expression (1 samples, 6.25%)</title><rect x="231.2" y="629" width="73.8" height="15.0" fill="rgb(238,164,49)" rx="2" ry="2" />
+<text  x="234.25" y="639.5" >std::__d..</text>
+</g>
+<g >
+<title>do_wp_page (1 samples, 6.25%)</title><rect x="600.0" y="549" width="73.8" height="15.0" fill="rgb(205,215,8)" rx="2" ry="2" />
+<text  x="603.00" y="559.5" >do_wp_page</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 6.25%)</title><rect x="10.0" y="853" width="73.8" height="15.0" fill="rgb(237,87,20)" rx="2" ry="2" />
+<text  x="13.00" y="863.5" >_int_mal..</text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 6.25%)</title><rect x="747.5" y="789" width="73.7" height="15.0" fill="rgb(226,171,44)" rx="2" ry="2" />
+<text  x="750.50" y="799.5" >exc_page..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_quantifier (1 samples, 6.25%)</title><rect x="600.0" y="757" width="73.8" height="15.0" fill="rgb(236,144,40)" rx="2" ry="2" />
+<text  x="603.00" y="767.5" >std::__d..</text>
+</g>
+<g >
+<title>do_user_addr_fault (2 samples, 12.50%)</title><rect x="83.8" y="805" width="147.4" height="15.0" fill="rgb(253,217,44)" rx="2" ry="2" />
+<text  x="86.75" y="815.5" >do_user_addr_fault</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 6.25%)</title><rect x="452.5" y="469" width="73.7" height="15.0" fill="rgb(221,57,0)" rx="2" ry="2" />
+<text  x="455.50" y="479.5" >_int_mal..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_bracket_expression (1 samples, 6.25%)</title><rect x="673.8" y="789" width="73.7" height="15.0" fill="rgb(238,113,11)" rx="2" ry="2" />
+<text  x="676.75" y="799.5" >std::__d..</text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (3 samples, 18.75%)</title><rect x="968.8" y="661" width="221.2" height="15.0" fill="rgb(244,78,14)" rx="2" ry="2" />
+<text  x="971.75" y="671.5" >framework::LoadEnv::impl_load..</text>
+</g>
+<g >
+<title>__libc_start_main (11 samples, 68.75%)</title><rect x="10.0" y="1109" width="811.2" height="15.0" fill="rgb(253,95,43)" rx="2" ry="2" />
+<text  x="13.00" y="1119.5" >__libc_start_main</text>
+</g>
+<g >
+<title>i18npool::(anonymous namespace)::lcl_LookupTableHelper::getFunctionSymbolByName (1 samples, 6.25%)</title><rect x="1042.5" y="197" width="73.7" height="15.0" fill="rgb(246,127,1)" rx="2" ry="2" />
+<text  x="1045.50" y="207.5" >i18npool..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 6.25%)</title><rect x="231.2" y="405" width="73.8" height="15.0" fill="rgb(238,211,9)" rx="2" ry="2" />
+<text  x="234.25" y="415.5" >asm_exc_..</text>
+</g>
+<g >
+<title>filter::config::TypeDetection::impl_askDetectService (1 samples, 6.25%)</title><rect x="895.0" y="613" width="73.8" height="15.0" fill="rgb(216,170,14)" rx="2" ry="2" />
+<text  x="898.00" y="623.5" >filter::..</text>
+</g>
+<g >
+<title>std::basic_regex&lt;char, std::regex_traits&lt;char&gt; &gt;::_M_compile (7 samples, 43.75%)</title><rect x="231.2" y="965" width="516.3" height="15.0" fill="rgb(243,98,19)" rx="2" ry="2" />
+<text  x="234.25" y="975.5" >std::basic_regex&lt;char, std::regex_traits&lt;char&gt; &gt;::_M_compile</text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 6.25%)</title><rect x="10.0" y="773" width="73.8" height="15.0" fill="rgb(224,59,2)" rx="2" ry="2" />
+<text  x="13.00" y="783.5" >handle_m..</text>
+</g>
+<g >
+<title>filter::config::TypeDetection::impl_detectTypeFlatAndDeep (1 samples, 6.25%)</title><rect x="895.0" y="629" width="73.8" height="15.0" fill="rgb(217,27,47)" rx="2" ry="2" />
+<text  x="898.00" y="639.5" >filter::..</text>
+</g>
+<g >
+<title>lokit_main (5 samples, 31.25%)</title><rect x="821.2" y="1013" width="368.8" height="15.0" fill="rgb(254,145,49)" rx="2" ry="2" />
+<text  x="824.25" y="1023.5" >lokit_main</text>
+</g>
+<g >
+<title>std::string::_Rep::_S_create (1 samples, 6.25%)</title><rect x="747.5" y="885" width="73.7" height="15.0" fill="rgb(228,196,29)" rx="2" ry="2" />
+<text  x="750.50" y="895.5" >std::str..</text>
+</g>
+<g >
+<title>std::__detail::_Compiler&lt;std::regex_traits&lt;char&gt; &gt;::_M_alternative (4 samples, 25.00%)</title><rect x="231.2" y="741" width="295.0" height="15.0" fill="rgb(248,219,27)" rx="2" ry="2" />
+<text  x="234.25" y="751.5" >std::__detail::_Compiler&lt;std::regex_tra..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 6.25%)</title><rect x="821.2" y="597" width="73.8" height="15.0" fill="rgb(228,12,21)" rx="2" ry="2" />
+<text  x="824.25" y="607.5" >asm_exc_..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 6.25%)</title><rect x="968.8" y="549" width="73.7" height="15.0" fill="rgb(249,131,34)" rx="2" ry="2" />
+<text  x="971.75" y="559.5" >asm_exc_..</text>
+</g>
+<g >
+<title>lt_region_db_lookup (1 samples, 6.25%)</title><rect x="821.2" y="693" width="73.8" height="15.0" fill="rgb(226,224,4)" rx="2" ry="2" />
+<text  x="824.25" y="703.5" >lt_regio..</text>
+</g>
+</g>
+</svg>
