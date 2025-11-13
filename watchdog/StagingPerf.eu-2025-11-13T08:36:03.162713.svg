@@ -1,0 +1,1073 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="1190" onload="init(evt)" viewBox="0 0 1200 1190" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="1190.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >StagingPerf.eu Watchdog Profile (2025-11-12T11:00:02.022464)</text>
+<text id="details" x="10.00" y="1173" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="1173" > </text>
+<g id="frames">
+<g >
+<title>oox::StorageBase::openInputStream (3 samples, 16.67%)</title><rect x="993.3" y="1061" width="196.7" height="15.0" fill="rgb(224,223,37)" rx="2" ry="2" />
+<text  x="996.33" y="1071.5" >oox::StorageBase::openInp..</text>
+</g>
+<g >
+<title>SfxBaseModel::load (3 samples, 16.67%)</title><rect x="796.7" y="1029" width="196.6" height="15.0" fill="rgb(224,8,50)" rx="2" ry="2" />
+<text  x="799.67" y="1039.5" >SfxBaseModel::load</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 16.67%)</title><rect x="468.9" y="757" width="196.7" height="15.0" fill="rgb(224,160,15)" rx="2" ry="2" />
+<text  x="471.89" y="767.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="725" width="65.6" height="15.0" fill="rgb(225,118,50)" rx="2" ry="2" />
+<text  x="734.11" y="735.5" >StgDirE..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 5.56%)</title><rect x="731.1" y="69" width="65.6" height="15.0" fill="rgb(224,39,34)" rx="2" ry="2" />
+<text  x="734.11" y="79.5" >_IO_fun..</text>
+</g>
+<g >
+<title>adler32_z (3 samples, 16.67%)</title><rect x="468.9" y="789" width="196.7" height="15.0" fill="rgb(214,72,20)" rx="2" ry="2" />
+<text  x="471.89" y="799.5" >adler32_z</text>
+</g>
+<g >
+<title>cppuhelper::ServiceManager::createInstanceWithContext (3 samples, 16.67%)</title><rect x="993.3" y="997" width="196.7" height="15.0" fill="rgb(246,165,43)" rx="2" ry="2" />
+<text  x="996.33" y="1007.5" >cppuhelper::ServiceManage..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="309" width="65.6" height="15.0" fill="rgb(228,21,28)" rx="2" ry="2" />
+<text  x="734.11" y="319.5" >StgDirE..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 16.67%)</title><rect x="796.7" y="821" width="196.6" height="15.0" fill="rgb(241,167,1)" rx="2" ry="2" />
+<text  x="799.67" y="831.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="501" width="65.6" height="15.0" fill="rgb(213,38,6)" rx="2" ry="2" />
+<text  x="734.11" y="511.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="565" width="65.6" height="15.0" fill="rgb(220,191,30)" rx="2" ry="2" />
+<text  x="734.11" y="575.5" >StgDirE..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 5.56%)</title><rect x="665.6" y="741" width="65.5" height="15.0" fill="rgb(243,82,40)" rx="2" ry="2" />
+<text  x="668.56" y="751.5" >_IO_fun..</text>
+</g>
+<g >
+<title>deflate (3 samples, 16.67%)</title><rect x="468.9" y="853" width="196.7" height="15.0" fill="rgb(218,66,30)" rx="2" ry="2" />
+<text  x="471.89" y="863.5" >deflate</text>
+</g>
+<g >
+<title>ImportExcel8::PostDocLoad (1 samples, 5.56%)</title><rect x="665.6" y="1061" width="65.5" height="15.0" fill="rgb(216,154,12)" rx="2" ry="2" />
+<text  x="668.56" y="1071.5" >ImportE..</text>
+</g>
+<g >
+<title>XclImpObjectManager::ConvertObjects (1 samples, 5.56%)</title><rect x="665.6" y="1029" width="65.5" height="15.0" fill="rgb(252,197,22)" rx="2" ry="2" />
+<text  x="668.56" y="1039.5" >XclImpO..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="549" width="65.6" height="15.0" fill="rgb(220,18,35)" rx="2" ry="2" />
+<text  x="734.11" y="559.5" >StgDirE..</text>
+</g>
+<g >
+<title>SvFileStream::PutData (1 samples, 5.56%)</title><rect x="731.1" y="117" width="65.6" height="15.0" fill="rgb(228,216,53)" rx="2" ry="2" />
+<text  x="734.11" y="127.5" >SvFileS..</text>
+</g>
+<g >
+<title>openFile (3 samples, 16.67%)</title><rect x="993.3" y="901" width="196.7" height="15.0" fill="rgb(208,146,16)" rx="2" ry="2" />
+<text  x="996.33" y="911.5" >openFile</text>
+</g>
+<g >
+<title>comp_EventAttacher::(anonymous namespace)::EventAttacherImpl::attachMultipleEventListeners (1 samples, 5.56%)</title><rect x="665.6" y="805" width="65.5" height="15.0" fill="rgb(222,52,48)" rx="2" ry="2" />
+<text  x="668.56" y="815.5" >comp_Ev..</text>
+</g>
+<g >
+<title>open (3 samples, 16.67%)</title><rect x="993.3" y="853" width="196.7" height="15.0" fill="rgb(245,159,19)" rx="2" ry="2" />
+<text  x="996.33" y="863.5" >open</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="341" width="65.6" height="15.0" fill="rgb(232,106,2)" rx="2" ry="2" />
+<text  x="734.11" y="351.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="901" width="65.6" height="15.0" fill="rgb(214,222,43)" rx="2" ry="2" />
+<text  x="734.11" y="911.5" >StgDirE..</text>
+</g>
+<g >
+<title>syscall (7 samples, 38.89%)</title><rect x="10.0" y="1077" width="458.9" height="15.0" fill="rgb(223,121,35)" rx="2" ry="2" />
+<text  x="13.00" y="1087.5" >syscall</text>
+</g>
+<g >
+<title>syscall (3 samples, 16.67%)</title><rect x="796.7" y="805" width="196.6" height="15.0" fill="rgb(237,132,52)" rx="2" ry="2" />
+<text  x="799.67" y="815.5" >syscall</text>
+</g>
+<g >
+<title>StgDataStrm::Write (1 samples, 5.56%)</title><rect x="731.1" y="245" width="65.6" height="15.0" fill="rgb(231,171,5)" rx="2" ry="2" />
+<text  x="734.11" y="255.5" >StgData..</text>
+</g>
+<g >
+<title>ChildSession::saveAs (3 samples, 16.67%)</title><rect x="468.9" y="1093" width="196.7" height="15.0" fill="rgb(231,38,24)" rx="2" ry="2" />
+<text  x="471.89" y="1103.5" >ChildSession::saveAs</text>
+</g>
+<g >
+<title>frm::OInterfaceContainer::registerScriptEvents (1 samples, 5.56%)</title><rect x="665.6" y="885" width="65.5" height="15.0" fill="rgb(226,22,25)" rx="2" ry="2" />
+<text  x="668.56" y="895.5" >frm::OI..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="709" width="65.6" height="15.0" fill="rgb(247,103,42)" rx="2" ry="2" />
+<text  x="734.11" y="719.5" >StgDirE..</text>
+</g>
+<g >
+<title>SfxObjectShell::APISaveAs_Impl (3 samples, 16.67%)</title><rect x="468.9" y="1029" width="196.7" height="15.0" fill="rgb(247,47,19)" rx="2" ry="2" />
+<text  x="471.89" y="1039.5" >SfxObjectShell::APISaveAs..</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 16.67%)</title><rect x="993.3" y="837" width="196.7" height="15.0" fill="rgb(247,200,52)" rx="2" ry="2" />
+<text  x="996.33" y="847.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>framework::LoadEnv::loadComponentFromURL (3 samples, 16.67%)</title><rect x="796.7" y="1093" width="196.6" height="15.0" fill="rgb(218,76,38)" rx="2" ry="2" />
+<text  x="799.67" y="1103.5" >framework::LoadEnv::loadC..</text>
+</g>
+<g >
+<title>GraphicExportFilter::filterRenderDocument (3 samples, 16.67%)</title><rect x="468.9" y="949" width="196.7" height="15.0" fill="rgb(235,229,31)" rx="2" ry="2" />
+<text  x="471.89" y="959.5" >GraphicExportFilter::filt..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="389" width="65.6" height="15.0" fill="rgb(250,52,9)" rx="2" ry="2" />
+<text  x="734.11" y="399.5" >StgDirE..</text>
+</g>
+<g >
+<title>png_write_row (3 samples, 16.67%)</title><rect x="468.9" y="901" width="196.7" height="15.0" fill="rgb(206,78,53)" rx="2" ry="2" />
+<text  x="471.89" y="911.5" >png_write_row</text>
+</g>
+<g >
+<title>png_compress_IDAT (3 samples, 16.67%)</title><rect x="468.9" y="869" width="196.7" height="15.0" fill="rgb(207,15,54)" rx="2" ry="2" />
+<text  x="471.89" y="879.5" >png_compress_IDAT</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="373" width="65.6" height="15.0" fill="rgb(208,26,15)" rx="2" ry="2" />
+<text  x="734.11" y="383.5" >StgDirE..</text>
+</g>
+<g >
+<title>ImportExcel8::Read (3 samples, 16.67%)</title><rect x="796.7" y="965" width="196.6" height="15.0" fill="rgb(246,112,11)" rx="2" ry="2" />
+<text  x="799.67" y="975.5" >ImportExcel8::Read</text>
+</g>
+<g >
+<title>cppuhelper::ServiceManager::Data::Implementation::createInstance (3 samples, 16.67%)</title><rect x="993.3" y="981" width="196.7" height="15.0" fill="rgb(233,20,0)" rx="2" ry="2" />
+<text  x="996.33" y="991.5" >cppuhelper::ServiceManage..</text>
+</g>
+<g >
+<title>SfxBaseModel::storeToURL (3 samples, 16.67%)</title><rect x="468.9" y="1061" width="196.7" height="15.0" fill="rgb(217,118,8)" rx="2" ry="2" />
+<text  x="471.89" y="1071.5" >SfxBaseModel::storeToURL</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="821" width="65.6" height="15.0" fill="rgb(228,55,49)" rx="2" ry="2" />
+<text  x="734.11" y="831.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="693" width="65.6" height="15.0" fill="rgb(222,210,43)" rx="2" ry="2" />
+<text  x="734.11" y="703.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="597" width="65.6" height="15.0" fill="rgb(217,169,48)" rx="2" ry="2" />
+<text  x="734.11" y="607.5" >StgDirE..</text>
+</g>
+<g >
+<title>vcl::pngWrite (3 samples, 16.67%)</title><rect x="468.9" y="917" width="196.7" height="15.0" fill="rgb(231,95,51)" rx="2" ry="2" />
+<text  x="471.89" y="927.5" >vcl::pngWrite</text>
+</g>
+<g >
+<title>SvStream::FlushBuffer (1 samples, 5.56%)</title><rect x="731.1" y="197" width="65.6" height="15.0" fill="rgb(250,193,50)" rx="2" ry="2" />
+<text  x="734.11" y="207.5" >SvStrea..</text>
+</g>
+<g >
+<title>SvStream::Seek (1 samples, 5.56%)</title><rect x="731.1" y="213" width="65.6" height="15.0" fill="rgb(211,184,20)" rx="2" ry="2" />
+<text  x="734.11" y="223.5" >SvStrea..</text>
+</g>
+<g >
+<title>OTempFileService::writeBytes (1 samples, 5.56%)</title><rect x="731.1" y="149" width="65.6" height="15.0" fill="rgb(227,145,18)" rx="2" ry="2" />
+<text  x="734.11" y="159.5" >OTempFi..</text>
+</g>
+<g >
+<title>ScFormulaCell::StartListeningTo (3 samples, 16.67%)</title><rect x="796.7" y="917" width="196.6" height="15.0" fill="rgb(206,190,52)" rx="2" ry="2" />
+<text  x="799.67" y="927.5" >ScFormulaCell::StartListe..</text>
+</g>
+<g >
+<title>docbroker (7 samples, 38.89%)</title><rect x="10.0" y="1125" width="458.9" height="15.0" fill="rgb(247,125,36)" rx="2" ry="2" />
+<text  x="13.00" y="1135.5" >docbroker</text>
+</g>
+<g >
+<title>osl_acquireMutex (1 samples, 5.56%)</title><rect x="665.6" y="773" width="65.5" height="15.0" fill="rgb(222,210,34)" rx="2" ry="2" />
+<text  x="668.56" y="783.5" >osl_acq..</text>
+</g>
+<g >
+<title>ImportExcel::PostDocLoad (1 samples, 5.56%)</title><rect x="665.6" y="1045" width="65.5" height="15.0" fill="rgb(215,131,40)" rx="2" ry="2" />
+<text  x="668.56" y="1055.5" >ImportE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="533" width="65.6" height="15.0" fill="rgb(206,15,15)" rx="2" ry="2" />
+<text  x="734.11" y="543.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="581" width="65.6" height="15.0" fill="rgb(250,134,3)" rx="2" ry="2" />
+<text  x="734.11" y="591.5" >StgDirE..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 5.56%)</title><rect x="665.6" y="725" width="65.5" height="15.0" fill="rgb(242,116,8)" rx="2" ry="2" />
+<text  x="668.56" y="735.5" >handleU..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="405" width="65.6" height="15.0" fill="rgb(221,157,29)" rx="2" ry="2" />
+<text  x="734.11" y="415.5" >StgDirE..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 16.67%)</title><rect x="993.3" y="821" width="196.7" height="15.0" fill="rgb(239,12,45)" rx="2" ry="2" />
+<text  x="996.33" y="831.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>framework::LoadEnv::start (3 samples, 16.67%)</title><rect x="796.7" y="1061" width="196.6" height="15.0" fill="rgb(236,63,29)" rx="2" ry="2" />
+<text  x="799.67" y="1071.5" >framework::LoadEnv::start</text>
+</g>
+<g >
+<title>__memset_avx2_erms (3 samples, 16.67%)</title><rect x="796.7" y="853" width="196.6" height="15.0" fill="rgb(232,94,41)" rx="2" ry="2" />
+<text  x="799.67" y="863.5" >__memset_avx2_erms</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="613" width="65.6" height="15.0" fill="rgb(252,143,44)" rx="2" ry="2" />
+<text  x="734.11" y="623.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="949" width="65.6" height="15.0" fill="rgb(253,130,10)" rx="2" ry="2" />
+<text  x="734.11" y="959.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="1029" width="65.6" height="15.0" fill="rgb(252,185,17)" rx="2" ry="2" />
+<text  x="734.11" y="1039.5" >StgDirE..</text>
+</g>
+<g >
+<title>OTempFileService::OTempFileService (3 samples, 16.67%)</title><rect x="993.3" y="933" width="196.7" height="15.0" fill="rgb(239,10,13)" rx="2" ry="2" />
+<text  x="996.33" y="943.5" >OTempFileService::OTempFi..</text>
+</g>
+<g >
+<title>pthread_mutex_lock (1 samples, 5.56%)</title><rect x="665.6" y="757" width="65.5" height="15.0" fill="rgb(215,149,28)" rx="2" ry="2" />
+<text  x="668.56" y="767.5" >pthread..</text>
+</g>
+<g >
+<title>XclImpDffConverter::ProcessDrawing (1 samples, 5.56%)</title><rect x="665.6" y="997" width="65.5" height="15.0" fill="rgb(207,196,27)" rx="2" ry="2" />
+<text  x="668.56" y="1007.5" >XclImpD..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="421" width="65.6" height="15.0" fill="rgb(237,122,12)" rx="2" ry="2" />
+<text  x="734.11" y="431.5" >StgDirE..</text>
+</g>
+<g >
+<title>ImportExcel8::Read (1 samples, 5.56%)</title><rect x="665.6" y="1077" width="65.5" height="15.0" fill="rgb(238,199,26)" rx="2" ry="2" />
+<text  x="668.56" y="1087.5" >ImportE..</text>
+</g>
+<g >
+<title>framework::LoadEnv::startLoading (3 samples, 16.67%)</title><rect x="796.7" y="1077" width="196.6" height="15.0" fill="rgb(248,50,36)" rx="2" ry="2" />
+<text  x="799.67" y="1087.5" >framework::LoadEnv::start..</text>
+</g>
+<g >
+<title>SvStream::PutData (1 samples, 5.56%)</title><rect x="731.1" y="181" width="65.6" height="15.0" fill="rgb(237,142,36)" rx="2" ry="2" />
+<text  x="734.11" y="191.5" >SvStrea..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 5.56%)</title><rect x="731.1" y="53" width="65.6" height="15.0" fill="rgb(247,80,14)" rx="2" ry="2" />
+<text  x="734.11" y="63.5" >handleU..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="357" width="65.6" height="15.0" fill="rgb(224,195,48)" rx="2" ry="2" />
+<text  x="734.11" y="367.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="981" width="65.6" height="15.0" fill="rgb(247,191,8)" rx="2" ry="2" />
+<text  x="734.11" y="991.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="917" width="65.6" height="15.0" fill="rgb(212,133,7)" rx="2" ry="2" />
+<text  x="734.11" y="927.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="293" width="65.6" height="15.0" fill="rgb(247,33,7)" rx="2" ry="2" />
+<text  x="734.11" y="303.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="1061" width="65.6" height="15.0" fill="rgb(213,111,50)" rx="2" ry="2" />
+<text  x="734.11" y="1071.5" >StgDirE..</text>
+</g>
+<g >
+<title>stoc_corefl::(anonymous namespace)::IdlInterfaceMethodImpl::getDeclaringClass (1 samples, 5.56%)</title><rect x="665.6" y="789" width="65.5" height="15.0" fill="rgb(223,191,47)" rx="2" ry="2" />
+<text  x="668.56" y="799.5" >stoc_co..</text>
+</g>
+<g >
+<title>ScDocumentImport::finalize (3 samples, 16.67%)</title><rect x="796.7" y="949" width="196.6" height="15.0" fill="rgb(241,165,47)" rx="2" ry="2" />
+<text  x="799.67" y="959.5" >ScDocumentImport::finalize</text>
+</g>
+<g >
+<title>ScBroadcastAreaSlotMachine::StartListeningArea (3 samples, 16.67%)</title><rect x="796.7" y="885" width="196.6" height="15.0" fill="rgb(208,37,34)" rx="2" ry="2" />
+<text  x="799.67" y="895.5" >ScBroadcastAreaSlotMachin..</text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (3 samples, 16.67%)</title><rect x="796.7" y="1045" width="196.6" height="15.0" fill="rgb(254,189,27)" rx="2" ry="2" />
+<text  x="799.67" y="1055.5" >framework::LoadEnv::impl_..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="1045" width="65.6" height="15.0" fill="rgb(249,5,39)" rx="2" ry="2" />
+<text  x="734.11" y="1055.5" >StgDirE..</text>
+</g>
+<g >
+<title>SfxObjectShell::ExportTo (3 samples, 16.67%)</title><rect x="468.9" y="965" width="196.7" height="15.0" fill="rgb(212,177,12)" rx="2" ry="2" />
+<text  x="471.89" y="975.5" >SfxObjectShell::ExportTo</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="885" width="65.6" height="15.0" fill="rgb(232,68,15)" rx="2" ry="2" />
+<text  x="734.11" y="895.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="437" width="65.6" height="15.0" fill="rgb(239,127,17)" rx="2" ry="2" />
+<text  x="734.11" y="447.5" >StgDirE..</text>
+</g>
+<g >
+<title>all (18 samples, 100%)</title><rect x="10.0" y="1141" width="1180.0" height="15.0" fill="rgb(239,38,10)" rx="2" ry="2" />
+<text  x="13.00" y="1151.5" ></text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="277" width="65.6" height="15.0" fill="rgb(236,147,48)" rx="2" ry="2" />
+<text  x="734.11" y="287.5" >StgDirE..</text>
+</g>
+<g >
+<title>ScDocShell::ConvertFrom (3 samples, 16.67%)</title><rect x="796.7" y="997" width="196.6" height="15.0" fill="rgb(226,88,5)" rx="2" ry="2" />
+<text  x="799.67" y="1007.5" >ScDocShell::ConvertFrom</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="485" width="65.6" height="15.0" fill="rgb(232,228,15)" rx="2" ry="2" />
+<text  x="734.11" y="495.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgCache::Write (1 samples, 5.56%)</title><rect x="731.1" y="229" width="65.6" height="15.0" fill="rgb(238,76,42)" rx="2" ry="2" />
+<text  x="734.11" y="239.5" >StgCach..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="469" width="65.6" height="15.0" fill="rgb(211,196,27)" rx="2" ry="2" />
+<text  x="734.11" y="479.5" >StgDirE..</text>
+</g>
+<g >
+<title>syscall (1 samples, 5.56%)</title><rect x="665.6" y="709" width="65.5" height="15.0" fill="rgb(228,67,19)" rx="2" ry="2" />
+<text  x="668.56" y="719.5" >syscall</text>
+</g>
+<g >
+<title>[unknown] (11 samples, 61.11%)</title><rect x="468.9" y="1109" width="721.1" height="15.0" fill="rgb(206,201,6)" rx="2" ry="2" />
+<text  x="471.89" y="1119.5" >[unknown]</text>
+</g>
+<g >
+<title>oox::ole::VbaUserForm::importForm (3 samples, 16.67%)</title><rect x="993.3" y="1093" width="196.7" height="15.0" fill="rgb(216,93,5)" rx="2" ry="2" />
+<text  x="996.33" y="1103.5" >oox::ole::VbaUserForm::im..</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 16.67%)</title><rect x="796.7" y="837" width="196.6" height="15.0" fill="rgb(230,93,4)" rx="2" ry="2" />
+<text  x="799.67" y="847.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>kitbroker (11 samples, 61.11%)</title><rect x="468.9" y="1125" width="721.1" height="15.0" fill="rgb(250,6,51)" rx="2" ry="2" />
+<text  x="471.89" y="1135.5" >kitbroker</text>
+</g>
+<g >
+<title>ScFormatFilterPluginImpl::ScImportExcel (3 samples, 16.67%)</title><rect x="796.7" y="981" width="196.6" height="15.0" fill="rgb(249,79,54)" rx="2" ry="2" />
+<text  x="799.67" y="991.5" >ScFormatFilterPluginImpl:..</text>
+</g>
+<g >
+<title>SdrObjList::NbcInsertObject (1 samples, 5.56%)</title><rect x="665.6" y="917" width="65.5" height="15.0" fill="rgb(211,120,35)" rx="2" ry="2" />
+<text  x="668.56" y="927.5" >SdrObjL..</text>
+</g>
+<g >
+<title>comphelper::(anonymous namespace)::ImplEventAttacherManager::registerScriptEvents (1 samples, 5.56%)</title><rect x="665.6" y="853" width="65.5" height="15.0" fill="rgb(221,117,27)" rx="2" ry="2" />
+<text  x="668.56" y="863.5" >comphel..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="933" width="65.6" height="15.0" fill="rgb(211,84,14)" rx="2" ry="2" />
+<text  x="734.11" y="943.5" >StgDirE..</text>
+</g>
+<g >
+<title>frm::OInterfaceContainer::impl_addVbEvents_nolck_nothrow (1 samples, 5.56%)</title><rect x="665.6" y="869" width="65.5" height="15.0" fill="rgb(205,18,13)" rx="2" ry="2" />
+<text  x="668.56" y="879.5" >frm::OI..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="789" width="65.6" height="15.0" fill="rgb(221,221,47)" rx="2" ry="2" />
+<text  x="734.11" y="799.5" >StgDirE..</text>
+</g>
+<g >
+<title>XclImpDffConverter::InsertSdrObject (1 samples, 5.56%)</title><rect x="665.6" y="933" width="65.5" height="15.0" fill="rgb(252,124,18)" rx="2" ry="2" />
+<text  x="668.56" y="943.5" >XclImpD..</text>
+</g>
+<g >
+<title>unotools_OTempFileService_get_implementation (3 samples, 16.67%)</title><rect x="993.3" y="949" width="196.7" height="15.0" fill="rgb(220,4,3)" rx="2" ry="2" />
+<text  x="996.33" y="959.5" >unotools_OTempFileService..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="853" width="65.6" height="15.0" fill="rgb(219,12,0)" rx="2" ry="2" />
+<text  x="734.11" y="863.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="453" width="65.6" height="15.0" fill="rgb(207,116,8)" rx="2" ry="2" />
+<text  x="734.11" y="463.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="837" width="65.6" height="15.0" fill="rgb(225,30,48)" rx="2" ry="2" />
+<text  x="734.11" y="847.5" >StgDirE..</text>
+</g>
+<g >
+<title>std::vector&lt;net::DNSCacheEntry, std::allocator&lt;net::DNSCacheEntry&gt; &gt;::_M_realloc_insert&lt;std::string const&amp;, net::HostEntry&amp;, std::chrono::time_point&lt;std::chrono::_V2::steady_clock, std::chrono::duration&lt;long, std::ratio&lt;1l, 1000000000l&gt; &gt; &gt; const&amp;&gt; (7 samples, 38.89%)</title><rect x="10.0" y="1093" width="458.9" height="15.0" fill="rgb(241,90,53)" rx="2" ry="2" />
+<text  x="13.00" y="1103.5" >std::vector&lt;net::DNSCacheEntry, std::allocator&lt;net::DNSCacheEn..</text>
+</g>
+<g >
+<title>StgDirEntry::Tmp2Strm (1 samples, 5.56%)</title><rect x="731.1" y="261" width="65.6" height="15.0" fill="rgb(232,134,35)" rx="2" ry="2" />
+<text  x="734.11" y="271.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="1077" width="65.6" height="15.0" fill="rgb(243,216,13)" rx="2" ry="2" />
+<text  x="734.11" y="1087.5" >StgDirE..</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 16.67%)</title><rect x="468.9" y="773" width="196.7" height="15.0" fill="rgb(249,57,6)" rx="2" ry="2" />
+<text  x="471.89" y="783.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>comphelper::(anonymous namespace)::ImplEventAttacherManager::attach (1 samples, 5.56%)</title><rect x="665.6" y="821" width="65.5" height="15.0" fill="rgb(237,182,9)" rx="2" ry="2" />
+<text  x="668.56" y="831.5" >comphel..</text>
+</g>
+<g >
+<title>FmFormObj::handlePageChange (1 samples, 5.56%)</title><rect x="665.6" y="901" width="65.5" height="15.0" fill="rgb(211,33,33)" rx="2" ry="2" />
+<text  x="668.56" y="911.5" >FmFormO..</text>
+</g>
+<g >
+<title>syscall (1 samples, 5.56%)</title><rect x="731.1" y="37" width="65.6" height="15.0" fill="rgb(211,140,51)" rx="2" ry="2" />
+<text  x="734.11" y="47.5" >syscall</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="661" width="65.6" height="15.0" fill="rgb(236,111,39)" rx="2" ry="2" />
+<text  x="734.11" y="671.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="741" width="65.6" height="15.0" fill="rgb(227,95,27)" rx="2" ry="2" />
+<text  x="734.11" y="751.5" >StgDirE..</text>
+</g>
+<g >
+<title>cppuhelper::ServiceManager::Data::Implementation::doCreateInstance (3 samples, 16.67%)</title><rect x="993.3" y="965" width="196.7" height="15.0" fill="rgb(235,3,49)" rx="2" ry="2" />
+<text  x="996.33" y="975.5" >cppuhelper::ServiceManage..</text>
+</g>
+<g >
+<title>OLESimpleStorage::getByName (3 samples, 16.67%)</title><rect x="993.3" y="1029" width="196.7" height="15.0" fill="rgb(242,96,48)" rx="2" ry="2" />
+<text  x="996.33" y="1039.5" >OLESimpleStorage::getByName</text>
+</g>
+<g >
+<title>XclImpDffConverter::ProcessDgContainer (1 samples, 5.56%)</title><rect x="665.6" y="981" width="65.5" height="15.0" fill="rgb(207,73,16)" rx="2" ry="2" />
+<text  x="668.56" y="991.5" >XclImpD..</text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;short, std::pair&lt;short const, ScBroadcastAreaSlotMachine::TableSlots&gt;, std::_Select1st&lt;std::pair&lt;short const, ScBroadcastAreaSlotMachine::TableSlots&gt; &gt;, std::less&lt;short&gt;, std::allocator&lt;std::pair&lt;short const, ScBroadcastAreaSlotMachine::TableSlots&gt; &gt; &gt;::_M_emplace_unique&lt;std::piecewise_construct_t const&amp;, std::tuple&lt;short&amp;&gt;, std::tuple&lt;unsigned long&amp;&gt; &gt; (3 samples, 16.67%)</title><rect x="796.7" y="869" width="196.6" height="15.0" fill="rgb(238,181,36)" rx="2" ry="2" />
+<text  x="799.67" y="879.5" >std::_Rb_tree&lt;short, std:..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="997" width="65.6" height="15.0" fill="rgb(209,66,36)" rx="2" ry="2" />
+<text  x="734.11" y="1007.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="517" width="65.6" height="15.0" fill="rgb(236,212,37)" rx="2" ry="2" />
+<text  x="734.11" y="527.5" >StgDirE..</text>
+</g>
+<g >
+<title>crc32_combine_op (3 samples, 16.67%)</title><rect x="468.9" y="821" width="196.7" height="15.0" fill="rgb(207,146,43)" rx="2" ry="2" />
+<text  x="471.89" y="831.5" >crc32_combine_op</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="325" width="65.6" height="15.0" fill="rgb(217,139,7)" rx="2" ry="2" />
+<text  x="734.11" y="335.5" >StgDirE..</text>
+</g>
+<g >
+<title>utl::UcbLockBytes::WriteAt (1 samples, 5.56%)</title><rect x="731.1" y="165" width="65.6" height="15.0" fill="rgb(241,65,7)" rx="2" ry="2" />
+<text  x="734.11" y="175.5" >utl::Uc..</text>
+</g>
+<g >
+<title>XclImpDffConverter::ProcessShContainer (1 samples, 5.56%)</title><rect x="665.6" y="949" width="65.5" height="15.0" fill="rgb(230,171,12)" rx="2" ry="2" />
+<text  x="668.56" y="959.5" >XclImpD..</text>
+</g>
+<g >
+<title>openFilePath (3 samples, 16.67%)</title><rect x="993.3" y="885" width="196.7" height="15.0" fill="rgb(213,24,52)" rx="2" ry="2" />
+<text  x="996.33" y="895.5" >openFilePath</text>
+</g>
+<g >
+<title>com::sun::star::io::TempFile::create (3 samples, 16.67%)</title><rect x="993.3" y="1013" width="196.7" height="15.0" fill="rgb(208,92,38)" rx="2" ry="2" />
+<text  x="996.33" y="1023.5" >com::sun::star::io::TempF..</text>
+</g>
+<g >
+<title>syscall (3 samples, 16.67%)</title><rect x="468.9" y="741" width="196.7" height="15.0" fill="rgb(246,167,14)" rx="2" ry="2" />
+<text  x="471.89" y="751.5" >syscall</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="805" width="65.6" height="15.0" fill="rgb(254,32,26)" rx="2" ry="2" />
+<text  x="734.11" y="815.5" >StgDirE..</text>
+</g>
+<g >
+<title>ScFormatFilterPluginImpl::ScImportExcel (1 samples, 5.56%)</title><rect x="665.6" y="1093" width="65.5" height="15.0" fill="rgb(209,199,20)" rx="2" ry="2" />
+<text  x="668.56" y="1103.5" >ScForma..</text>
+</g>
+<g >
+<title>png_write_find_filter (3 samples, 16.67%)</title><rect x="468.9" y="885" width="196.7" height="15.0" fill="rgb(236,228,36)" rx="2" ry="2" />
+<text  x="471.89" y="895.5" >png_write_find_filter</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="645" width="65.6" height="15.0" fill="rgb(238,10,20)" rx="2" ry="2" />
+<text  x="734.11" y="655.5" >StgDirE..</text>
+</g>
+<g >
+<title>ScDocument::StartListeningArea (3 samples, 16.67%)</title><rect x="796.7" y="901" width="196.6" height="15.0" fill="rgb(234,20,40)" rx="2" ry="2" />
+<text  x="799.67" y="911.5" >ScDocument::StartListenin..</text>
+</g>
+<g >
+<title>doc_saveAs (3 samples, 16.67%)</title><rect x="468.9" y="1077" width="196.7" height="15.0" fill="rgb(242,77,21)" rx="2" ry="2" />
+<text  x="471.89" y="1087.5" >doc_saveAs</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="1013" width="65.6" height="15.0" fill="rgb(245,159,51)" rx="2" ry="2" />
+<text  x="734.11" y="1023.5" >StgDirE..</text>
+</g>
+<g >
+<title>comphelper::(anonymous namespace)::ImplEventAttacherManager::registerScriptEvents (1 samples, 5.56%)</title><rect x="665.6" y="837" width="65.5" height="15.0" fill="rgb(213,65,24)" rx="2" ry="2" />
+<text  x="668.56" y="847.5" >comphel..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="757" width="65.6" height="15.0" fill="rgb(229,31,18)" rx="2" ry="2" />
+<text  x="734.11" y="767.5" >StgDirE..</text>
+</g>
+<g >
+<title>XclImpDrawing::ImplConvertObjects (1 samples, 5.56%)</title><rect x="665.6" y="1013" width="65.5" height="15.0" fill="rgb(233,40,22)" rx="2" ry="2" />
+<text  x="668.56" y="1023.5" >XclImpD..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="629" width="65.6" height="15.0" fill="rgb(231,127,0)" rx="2" ry="2" />
+<text  x="734.11" y="639.5" >StgDirE..</text>
+</g>
+<g >
+<title>utl::TempFileNamed::TempFileNamed (3 samples, 16.67%)</title><rect x="993.3" y="917" width="196.7" height="15.0" fill="rgb(236,229,34)" rx="2" ry="2" />
+<text  x="996.33" y="927.5" >utl::TempFileNamed::TempF..</text>
+</g>
+<g >
+<title>GraphicFilter::ExportGraphic (3 samples, 16.67%)</title><rect x="468.9" y="933" width="196.7" height="15.0" fill="rgb(233,167,25)" rx="2" ry="2" />
+<text  x="471.89" y="943.5" >GraphicFilter::ExportGrap..</text>
+</g>
+<g >
+<title>oox::ole::OleStorage::implOpenInputStream (3 samples, 16.67%)</title><rect x="993.3" y="1045" width="196.7" height="15.0" fill="rgb(239,188,38)" rx="2" ry="2" />
+<text  x="996.33" y="1055.5" >oox::ole::OleStorage::imp..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="1093" width="65.6" height="15.0" fill="rgb(207,36,26)" rx="2" ry="2" />
+<text  x="734.11" y="1103.5" >StgDirE..</text>
+</g>
+<g >
+<title>XclImpDffConverter::ProcessShGrContainer (1 samples, 5.56%)</title><rect x="665.6" y="965" width="65.5" height="15.0" fill="rgb(244,75,28)" rx="2" ry="2" />
+<text  x="668.56" y="975.5" >XclImpD..</text>
+</g>
+<g >
+<title>open_c (3 samples, 16.67%)</title><rect x="993.3" y="869" width="196.7" height="15.0" fill="rgb(236,219,54)" rx="2" ry="2" />
+<text  x="996.33" y="879.5" >open_c</text>
+</g>
+<g >
+<title>SfxObjectShell::CommonSaveAs_Impl (3 samples, 16.67%)</title><rect x="468.9" y="1013" width="196.7" height="15.0" fill="rgb(237,125,22)" rx="2" ry="2" />
+<text  x="471.89" y="1023.5" >SfxObjectShell::CommonSav..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="869" width="65.6" height="15.0" fill="rgb(229,218,14)" rx="2" ry="2" />
+<text  x="734.11" y="879.5" >StgDirE..</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="773" width="65.6" height="15.0" fill="rgb(224,134,46)" rx="2" ry="2" />
+<text  x="734.11" y="783.5" >StgDirE..</text>
+</g>
+<g >
+<title>deflateBound (3 samples, 16.67%)</title><rect x="468.9" y="837" width="196.7" height="15.0" fill="rgb(228,204,36)" rx="2" ry="2" />
+<text  x="471.89" y="847.5" >deflateBound</text>
+</g>
+<g >
+<title>ScDocumentImport::initColumn (3 samples, 16.67%)</title><rect x="796.7" y="933" width="196.6" height="15.0" fill="rgb(230,90,4)" rx="2" ry="2" />
+<text  x="799.67" y="943.5" >ScDocumentImport::initCol..</text>
+</g>
+<g >
+<title>syscall (3 samples, 16.67%)</title><rect x="993.3" y="805" width="196.7" height="15.0" fill="rgb(252,43,2)" rx="2" ry="2" />
+<text  x="996.33" y="815.5" >syscall</text>
+</g>
+<g >
+<title>pwrite (1 samples, 5.56%)</title><rect x="731.1" y="85" width="65.6" height="15.0" fill="rgb(211,199,50)" rx="2" ry="2" />
+<text  x="734.11" y="95.5" >pwrite</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="677" width="65.6" height="15.0" fill="rgb(234,162,17)" rx="2" ry="2" />
+<text  x="734.11" y="687.5" >StgDirE..</text>
+</g>
+<g >
+<title>SfxObjectShell::PreDoSaveAs_Impl (3 samples, 16.67%)</title><rect x="468.9" y="997" width="196.7" height="15.0" fill="rgb(236,212,31)" rx="2" ry="2" />
+<text  x="471.89" y="1007.5" >SfxObjectShell::PreDoSave..</text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (3 samples, 16.67%)</title><rect x="796.7" y="1013" width="196.6" height="15.0" fill="rgb(253,205,42)" rx="2" ry="2" />
+<text  x="799.67" y="1023.5" >SfxObjectShell::DoLoad</text>
+</g>
+<g >
+<title>SfxObjectShell::SaveTo_Impl (3 samples, 16.67%)</title><rect x="468.9" y="981" width="196.7" height="15.0" fill="rgb(231,169,8)" rx="2" ry="2" />
+<text  x="471.89" y="991.5" >SfxObjectShell::SaveTo_Impl</text>
+</g>
+<g >
+<title>SvStream::WriteBytes (1 samples, 5.56%)</title><rect x="731.1" y="133" width="65.6" height="15.0" fill="rgb(241,77,42)" rx="2" ry="2" />
+<text  x="734.11" y="143.5" >SvStrea..</text>
+</g>
+<g >
+<title>osl_writeFile (1 samples, 5.56%)</title><rect x="731.1" y="101" width="65.6" height="15.0" fill="rgb(253,208,2)" rx="2" ry="2" />
+<text  x="734.11" y="111.5" >osl_wri..</text>
+</g>
+<g >
+<title>oox::ole::VbaFormControl::importStorage (3 samples, 16.67%)</title><rect x="993.3" y="1077" width="196.7" height="15.0" fill="rgb(221,134,22)" rx="2" ry="2" />
+<text  x="996.33" y="1087.5" >oox::ole::VbaFormControl:..</text>
+</g>
+<g >
+<title>crc32_combine_op (3 samples, 16.67%)</title><rect x="468.9" y="805" width="196.7" height="15.0" fill="rgb(246,64,52)" rx="2" ry="2" />
+<text  x="471.89" y="815.5" >crc32_combine_op</text>
+</g>
+<g >
+<title>StgDirEntry::StoreStreams (1 samples, 5.56%)</title><rect x="731.1" y="965" width="65.6" height="15.0" fill="rgb(240,162,20)" rx="2" ry="2" />
+<text  x="734.11" y="975.5" >StgDirE..</text>
+</g>
+<g >
+<title>SfxBaseModel::impl_store (3 samples, 16.67%)</title><rect x="468.9" y="1045" width="196.7" height="15.0" fill="rgb(245,119,48)" rx="2" ry="2" />
+<text  x="471.89" y="1055.5" >SfxBaseModel::impl_store</text>
+</g>
+<g >
+<title>[unknown] (7 samples, 38.89%)</title><rect x="10.0" y="1109" width="458.9" height="15.0" fill="rgb(207,122,53)" rx="2" ry="2" />
+<text  x="13.00" y="1119.5" >[unknown]</text>
+</g>
+</g>
+</svg>
