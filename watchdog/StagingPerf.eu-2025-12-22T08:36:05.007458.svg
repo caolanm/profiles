@@ -1,0 +1,1237 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="1238" onload="init(evt)" viewBox="0 0 1200 1238" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="1238.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >StagingPerf.eu Watchdog Profile (2025-12-21T11:00:01.948833)</text>
+<text id="details" x="10.00" y="1221" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="1221" > </text>
+<g id="frames">
+<g >
+<title>unlink_chunk.isra.3 (1 samples, 6.25%)</title><rect x="1116.2" y="85" width="73.8" height="15.0" fill="rgb(250,73,13)" rx="2" ry="2" />
+<text  x="1119.25" y="95.5" >unlink_c..</text>
+</g>
+<g >
+<title>ossl_sa_doall_arg (1 samples, 6.25%)</title><rect x="526.2" y="853" width="73.8" height="15.0" fill="rgb(251,63,17)" rx="2" ry="2" />
+<text  x="529.25" y="863.5" >ossl_sa_..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="357" width="73.8" height="15.0" fill="rgb(212,63,26)" rx="2" ry="2" />
+<text  x="1119.25" y="367.5" >std::__d..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="965" width="73.8" height="15.0" fill="rgb(248,77,9)" rx="2" ry="2" />
+<text  x="1119.25" y="975.5" >std::__d..</text>
+</g>
+<g >
+<title>comphelper::dispatchCommand (3 samples, 18.75%)</title><rect x="600.0" y="1077" width="221.2" height="15.0" fill="rgb(238,105,8)" rx="2" ry="2" />
+<text  x="603.00" y="1087.5" >comphelper::dispatchCommand</text>
+</g>
+<g >
+<title>SfxDispatchController_Impl::dispatch (3 samples, 18.75%)</title><rect x="821.2" y="1045" width="221.3" height="15.0" fill="rgb(254,184,45)" rx="2" ry="2" />
+<text  x="824.25" y="1055.5" >SfxDispatchController_Impl::d..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="917" width="73.8" height="15.0" fill="rgb(220,10,8)" rx="2" ry="2" />
+<text  x="1119.25" y="927.5" >std::__d..</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 18.75%)</title><rect x="821.2" y="613" width="221.3" height="15.0" fill="rgb(206,33,48)" rx="2" ry="2" />
+<text  x="824.25" y="623.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>syscall (1 samples, 6.25%)</title><rect x="1116.2" y="37" width="73.8" height="15.0" fill="rgb(254,90,16)" rx="2" ry="2" />
+<text  x="1119.25" y="47.5" >syscall</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="885" width="73.8" height="15.0" fill="rgb(250,31,22)" rx="2" ry="2" />
+<text  x="1119.25" y="895.5" >std::__d..</text>
+</g>
+<g >
+<title>SfxTabDialogController::Start_Impl (1 samples, 6.25%)</title><rect x="1042.5" y="1029" width="73.7" height="15.0" fill="rgb(244,99,39)" rx="2" ry="2" />
+<text  x="1045.50" y="1039.5" >SfxTabDi..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="325" width="73.8" height="15.0" fill="rgb(236,51,25)" rx="2" ry="2" />
+<text  x="1119.25" y="335.5" >std::__d..</text>
+</g>
+<g >
+<title>ASN1_item_d2i (1 samples, 6.25%)</title><rect x="526.2" y="1045" width="73.8" height="15.0" fill="rgb(223,139,50)" rx="2" ry="2" />
+<text  x="529.25" y="1055.5" >ASN1_ite..</text>
+</g>
+<g >
+<title>FreetypeFontInstance::FreetypeFontInstance (3 samples, 18.75%)</title><rect x="821.2" y="709" width="221.3" height="15.0" fill="rgb(246,110,37)" rx="2" ry="2" />
+<text  x="824.25" y="719.5" >FreetypeFontInstance::Freetyp..</text>
+</g>
+<g >
+<title>OutputDevice::GetTextWidthDouble (1 samples, 6.25%)</title><rect x="1042.5" y="725" width="73.7" height="15.0" fill="rgb(240,175,2)" rx="2" ry="2" />
+<text  x="1045.50" y="735.5" >OutputDe..</text>
+</g>
+<g >
+<title>SslStreamSocket::readIncomingData (1 samples, 6.25%)</title><rect x="526.2" y="1109" width="73.8" height="15.0" fill="rgb(233,94,24)" rx="2" ry="2" />
+<text  x="529.25" y="1119.5" >SslStrea..</text>
+</g>
+<g >
+<title>SvImpLBox::EntryInserted (1 samples, 6.25%)</title><rect x="1042.5" y="805" width="73.7" height="15.0" fill="rgb(233,30,22)" rx="2" ry="2" />
+<text  x="1045.50" y="815.5" >SvImpLBo..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="997" width="73.8" height="15.0" fill="rgb(219,2,21)" rx="2" ry="2" />
+<text  x="1119.25" y="1007.5" >std::__d..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="949" width="73.8" height="15.0" fill="rgb(253,45,0)" rx="2" ry="2" />
+<text  x="1119.25" y="959.5" >std::__d..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="517" width="73.8" height="15.0" fill="rgb(205,79,27)" rx="2" ry="2" />
+<text  x="1119.25" y="527.5" >std::__d..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="757" width="73.8" height="15.0" fill="rgb(217,209,12)" rx="2" ry="2" />
+<text  x="1119.25" y="767.5" >std::__d..</text>
+</g>
+<g >
+<title>SfxDispatcher::Call_Impl (1 samples, 6.25%)</title><rect x="1042.5" y="1093" width="73.7" height="15.0" fill="rgb(237,19,26)" rx="2" ry="2" />
+<text  x="1045.50" y="1103.5" >SfxDispa..</text>
+</g>
+<g >
+<title>syscall (1 samples, 6.25%)</title><rect x="526.2" y="805" width="73.8" height="15.0" fill="rgb(233,130,19)" rx="2" ry="2" />
+<text  x="529.25" y="815.5" >syscall</text>
+</g>
+<g >
+<title>malloc (1 samples, 6.25%)</title><rect x="1116.2" y="117" width="73.8" height="15.0" fill="rgb(231,36,19)" rx="2" ry="2" />
+<text  x="1119.25" y="127.5" >malloc</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="533" width="73.8" height="15.0" fill="rgb(244,132,30)" rx="2" ry="2" />
+<text  x="1119.25" y="543.5" >std::__d..</text>
+</g>
+<g >
+<title>ScDocShell::ExecutePageStyle (1 samples, 6.25%)</title><rect x="1042.5" y="1077" width="73.7" height="15.0" fill="rgb(251,174,44)" rx="2" ry="2" />
+<text  x="1045.50" y="1087.5" >ScDocShe..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="981" width="73.8" height="15.0" fill="rgb(244,95,37)" rx="2" ry="2" />
+<text  x="1119.25" y="991.5" >std::__d..</text>
+</g>
+<g >
+<title>VclAbstractDialog::StartExecuteAsync (1 samples, 6.25%)</title><rect x="1042.5" y="1061" width="73.7" height="15.0" fill="rgb(246,131,11)" rx="2" ry="2" />
+<text  x="1045.50" y="1071.5" >VclAbstr..</text>
+</g>
+<g >
+<title>ScTabView::MarkColumns (3 samples, 18.75%)</title><rect x="600.0" y="965" width="221.2" height="15.0" fill="rgb(249,106,6)" rx="2" ry="2" />
+<text  x="603.00" y="975.5" >ScTabView::MarkColumns</text>
+</g>
+<g >
+<title>ScViewData::GetScrPos (3 samples, 18.75%)</title><rect x="600.0" y="869" width="221.2" height="15.0" fill="rgb(214,146,0)" rx="2" ry="2" />
+<text  x="603.00" y="879.5" >ScViewData::GetScrPos</text>
+</g>
+<g >
+<title>ScGridWindow::UpdateAutoFillOverlay (3 samples, 18.75%)</title><rect x="600.0" y="901" width="221.2" height="15.0" fill="rgb(208,12,42)" rx="2" ry="2" />
+<text  x="603.00" y="911.5" >ScGridWindow::UpdateAutoFillO..</text>
+</g>
+<g >
+<title>ImplListBox::InsertEntry (3 samples, 18.75%)</title><rect x="821.2" y="837" width="221.3" height="15.0" fill="rgb(254,91,30)" rx="2" ry="2" />
+<text  x="824.25" y="847.5" >ImplListBox::InsertEntry</text>
+</g>
+<g >
+<title>SfxDispatchController_Impl::dispatch (1 samples, 6.25%)</title><rect x="1042.5" y="1109" width="73.7" height="15.0" fill="rgb(219,212,2)" rx="2" ry="2" />
+<text  x="1045.50" y="1119.5" >SfxDispa..</text>
+</g>
+<g >
+<title>comphelper::dispatchCommand (3 samples, 18.75%)</title><rect x="821.2" y="1109" width="221.3" height="15.0" fill="rgb(217,204,8)" rx="2" ry="2" />
+<text  x="824.25" y="1119.5" >comphelper::dispatchCommand</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="341" width="73.8" height="15.0" fill="rgb(231,211,36)" rx="2" ry="2" />
+<text  x="1119.25" y="351.5" >std::__d..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (7 samples, 43.75%)</title><rect x="10.0" y="1029" width="516.2" height="15.0" fill="rgb(214,228,29)" rx="2" ry="2" />
+<text  x="13.00" y="1039.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>ossl_method_store_do_all (1 samples, 6.25%)</title><rect x="526.2" y="869" width="73.8" height="15.0" fill="rgb(208,174,54)" rx="2" ry="2" />
+<text  x="529.25" y="879.5" >ossl_met..</text>
+</g>
+<g >
+<title>ScTabView::SetCursor (3 samples, 18.75%)</title><rect x="600.0" y="949" width="221.2" height="15.0" fill="rgb(253,159,33)" rx="2" ry="2" />
+<text  x="603.00" y="959.5" >ScTabView::SetCursor</text>
+</g>
+<g >
+<title>asn1_template_noexp_d2i (1 samples, 6.25%)</title><rect x="526.2" y="981" width="73.8" height="15.0" fill="rgb(223,176,7)" rx="2" ry="2" />
+<text  x="529.25" y="991.5" >asn1_tem..</text>
+</g>
+<g >
+<title>asn1_template_noexp_d2i (1 samples, 6.25%)</title><rect x="526.2" y="1013" width="73.8" height="15.0" fill="rgb(218,227,49)" rx="2" ry="2" />
+<text  x="529.25" y="1023.5" >asn1_tem..</text>
+</g>
+<g >
+<title>SvImpLBox::SetMostRight (1 samples, 6.25%)</title><rect x="1042.5" y="789" width="73.7" height="15.0" fill="rgb(215,119,36)" rx="2" ry="2" />
+<text  x="1045.50" y="799.5" >SvImpLBo..</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 6.25%)</title><rect x="1116.2" y="101" width="73.8" height="15.0" fill="rgb(239,33,22)" rx="2" ry="2" />
+<text  x="1119.25" y="111.5" >_int_mal..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="693" width="73.8" height="15.0" fill="rgb(236,64,8)" rx="2" ry="2" />
+<text  x="1119.25" y="703.5" >std::__d..</text>
+</g>
+<g >
+<title>LogicalFontInstance::GetGlyphBoundRect (1 samples, 6.25%)</title><rect x="1042.5" y="661" width="73.7" height="15.0" fill="rgb(208,110,32)" rx="2" ry="2" />
+<text  x="1045.50" y="671.5" >LogicalF..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="501" width="73.8" height="15.0" fill="rgb(206,60,38)" rx="2" ry="2" />
+<text  x="1119.25" y="511.5" >std::__d..</text>
+</g>
+<g >
+<title>std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt;::append (1 samples, 6.25%)</title><rect x="1116.2" y="197" width="73.8" height="15.0" fill="rgb(247,35,24)" rx="2" ry="2" />
+<text  x="1119.25" y="207.5" >std::bas..</text>
+</g>
+<g >
+<title>asn1_item_embed_d2i (1 samples, 6.25%)</title><rect x="526.2" y="965" width="73.8" height="15.0" fill="rgb(237,140,50)" rx="2" ry="2" />
+<text  x="529.25" y="975.5" >asn1_ite..</text>
+</g>
+<g >
+<title>SalInstanceComboBoxWithoutEdit::insert (3 samples, 18.75%)</title><rect x="821.2" y="869" width="221.3" height="15.0" fill="rgb(232,9,33)" rx="2" ry="2" />
+<text  x="824.25" y="879.5" >SalInstanceComboBoxWithoutEdi..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="277" width="73.8" height="15.0" fill="rgb(245,114,22)" rx="2" ry="2" />
+<text  x="1119.25" y="287.5" >std::__d..</text>
+</g>
+<g >
+<title>SocketPoll::poll (7 samples, 43.75%)</title><rect x="10.0" y="1077" width="516.2" height="15.0" fill="rgb(226,162,32)" rx="2" ry="2" />
+<text  x="13.00" y="1087.5" >SocketPoll::poll</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="1077" width="73.8" height="15.0" fill="rgb(254,68,42)" rx="2" ry="2" />
+<text  x="1119.25" y="1087.5" >std::__d..</text>
+</g>
+<g >
+<title>SfxDispatcher::Execute (3 samples, 18.75%)</title><rect x="600.0" y="1013" width="221.2" height="15.0" fill="rgb(249,85,30)" rx="2" ry="2" />
+<text  x="603.00" y="1023.5" >SfxDispatcher::Execute</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="821" width="73.8" height="15.0" fill="rgb(230,64,26)" rx="2" ry="2" />
+<text  x="1119.25" y="831.5" >std::__d..</text>
+</g>
+<g >
+<title>http::Session::syncRequest (7 samples, 43.75%)</title><rect x="10.0" y="1109" width="516.2" height="15.0" fill="rgb(236,134,7)" rx="2" ry="2" />
+<text  x="13.00" y="1119.5" >http::Session::syncRequest</text>
+</g>
+<g >
+<title>FilterData::rowHidden (3 samples, 18.75%)</title><rect x="600.0" y="837" width="221.2" height="15.0" fill="rgb(247,192,6)" rx="2" ry="2" />
+<text  x="603.00" y="847.5" >FilterData::rowHidden</text>
+</g>
+<g >
+<title>VclAbstractDialog::StartExecuteAsync (3 samples, 18.75%)</title><rect x="821.2" y="997" width="221.3" height="15.0" fill="rgb(219,40,24)" rx="2" ry="2" />
+<text  x="824.25" y="1007.5" >VclAbstractDialog::StartExecu..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 6.25%)</title><rect x="1116.2" y="53" width="73.8" height="15.0" fill="rgb(220,171,18)" rx="2" ry="2" />
+<text  x="1119.25" y="63.5" >handleUs..</text>
+</g>
+<g >
+<title>SvxPageDescPage::SvxPageDescPage (3 samples, 18.75%)</title><rect x="821.2" y="917" width="221.3" height="15.0" fill="rgb(231,127,20)" rx="2" ry="2" />
+<text  x="824.25" y="927.5" >SvxPageDescPage::SvxPageDescP..</text>
+</g>
+<g >
+<title>SvTreeListBox::ModelNotification (1 samples, 6.25%)</title><rect x="1042.5" y="821" width="73.7" height="15.0" fill="rgb(252,102,0)" rx="2" ry="2" />
+<text  x="1045.50" y="831.5" >SvTreeLi..</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 18.75%)</title><rect x="600.0" y="821" width="221.2" height="15.0" fill="rgb(213,147,15)" rx="2" ry="2" />
+<text  x="603.00" y="831.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>SvxNumOptionsTabPageHelper::GetI18nNumbering (3 samples, 18.75%)</title><rect x="821.2" y="901" width="221.3" height="15.0" fill="rgb(246,146,22)" rx="2" ry="2" />
+<text  x="824.25" y="911.5" >SvxNumOptionsTabPageHelper::G..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="645" width="73.8" height="15.0" fill="rgb(245,183,13)" rx="2" ry="2" />
+<text  x="1119.25" y="655.5" >std::__d..</text>
+</g>
+<g >
+<title>SslStreamSocket::doHandshake (1 samples, 6.25%)</title><rect x="526.2" y="1093" width="73.8" height="15.0" fill="rgb(242,89,2)" rx="2" ry="2" />
+<text  x="529.25" y="1103.5" >SslStrea..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="421" width="73.8" height="15.0" fill="rgb(224,146,16)" rx="2" ry="2" />
+<text  x="1119.25" y="431.5" >std::__d..</text>
+</g>
+<g >
+<title>SvLBoxItem::GetWidth (1 samples, 6.25%)</title><rect x="1042.5" y="773" width="73.7" height="15.0" fill="rgb(220,153,45)" rx="2" ry="2" />
+<text  x="1045.50" y="783.5" >SvLBoxIt..</text>
+</g>
+<g >
+<title>comphelper::dispatchCommand (3 samples, 18.75%)</title><rect x="821.2" y="1093" width="221.3" height="15.0" fill="rgb(248,0,8)" rx="2" ry="2" />
+<text  x="824.25" y="1103.5" >comphelper::dispatchCommand</text>
+</g>
+<g >
+<title>std::__detail::_List_node_base::_M_transfer (1 samples, 6.25%)</title><rect x="1042.5" y="629" width="73.7" height="15.0" fill="rgb(228,220,2)" rx="2" ry="2" />
+<text  x="1045.50" y="639.5" >std::__d..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 6.25%)</title><rect x="1116.2" y="69" width="73.8" height="15.0" fill="rgb(238,64,18)" rx="2" ry="2" />
+<text  x="1119.25" y="79.5" >_IO_funl..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 18.75%)</title><rect x="821.2" y="597" width="221.3" height="15.0" fill="rgb(245,22,51)" rx="2" ry="2" />
+<text  x="824.25" y="607.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="293" width="73.8" height="15.0" fill="rgb(250,6,31)" rx="2" ry="2" />
+<text  x="1119.25" y="303.5" >std::__d..</text>
+</g>
+<g >
+<title>ImplListBoxWindow::ImplUpdateEntryMetrics (3 samples, 18.75%)</title><rect x="821.2" y="821" width="221.3" height="15.0" fill="rgb(237,58,10)" rx="2" ry="2" />
+<text  x="824.25" y="831.5" >ImplListBoxWindow::ImplUpdate..</text>
+</g>
+<g >
+<title>syscall (1 samples, 6.25%)</title><rect x="1042.5" y="581" width="73.7" height="15.0" fill="rgb(248,182,16)" rx="2" ry="2" />
+<text  x="1045.50" y="591.5" >syscall</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="933" width="73.8" height="15.0" fill="rgb(207,20,43)" rx="2" ry="2" />
+<text  x="1119.25" y="943.5" >std::__d..</text>
+</g>
+<g >
+<title>FreetypeFontFace::CreateFontInstance (3 samples, 18.75%)</title><rect x="821.2" y="725" width="221.3" height="15.0" fill="rgb(212,174,18)" rx="2" ry="2" />
+<text  x="824.25" y="735.5" >FreetypeFontFace::CreateFontI..</text>
+</g>
+<g >
+<title>ScTabView::ShowAllCursors (3 samples, 18.75%)</title><rect x="600.0" y="933" width="221.2" height="15.0" fill="rgb(211,214,46)" rx="2" ry="2" />
+<text  x="603.00" y="943.5" >ScTabView::ShowAllCursors</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="261" width="73.8" height="15.0" fill="rgb(227,124,44)" rx="2" ry="2" />
+<text  x="1119.25" y="271.5" >std::__d..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="725" width="73.8" height="15.0" fill="rgb(232,84,7)" rx="2" ry="2" />
+<text  x="1119.25" y="735.5" >std::__d..</text>
+</g>
+<g >
+<title>asn1_item_embed_d2i (1 samples, 6.25%)</title><rect x="526.2" y="997" width="73.8" height="15.0" fill="rgb(248,0,53)" rx="2" ry="2" />
+<text  x="529.25" y="1007.5" >asn1_ite..</text>
+</g>
+<g >
+<title>ChildSession::unoCommand (3 samples, 18.75%)</title><rect x="821.2" y="1141" width="221.3" height="15.0" fill="rgb(205,97,33)" rx="2" ry="2" />
+<text  x="824.25" y="1151.5" >ChildSession::unoCommand</text>
+</g>
+<g >
+<title>ppoll (7 samples, 43.75%)</title><rect x="10.0" y="1061" width="516.2" height="15.0" fill="rgb(239,57,15)" rx="2" ry="2" />
+<text  x="13.00" y="1071.5" >ppoll</text>
+</g>
+<g >
+<title>ListBox::InsertEntry (3 samples, 18.75%)</title><rect x="821.2" y="853" width="221.3" height="15.0" fill="rgb(214,31,17)" rx="2" ry="2" />
+<text  x="824.25" y="863.5" >ListBox::InsertEntry</text>
+</g>
+<g >
+<title>SfxOfficeDispatch::dispatch (3 samples, 18.75%)</title><rect x="600.0" y="1045" width="221.2" height="15.0" fill="rgb(224,123,51)" rx="2" ry="2" />
+<text  x="603.00" y="1055.5" >SfxOfficeDispatch::dispatch</text>
+</g>
+<g >
+<title>tls_process_server_certificate (1 samples, 6.25%)</title><rect x="526.2" y="1061" width="73.8" height="15.0" fill="rgb(248,75,15)" rx="2" ry="2" />
+<text  x="529.25" y="1071.5" >tls_proc..</text>
+</g>
+<g >
+<title>ScDocShell::ExecutePageStyle (3 samples, 18.75%)</title><rect x="821.2" y="1013" width="221.3" height="15.0" fill="rgb(219,112,28)" rx="2" ry="2" />
+<text  x="824.25" y="1023.5" >ScDocShell::ExecutePageStyle</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="405" width="73.8" height="15.0" fill="rgb(211,47,38)" rx="2" ry="2" />
+<text  x="1119.25" y="415.5" >std::__d..</text>
+</g>
+<g >
+<title>FreetypeManager::CreateFont (3 samples, 18.75%)</title><rect x="821.2" y="693" width="221.3" height="15.0" fill="rgb(231,64,45)" rx="2" ry="2" />
+<text  x="824.25" y="703.5" >FreetypeManager::CreateFont</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="1061" width="73.8" height="15.0" fill="rgb(236,23,20)" rx="2" ry="2" />
+<text  x="1119.25" y="1071.5" >std::__d..</text>
+</g>
+<g >
+<title>ImplFontCache::GetCachedGlyphBoundRect (1 samples, 6.25%)</title><rect x="1042.5" y="645" width="73.7" height="15.0" fill="rgb(214,31,17)" rx="2" ry="2" />
+<text  x="1045.50" y="655.5" >ImplFont..</text>
+</g>
+<g >
+<title>[unknown] (8 samples, 50.00%)</title><rect x="10.0" y="1157" width="590.0" height="15.0" fill="rgb(225,31,21)" rx="2" ry="2" />
+<text  x="13.00" y="1167.5" >[unknown]</text>
+</g>
+<g >
+<title>ScGridWindow::DrawFillMarker (3 samples, 18.75%)</title><rect x="600.0" y="885" width="221.2" height="15.0" fill="rgb(232,184,35)" rx="2" ry="2" />
+<text  x="603.00" y="895.5" >ScGridWindow::DrawFillMarker</text>
+</g>
+<g >
+<title>ChildSession::unoCommand (3 samples, 18.75%)</title><rect x="600.0" y="1125" width="221.2" height="15.0" fill="rgb(236,94,0)" rx="2" ry="2" />
+<text  x="603.00" y="1135.5" >ChildSession::unoCommand</text>
+</g>
+<g >
+<title>syscall (3 samples, 18.75%)</title><rect x="821.2" y="581" width="221.3" height="15.0" fill="rgb(249,48,13)" rx="2" ry="2" />
+<text  x="824.25" y="591.5" >syscall</text>
+</g>
+<g >
+<title>docbroker (8 samples, 50.00%)</title><rect x="10.0" y="1173" width="590.0" height="15.0" fill="rgb(254,187,17)" rx="2" ry="2" />
+<text  x="13.00" y="1183.5" >docbroker</text>
+</g>
+<g >
+<title>OSSL_DECODER_CTX_new_for_pkey (1 samples, 6.25%)</title><rect x="526.2" y="933" width="73.8" height="15.0" fill="rgb(253,23,51)" rx="2" ry="2" />
+<text  x="529.25" y="943.5" >OSSL_DEC..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="853" width="73.8" height="15.0" fill="rgb(226,133,37)" rx="2" ry="2" />
+<text  x="1119.25" y="863.5" >std::__d..</text>
+</g>
+<g >
+<title>comphelper::dispatchCommand (3 samples, 18.75%)</title><rect x="821.2" y="1077" width="221.3" height="15.0" fill="rgb(206,90,45)" rx="2" ry="2" />
+<text  x="824.25" y="1087.5" >comphelper::dispatchCommand</text>
+</g>
+<g >
+<title>ScCellShell::ExecuteMove (3 samples, 18.75%)</title><rect x="600.0" y="981" width="221.2" height="15.0" fill="rgb(245,106,34)" rx="2" ry="2" />
+<text  x="603.00" y="991.5" >ScCellShell::ExecuteMove</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 6.25%)</title><rect x="526.2" y="837" width="73.8" height="15.0" fill="rgb(254,0,21)" rx="2" ry="2" />
+<text  x="529.25" y="847.5" >_IO_funl..</text>
+</g>
+<g >
+<title>syscall (3 samples, 18.75%)</title><rect x="600.0" y="789" width="221.2" height="15.0" fill="rgb(227,126,12)" rx="2" ry="2" />
+<text  x="603.00" y="799.5" >syscall</text>
+</g>
+<g >
+<title>SfxDispatcher::Call_Impl (3 samples, 18.75%)</title><rect x="600.0" y="997" width="221.2" height="15.0" fill="rgb(253,82,14)" rx="2" ry="2" />
+<text  x="603.00" y="1007.5" >SfxDispatcher::Call_Impl</text>
+</g>
+<g >
+<title>std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt;::reserve (1 samples, 6.25%)</title><rect x="1116.2" y="181" width="73.8" height="15.0" fill="rgb(211,116,9)" rx="2" ry="2" />
+<text  x="1119.25" y="191.5" >std::bas..</text>
+</g>
+<g >
+<title>FreetypeFont::FreetypeFont (3 samples, 18.75%)</title><rect x="821.2" y="677" width="221.3" height="15.0" fill="rgb(214,81,45)" rx="2" ry="2" />
+<text  x="824.25" y="687.5" >FreetypeFont::FreetypeFont</text>
+</g>
+<g >
+<title>std::collate&lt;wchar_t&gt;::do_transform (1 samples, 6.25%)</title><rect x="1116.2" y="213" width="73.8" height="15.0" fill="rgb(217,43,29)" rx="2" ry="2" />
+<text  x="1119.25" y="223.5" >std::col..</text>
+</g>
+<g >
+<title>FreetypeFontFile::Map (3 samples, 18.75%)</title><rect x="821.2" y="645" width="221.3" height="15.0" fill="rgb(232,226,45)" rx="2" ry="2" />
+<text  x="824.25" y="655.5" >FreetypeFontFile::Map</text>
+</g>
+<g >
+<title>SfxTabDialogController::runAsync (1 samples, 6.25%)</title><rect x="1042.5" y="1045" width="73.7" height="15.0" fill="rgb(219,223,13)" rx="2" ry="2" />
+<text  x="1045.50" y="1055.5" >SfxTabDi..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="485" width="73.8" height="15.0" fill="rgb(225,126,31)" rx="2" ry="2" />
+<text  x="1119.25" y="495.5" >std::__d..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 6.25%)</title><rect x="1042.5" y="613" width="73.7" height="15.0" fill="rgb(252,198,12)" rx="2" ry="2" />
+<text  x="1045.50" y="623.5" >_IO_funl..</text>
+</g>
+<g >
+<title>ImplFontCache::GetGlyphFallbackFont (3 samples, 18.75%)</title><rect x="821.2" y="757" width="221.3" height="15.0" fill="rgb(221,49,48)" rx="2" ry="2" />
+<text  x="824.25" y="767.5" >ImplFontCache::GetGlyphFallba..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="565" width="73.8" height="15.0" fill="rgb(214,210,40)" rx="2" ry="2" />
+<text  x="1119.25" y="575.5" >std::__d..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="1045" width="73.8" height="15.0" fill="rgb(245,87,31)" rx="2" ry="2" />
+<text  x="1119.25" y="1055.5" >std::__d..</text>
+</g>
+<g >
+<title>syscall (7 samples, 43.75%)</title><rect x="10.0" y="1013" width="516.2" height="15.0" fill="rgb(223,105,37)" rx="2" ry="2" />
+<text  x="13.00" y="1023.5" >syscall</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="805" width="73.8" height="15.0" fill="rgb(236,220,24)" rx="2" ry="2" />
+<text  x="1119.25" y="815.5" >std::__d..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="597" width="73.8" height="15.0" fill="rgb(217,214,17)" rx="2" ry="2" />
+<text  x="1119.25" y="607.5" >std::__d..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="677" width="73.8" height="15.0" fill="rgb(217,136,48)" rx="2" ry="2" />
+<text  x="1119.25" y="687.5" >std::__d..</text>
+</g>
+<g >
+<title>kitbroker (8 samples, 50.00%)</title><rect x="600.0" y="1173" width="590.0" height="15.0" fill="rgb(218,144,38)" rx="2" ry="2" />
+<text  x="603.00" y="1183.5" >kitbroker</text>
+</g>
+<g >
+<title>asn1_item_embed_d2i (1 samples, 6.25%)</title><rect x="526.2" y="1029" width="73.8" height="15.0" fill="rgb(236,166,1)" rx="2" ry="2" />
+<text  x="529.25" y="1039.5" >asn1_ite..</text>
+</g>
+<g >
+<title>virtual thunk to JSListBox::insert (3 samples, 18.75%)</title><rect x="821.2" y="885" width="221.3" height="15.0" fill="rgb(214,63,51)" rx="2" ry="2" />
+<text  x="824.25" y="895.5" >virtual thunk to JSListBox::i..</text>
+</g>
+<g >
+<title>ChildSession::_handleInput (3 samples, 18.75%)</title><rect x="600.0" y="1141" width="221.2" height="15.0" fill="rgb(213,178,25)" rx="2" ry="2" />
+<text  x="603.00" y="1151.5" >ChildSession::_handleInput</text>
+</g>
+<g >
+<title>std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt;::_Rep::_M_clone (1 samples, 6.25%)</title><rect x="1116.2" y="165" width="73.8" height="15.0" fill="rgb(226,125,17)" rx="2" ry="2" />
+<text  x="1119.25" y="175.5" >std::bas..</text>
+</g>
+<g >
+<title>ShadowControlsWrapper::SetControlValue (1 samples, 6.25%)</title><rect x="1042.5" y="981" width="73.7" height="15.0" fill="rgb(249,198,36)" rx="2" ry="2" />
+<text  x="1045.50" y="991.5" >ShadowCo..</text>
+</g>
+<g >
+<title>all (16 samples, 100%)</title><rect x="10.0" y="1189" width="1180.0" height="15.0" fill="rgb(223,140,0)" rx="2" ry="2" />
+<text  x="13.00" y="1199.5" ></text>
+</g>
+<g >
+<title>ossl_decoder_ctx_setup_for_pkey (1 samples, 6.25%)</title><rect x="526.2" y="917" width="73.8" height="15.0" fill="rgb(253,189,43)" rx="2" ry="2" />
+<text  x="529.25" y="927.5" >ossl_dec..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="661" width="73.8" height="15.0" fill="rgb(238,177,7)" rx="2" ry="2" />
+<text  x="1119.25" y="671.5" >std::__d..</text>
+</g>
+<g >
+<title>SfxOfficeDispatch::dispatch (1 samples, 6.25%)</title><rect x="1042.5" y="1125" width="73.7" height="15.0" fill="rgb(224,210,34)" rx="2" ry="2" />
+<text  x="1045.50" y="1135.5" >SfxOffic..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="901" width="73.8" height="15.0" fill="rgb(241,191,20)" rx="2" ry="2" />
+<text  x="1119.25" y="911.5" >std::__d..</text>
+</g>
+<g >
+<title>SalLayout::GetBoundRect (1 samples, 6.25%)</title><rect x="1042.5" y="677" width="73.7" height="15.0" fill="rgb(222,178,49)" rx="2" ry="2" />
+<text  x="1045.50" y="687.5" >SalLayou..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="1093" width="73.8" height="15.0" fill="rgb(222,151,21)" rx="2" ry="2" />
+<text  x="1119.25" y="1103.5" >std::__d..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="629" width="73.8" height="15.0" fill="rgb(208,227,5)" rx="2" ry="2" />
+<text  x="1119.25" y="639.5" >std::__d..</text>
+</g>
+<g >
+<title>ImplFontCache::GetFontInstance (3 samples, 18.75%)</title><rect x="821.2" y="741" width="221.3" height="15.0" fill="rgb(253,46,35)" rx="2" ry="2" />
+<text  x="824.25" y="751.5" >ImplFontCache::GetFontInstance</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="581" width="73.8" height="15.0" fill="rgb(238,115,15)" rx="2" ry="2" />
+<text  x="1119.25" y="591.5" >std::__d..</text>
+</g>
+<g >
+<title>std::regex_traits&lt;wchar_t&gt;::transform_primary&lt;wchar_t const*&gt; (1 samples, 6.25%)</title><rect x="1116.2" y="229" width="73.8" height="15.0" fill="rgb(253,38,10)" rx="2" ry="2" />
+<text  x="1119.25" y="239.5" >std::reg..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="869" width="73.8" height="15.0" fill="rgb(234,29,0)" rx="2" ry="2" />
+<text  x="1119.25" y="879.5" >std::__d..</text>
+</g>
+<g >
+<title>FreetypeFontInfo::GetFaceFT (3 samples, 18.75%)</title><rect x="821.2" y="661" width="221.3" height="15.0" fill="rgb(236,86,23)" rx="2" ry="2" />
+<text  x="824.25" y="671.5" >FreetypeFontInfo::GetFaceFT</text>
+</g>
+<g >
+<title>doc_postUnoCommand (3 samples, 18.75%)</title><rect x="821.2" y="1125" width="221.3" height="15.0" fill="rgb(228,69,23)" rx="2" ry="2" />
+<text  x="824.25" y="1135.5" >doc_postUnoCommand</text>
+</g>
+<g >
+<title>ColorListBox::createColorWindow (1 samples, 6.25%)</title><rect x="1042.5" y="933" width="73.7" height="15.0" fill="rgb(249,10,15)" rx="2" ry="2" />
+<text  x="1045.50" y="943.5" >ColorLis..</text>
+</g>
+<g >
+<title>SvxPageDescPage::Create (3 samples, 18.75%)</title><rect x="821.2" y="933" width="221.3" height="15.0" fill="rgb(220,226,1)" rx="2" ry="2" />
+<text  x="824.25" y="943.5" >SvxPageDescPage::Create</text>
+</g>
+<g >
+<title>mmap (3 samples, 18.75%)</title><rect x="821.2" y="629" width="221.3" height="15.0" fill="rgb(235,152,2)" rx="2" ry="2" />
+<text  x="824.25" y="639.5" >mmap</text>
+</g>
+<g >
+<title>PaletteManager::ReloadColorSet (1 samples, 6.25%)</title><rect x="1042.5" y="901" width="73.7" height="15.0" fill="rgb(224,65,42)" rx="2" ry="2" />
+<text  x="1045.50" y="911.5" >PaletteM..</text>
+</g>
+<g >
+<title>operator new (1 samples, 6.25%)</title><rect x="1116.2" y="133" width="73.8" height="15.0" fill="rgb(231,195,46)" rx="2" ry="2" />
+<text  x="1119.25" y="143.5" >operator..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="469" width="73.8" height="15.0" fill="rgb(212,64,13)" rx="2" ry="2" />
+<text  x="1119.25" y="479.5" >std::__d..</text>
+</g>
+<g >
+<title>DocumentBroker::getBrowserSettingSync (7 samples, 43.75%)</title><rect x="10.0" y="1141" width="516.2" height="15.0" fill="rgb(212,159,9)" rx="2" ry="2" />
+<text  x="13.00" y="1151.5" >DocumentBroker::getBrowserSettingSync</text>
+</g>
+<g >
+<title>SfxTabDialogController::runAsync (3 samples, 18.75%)</title><rect x="821.2" y="981" width="221.3" height="15.0" fill="rgb(230,104,53)" rx="2" ry="2" />
+<text  x="824.25" y="991.5" >SfxTabDialogController::runAs..</text>
+</g>
+<g >
+<title>SvLBoxString::CalcWidth (1 samples, 6.25%)</title><rect x="1042.5" y="757" width="73.7" height="15.0" fill="rgb(211,174,13)" rx="2" ry="2" />
+<text  x="1045.50" y="767.5" >SvLBoxSt..</text>
+</g>
+<g >
+<title>comphelper::dispatchCommand (3 samples, 18.75%)</title><rect x="600.0" y="1093" width="221.2" height="15.0" fill="rgb(249,14,52)" rx="2" ry="2" />
+<text  x="603.00" y="1103.5" >comphelper::dispatchCommand</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="437" width="73.8" height="15.0" fill="rgb(242,205,11)" rx="2" ry="2" />
+<text  x="1119.25" y="447.5" >std::__d..</text>
+</g>
+<g >
+<title>SvxBorderTabPage::Reset (1 samples, 6.25%)</title><rect x="1042.5" y="997" width="73.7" height="15.0" fill="rgb(252,122,25)" rx="2" ry="2" />
+<text  x="1045.50" y="1007.5" >SvxBorde..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="453" width="73.8" height="15.0" fill="rgb(209,105,10)" rx="2" ry="2" />
+<text  x="1119.25" y="463.5" >std::__d..</text>
+</g>
+<g >
+<title>http::Session::syncRequest (7 samples, 43.75%)</title><rect x="10.0" y="1093" width="516.2" height="15.0" fill="rgb(220,188,45)" rx="2" ry="2" />
+<text  x="13.00" y="1103.5" >http::Session::syncRequest</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="613" width="73.8" height="15.0" fill="rgb(225,38,37)" rx="2" ry="2" />
+<text  x="1119.25" y="623.5" >std::__d..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 6.25%)</title><rect x="526.2" y="821" width="73.8" height="15.0" fill="rgb(217,213,46)" rx="2" ry="2" />
+<text  x="529.25" y="831.5" >handleUs..</text>
+</g>
+<g >
+<title>ScTable::GetRowHeight (3 samples, 18.75%)</title><rect x="600.0" y="853" width="221.2" height="15.0" fill="rgb(238,36,51)" rx="2" ry="2" />
+<text  x="603.00" y="863.5" >ScTable::GetRowHeight</text>
+</g>
+<g >
+<title>SocketPoll::poll (1 samples, 6.25%)</title><rect x="526.2" y="1141" width="73.8" height="15.0" fill="rgb(205,200,17)" rx="2" ry="2" />
+<text  x="529.25" y="1151.5" >SocketPo..</text>
+</g>
+<g >
+<title>SalInstanceIconView::insert (1 samples, 6.25%)</title><rect x="1042.5" y="853" width="73.7" height="15.0" fill="rgb(228,225,49)" rx="2" ry="2" />
+<text  x="1045.50" y="863.5" >SalInsta..</text>
+</g>
+<g >
+<title>std::_Function_handler&lt;bool  (1 samples, 6.25%)</title><rect x="1116.2" y="245" width="73.8" height="15.0" fill="rgb(236,93,33)" rx="2" ry="2" />
+<text  x="1119.25" y="255.5" >std::_Fu..</text>
+</g>
+<g >
+<title>std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt;::_Rep::_S_create (1 samples, 6.25%)</title><rect x="1116.2" y="149" width="73.8" height="15.0" fill="rgb(245,169,10)" rx="2" ry="2" />
+<text  x="1119.25" y="159.5" >std::bas..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="741" width="73.8" height="15.0" fill="rgb(239,173,38)" rx="2" ry="2" />
+<text  x="1119.25" y="751.5" >std::__d..</text>
+</g>
+<g >
+<title>x509_pubkey_ex_d2i_ex (1 samples, 6.25%)</title><rect x="526.2" y="949" width="73.8" height="15.0" fill="rgb(220,228,16)" rx="2" ry="2" />
+<text  x="529.25" y="959.5" >x509_pub..</text>
+</g>
+<g >
+<title>ColorWindow::ColorWindow (1 samples, 6.25%)</title><rect x="1042.5" y="917" width="73.7" height="15.0" fill="rgb(217,145,13)" rx="2" ry="2" />
+<text  x="1045.50" y="927.5" >ColorWin..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="1141" width="73.8" height="15.0" fill="rgb(214,158,4)" rx="2" ry="2" />
+<text  x="1119.25" y="1151.5" >std::__d..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="549" width="73.8" height="15.0" fill="rgb(205,92,32)" rx="2" ry="2" />
+<text  x="1119.25" y="559.5" >std::__d..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 6.25%)</title><rect x="1042.5" y="597" width="73.7" height="15.0" fill="rgb(220,141,35)" rx="2" ry="2" />
+<text  x="1045.50" y="607.5" >handleUs..</text>
+</g>
+<g >
+<title>SfxTabDialogController::CreatePages (3 samples, 18.75%)</title><rect x="821.2" y="949" width="221.3" height="15.0" fill="rgb(254,71,18)" rx="2" ry="2" />
+<text  x="824.25" y="959.5" >SfxTabDialogController::Creat..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="389" width="73.8" height="15.0" fill="rgb(221,203,3)" rx="2" ry="2" />
+<text  x="1119.25" y="399.5" >std::__d..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="1029" width="73.8" height="15.0" fill="rgb(210,36,30)" rx="2" ry="2" />
+<text  x="1119.25" y="1039.5" >std::__d..</text>
+</g>
+<g >
+<title>ImplEntryType::GetTextGlyphs (3 samples, 18.75%)</title><rect x="821.2" y="805" width="221.3" height="15.0" fill="rgb(220,81,51)" rx="2" ry="2" />
+<text  x="824.25" y="815.5" >ImplEntryType::GetTextGlyphs</text>
+</g>
+<g >
+<title>OutputDevice::ImplLayout (3 samples, 18.75%)</title><rect x="821.2" y="789" width="221.3" height="15.0" fill="rgb(229,169,4)" rx="2" ry="2" />
+<text  x="824.25" y="799.5" >OutputDevice::ImplLayout</text>
+</g>
+<g >
+<title>ColorListBox::getColorWindow (1 samples, 6.25%)</title><rect x="1042.5" y="949" width="73.7" height="15.0" fill="rgb(254,40,5)" rx="2" ry="2" />
+<text  x="1045.50" y="959.5" >ColorLis..</text>
+</g>
+<g >
+<title>OutputDevice::GetTextWidth (1 samples, 6.25%)</title><rect x="1042.5" y="741" width="73.7" height="15.0" fill="rgb(243,184,45)" rx="2" ry="2" />
+<text  x="1045.50" y="751.5" >OutputDe..</text>
+</g>
+<g >
+<title>SfxTabDialogController::Start_Impl (3 samples, 18.75%)</title><rect x="821.2" y="965" width="221.3" height="15.0" fill="rgb(245,103,32)" rx="2" ry="2" />
+<text  x="824.25" y="975.5" >SfxTabDialogController::Start..</text>
+</g>
+<g >
+<title>ScGridWindow::CursorChanged (3 samples, 18.75%)</title><rect x="600.0" y="917" width="221.2" height="15.0" fill="rgb(206,24,24)" rx="2" ry="2" />
+<text  x="603.00" y="927.5" >ScGridWindow::CursorChanged</text>
+</g>
+<g >
+<title>state_machine (1 samples, 6.25%)</title><rect x="526.2" y="1077" width="73.8" height="15.0" fill="rgb(225,36,17)" rx="2" ry="2" />
+<text  x="529.25" y="1087.5" >state_ma..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="309" width="73.8" height="15.0" fill="rgb(211,211,0)" rx="2" ry="2" />
+<text  x="1119.25" y="319.5" >std::__d..</text>
+</g>
+<g >
+<title>OutputDevice::ImplGlyphFallbackLayout (3 samples, 18.75%)</title><rect x="821.2" y="773" width="221.3" height="15.0" fill="rgb(219,123,36)" rx="2" ry="2" />
+<text  x="824.25" y="783.5" >OutputDevice::ImplGlyphFallba..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="1109" width="73.8" height="15.0" fill="rgb(206,87,34)" rx="2" ry="2" />
+<text  x="1119.25" y="1119.5" >std::__d..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="773" width="73.8" height="15.0" fill="rgb(244,93,24)" rx="2" ry="2" />
+<text  x="1119.25" y="783.5" >std::__d..</text>
+</g>
+<g >
+<title>SfxDispatcher::Call_Impl (3 samples, 18.75%)</title><rect x="821.2" y="1029" width="221.3" height="15.0" fill="rgb(247,10,1)" rx="2" ry="2" />
+<text  x="824.25" y="1039.5" >SfxDispatcher::Call_Impl</text>
+</g>
+<g >
+<title>StreamSocket::handlePoll (1 samples, 6.25%)</title><rect x="526.2" y="1125" width="73.8" height="15.0" fill="rgb(234,11,54)" rx="2" ry="2" />
+<text  x="529.25" y="1135.5" >StreamSo..</text>
+</g>
+<g >
+<title>SfxTabDialogController::CreatePages (1 samples, 6.25%)</title><rect x="1042.5" y="1013" width="73.7" height="15.0" fill="rgb(250,194,35)" rx="2" ry="2" />
+<text  x="1045.50" y="1023.5" >SfxTabDi..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="1125" width="73.8" height="15.0" fill="rgb(248,196,21)" rx="2" ry="2" />
+<text  x="1119.25" y="1135.5" >std::__d..</text>
+</g>
+<g >
+<title>SvTreeList::Insert (1 samples, 6.25%)</title><rect x="1042.5" y="837" width="73.7" height="15.0" fill="rgb(243,74,44)" rx="2" ry="2" />
+<text  x="1045.50" y="847.5" >SvTreeLi..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 18.75%)</title><rect x="600.0" y="805" width="221.2" height="15.0" fill="rgb(231,73,18)" rx="2" ry="2" />
+<text  x="603.00" y="815.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>DocumentBroker::sendHttpSyncRequest (7 samples, 43.75%)</title><rect x="10.0" y="1125" width="516.2" height="15.0" fill="rgb(226,80,51)" rx="2" ry="2" />
+<text  x="13.00" y="1135.5" >DocumentBroker::sendHttpSyncRequest</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="837" width="73.8" height="15.0" fill="rgb(248,84,2)" rx="2" ry="2" />
+<text  x="1119.25" y="847.5" >std::__d..</text>
+</g>
+<g >
+<title>SfxOfficeDispatch::dispatch (3 samples, 18.75%)</title><rect x="821.2" y="1061" width="221.3" height="15.0" fill="rgb(211,128,7)" rx="2" ry="2" />
+<text  x="824.25" y="1071.5" >SfxOfficeDispatch::dispatch</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="709" width="73.8" height="15.0" fill="rgb(246,29,20)" rx="2" ry="2" />
+<text  x="1119.25" y="719.5" >std::__d..</text>
+</g>
+<g >
+<title>OutputDevice::GetPartialTextArray (1 samples, 6.25%)</title><rect x="1042.5" y="693" width="73.7" height="15.0" fill="rgb(246,221,33)" rx="2" ry="2" />
+<text  x="1045.50" y="703.5" >OutputDe..</text>
+</g>
+<g >
+<title>[unknown] (8 samples, 50.00%)</title><rect x="600.0" y="1157" width="590.0" height="15.0" fill="rgb(216,112,46)" rx="2" ry="2" />
+<text  x="603.00" y="1167.5" >[unknown]</text>
+</g>
+<g >
+<title>EVP_KEYMGMT_do_all_provided (1 samples, 6.25%)</title><rect x="526.2" y="901" width="73.8" height="15.0" fill="rgb(243,0,37)" rx="2" ry="2" />
+<text  x="529.25" y="911.5" >EVP_KEYM..</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_rep_once_more (1 samples, 6.25%)</title><rect x="1116.2" y="373" width="73.8" height="15.0" fill="rgb(235,14,11)" rx="2" ry="2" />
+<text  x="1119.25" y="383.5" >std::__d..</text>
+</g>
+<g >
+<title>SvxColorIconView::addEntriesForXColorList (1 samples, 6.25%)</title><rect x="1042.5" y="885" width="73.7" height="15.0" fill="rgb(213,59,3)" rx="2" ry="2" />
+<text  x="1045.50" y="895.5" >SvxColor..</text>
+</g>
+<g >
+<title>comphelper::dispatchCommand (3 samples, 18.75%)</title><rect x="600.0" y="1061" width="221.2" height="15.0" fill="rgb(219,0,21)" rx="2" ry="2" />
+<text  x="603.00" y="1071.5" >comphelper::dispatchCommand</text>
+</g>
+<g >
+<title>ColorListBox::SelectEntry (1 samples, 6.25%)</title><rect x="1042.5" y="965" width="73.7" height="15.0" fill="rgb(227,139,20)" rx="2" ry="2" />
+<text  x="1045.50" y="975.5" >ColorLis..</text>
+</g>
+<g >
+<title>doc_postUnoCommand (3 samples, 18.75%)</title><rect x="600.0" y="1109" width="221.2" height="15.0" fill="rgb(225,19,6)" rx="2" ry="2" />
+<text  x="603.00" y="1119.5" >doc_postUnoCommand</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="789" width="73.8" height="15.0" fill="rgb(227,82,49)" rx="2" ry="2" />
+<text  x="1119.25" y="799.5" >std::__d..</text>
+</g>
+<g >
+<title>OutputDevice::GetTextArray (1 samples, 6.25%)</title><rect x="1042.5" y="709" width="73.7" height="15.0" fill="rgb(217,160,39)" rx="2" ry="2" />
+<text  x="1045.50" y="719.5" >OutputDe..</text>
+</g>
+<g >
+<title>comphelper::dispatchCommand (1 samples, 6.25%)</title><rect x="1042.5" y="1141" width="73.7" height="15.0" fill="rgb(234,92,49)" rx="2" ry="2" />
+<text  x="1045.50" y="1151.5" >comphelp..</text>
+</g>
+<g >
+<title>virtual thunk to JSIconView::insert (1 samples, 6.25%)</title><rect x="1042.5" y="869" width="73.7" height="15.0" fill="rgb(212,144,44)" rx="2" ry="2" />
+<text  x="1045.50" y="879.5" >virtual ..</text>
+</g>
+<g >
+<title>_IO_funlockfile (7 samples, 43.75%)</title><rect x="10.0" y="1045" width="516.2" height="15.0" fill="rgb(244,9,2)" rx="2" ry="2" />
+<text  x="13.00" y="1055.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>std::__detail::_Executor&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt;, std::allocator&lt;std::sub_match&lt;__gnu_cxx::__normal_iterator&lt;wchar_t const*, std::basic_string&lt;wchar_t, std::char_traits&lt;wchar_t&gt;, std::allocator&lt;wchar_t&gt; &gt; &gt; &gt; &gt;, std::regex_traits&lt;wchar_t&gt;, true&gt;::_M_dfs (1 samples, 6.25%)</title><rect x="1116.2" y="1013" width="73.8" height="15.0" fill="rgb(252,205,2)" rx="2" ry="2" />
+<text  x="1119.25" y="1023.5" >std::__d..</text>
+</g>
+<g >
+<title>evp_generic_do_all (1 samples, 6.25%)</title><rect x="526.2" y="885" width="73.8" height="15.0" fill="rgb(229,41,28)" rx="2" ry="2" />
+<text  x="529.25" y="895.5" >evp_gene..</text>
+</g>
+<g >
+<title>SfxDispatchController_Impl::dispatch (3 samples, 18.75%)</title><rect x="600.0" y="1029" width="221.2" height="15.0" fill="rgb(253,89,37)" rx="2" ry="2" />
+<text  x="603.00" y="1039.5" >SfxDispatchController_Impl::d..</text>
+</g>
+</g>
+</svg>
