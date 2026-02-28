@@ -1,0 +1,1865 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="710" onload="init(evt)" viewBox="0 0 1200 710" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="710.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >StagingPerf.eu Watchdog Profile (2026-02-27T11:00:02.081766)</text>
+<text id="details" x="10.00" y="693" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="693" > </text>
+<g id="frames">
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 3.33%)</title><rect x="836.0" y="261" width="39.3" height="15.0" fill="rgb(211,148,46)" rx="2" ry="2" />
+<text  x="839.00" y="271.5" >oox..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="718.0" y="85" width="39.3" height="15.0" fill="rgb(236,160,15)" rx="2" ry="2" />
+<text  x="721.00" y="95.5" >sys..</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::filter (1 samples, 3.33%)</title><rect x="88.7" y="565" width="39.3" height="15.0" fill="rgb(253,183,21)" rx="2" ry="2" />
+<text  x="91.67" y="575.5" >oox..</text>
+</g>
+<g >
+<title>oox::AttributeList::getXString (1 samples, 3.33%)</title><rect x="718.0" y="181" width="39.3" height="15.0" fill="rgb(217,210,5)" rx="2" ry="2" />
+<text  x="721.00" y="191.5" >oox..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="875.3" y="101" width="39.4" height="15.0" fill="rgb(231,50,40)" rx="2" ry="2" />
+<text  x="878.33" y="111.5" >sys..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 3.33%)</title><rect x="678.7" y="293" width="39.3" height="15.0" fill="rgb(252,67,29)" rx="2" ry="2" />
+<text  x="681.67" y="303.5" >oox..</text>
+</g>
+<g >
+<title>i18npool::cclass_Unicode::toUpper (1 samples, 3.33%)</title><rect x="639.3" y="213" width="39.4" height="15.0" fill="rgb(205,4,17)" rx="2" ry="2" />
+<text  x="642.33" y="223.5" >i18..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 3.33%)</title><rect x="718.0" y="277" width="39.3" height="15.0" fill="rgb(249,33,22)" rx="2" ry="2" />
+<text  x="721.00" y="287.5" >oox..</text>
+</g>
+<g >
+<title>pthread_cond_wait (1 samples, 3.33%)</title><rect x="678.7" y="197" width="39.3" height="15.0" fill="rgb(239,23,50)" rx="2" ry="2" />
+<text  x="681.67" y="207.5" >pth..</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 3.33%)</title><rect x="364.0" y="149" width="39.3" height="15.0" fill="rgb(240,24,40)" rx="2" ry="2" />
+<text  x="367.00" y="159.5" >_in..</text>
+</g>
+<g >
+<title>sw::DocumentStatisticsManager::GetUpdatedDocStat (1 samples, 3.33%)</title><rect x="757.3" y="469" width="39.4" height="15.0" fill="rgb(227,102,38)" rx="2" ry="2" />
+<text  x="760.33" y="479.5" >sw:..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (9 samples, 30.00%)</title><rect x="364.0" y="373" width="354.0" height="15.0" fill="rgb(234,215,18)" rx="2" ry="2" />
+<text  x="367.00" y="383.5" >oox::core::FastParser::parseStream</text>
+</g>
+<g >
+<title>oox::core::ContextHandler2::createFastChildContext (1 samples, 3.33%)</title><rect x="718.0" y="245" width="39.3" height="15.0" fill="rgb(241,54,47)" rx="2" ry="2" />
+<text  x="721.00" y="255.5" >oox..</text>
+</g>
+<g >
+<title>SvNumberFormatter::ImpInitCurrencyTable (1 samples, 3.33%)</title><rect x="88.7" y="213" width="39.3" height="15.0" fill="rgb(228,127,42)" rx="2" ry="2" />
+<text  x="91.67" y="223.5" >SvN..</text>
+</g>
+<g >
+<title>framework::StatusBarManager::FillStatusBar (1 samples, 3.33%)</title><rect x="757.3" y="581" width="39.4" height="15.0" fill="rgb(243,61,48)" rx="2" ry="2" />
+<text  x="760.33" y="591.5" >fra..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="88.7" y="53" width="39.3" height="15.0" fill="rgb(206,70,27)" rx="2" ry="2" />
+<text  x="91.67" y="63.5" >han..</text>
+</g>
+<g >
+<title>xmlParseChunk (1 samples, 3.33%)</title><rect x="914.7" y="565" width="39.3" height="15.0" fill="rgb(229,54,53)" rx="2" ry="2" />
+<text  x="917.67" y="575.5" >xml..</text>
+</g>
+<g >
+<title>writerfilter::ooxml::OOXMLFastContextHandlerProperties::handleHdrFtr (1 samples, 3.33%)</title><rect x="914.7" y="517" width="39.3" height="15.0" fill="rgb(235,30,5)" rx="2" ry="2" />
+<text  x="917.67" y="527.5" >wri..</text>
+</g>
+<g >
+<title>operator new (3 samples, 10.00%)</title><rect x="403.3" y="181" width="118.0" height="15.0" fill="rgb(216,154,51)" rx="2" ry="2" />
+<text  x="406.33" y="191.5" >operator new</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="914.7" y="197" width="39.3" height="15.0" fill="rgb(239,196,6)" rx="2" ry="2" />
+<text  x="917.67" y="207.5" >han..</text>
+</g>
+<g >
+<title>sw::DocumentStatisticsManager::UpdateDocStat (1 samples, 3.33%)</title><rect x="757.3" y="453" width="39.4" height="15.0" fill="rgb(214,37,36)" rx="2" ry="2" />
+<text  x="760.33" y="463.5" >sw:..</text>
+</g>
+<g >
+<title>SwLayAction::InternalAction (1 samples, 3.33%)</title><rect x="757.3" y="293" width="39.4" height="15.0" fill="rgb(225,183,49)" rx="2" ry="2" />
+<text  x="760.33" y="303.5" >SwL..</text>
+</g>
+<g >
+<title>ScTable::SetDrawPageSize (1 samples, 3.33%)</title><rect x="875.3" y="181" width="39.4" height="15.0" fill="rgb(242,192,14)" rx="2" ry="2" />
+<text  x="878.33" y="191.5" >ScT..</text>
+</g>
+<g >
+<title>oox::xls::WorksheetFragment::WorksheetFragment (1 samples, 3.33%)</title><rect x="678.7" y="325" width="39.3" height="15.0" fill="rgb(221,188,23)" rx="2" ry="2" />
+<text  x="681.67" y="335.5" >oox..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 3.33%)</title><rect x="88.7" y="469" width="39.3" height="15.0" fill="rgb(228,225,30)" rx="2" ry="2" />
+<text  x="91.67" y="479.5" >oox..</text>
+</g>
+<g >
+<title>framework::LoadEnv::start (1 samples, 3.33%)</title><rect x="718.0" y="581" width="39.3" height="15.0" fill="rgb(249,23,27)" rx="2" ry="2" />
+<text  x="721.00" y="591.5" >fra..</text>
+</g>
+<g >
+<title>lcl_RecalcRow (2 samples, 6.67%)</title><rect x="10.0" y="373" width="78.7" height="15.0" fill="rgb(250,37,29)" rx="2" ry="2" />
+<text  x="13.00" y="383.5" >lcl_Recal..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 3.33%)</title><rect x="914.7" y="453" width="39.3" height="15.0" fill="rgb(240,58,50)" rx="2" ry="2" />
+<text  x="917.67" y="463.5" >sax..</text>
+</g>
+<g >
+<title>SwLayAction::InternalAction (2 samples, 6.67%)</title><rect x="10.0" y="469" width="78.7" height="15.0" fill="rgb(231,104,39)" rx="2" ry="2" />
+<text  x="13.00" y="479.5" >SwLayActi..</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 3.33%)</title><rect x="88.7" y="85" width="39.3" height="15.0" fill="rgb(222,54,3)" rx="2" ry="2" />
+<text  x="91.67" y="95.5" >_in..</text>
+</g>
+<g >
+<title>oox::xls::Font::importAttribs (1 samples, 3.33%)</title><rect x="718.0" y="197" width="39.3" height="15.0" fill="rgb(215,75,4)" rx="2" ry="2" />
+<text  x="721.00" y="207.5" >oox..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (3 samples, 10.00%)</title><rect x="796.7" y="357" width="118.0" height="15.0" fill="rgb(239,185,33)" rx="2" ry="2" />
+<text  x="799.67" y="367.5" >oox::core::Fas..</text>
+</g>
+<g >
+<title>SwXText::insertTextContentWithProperties (1 samples, 3.33%)</title><rect x="914.7" y="341" width="39.3" height="15.0" fill="rgb(233,74,13)" rx="2" ry="2" />
+<text  x="917.67" y="351.5" >SwX..</text>
+</g>
+<g >
+<title>SfxBaseModel::load (9 samples, 30.00%)</title><rect x="364.0" y="533" width="354.0" height="15.0" fill="rgb(244,97,26)" rx="2" ry="2" />
+<text  x="367.00" y="543.5" >SfxBaseModel::load</text>
+</g>
+<g >
+<title>malloc (3 samples, 10.00%)</title><rect x="403.3" y="165" width="118.0" height="15.0" fill="rgb(211,90,49)" rx="2" ry="2" />
+<text  x="406.33" y="175.5" >malloc</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::importDocument (1 samples, 3.33%)</title><rect x="718.0" y="453" width="39.3" height="15.0" fill="rgb(223,202,54)" rx="2" ry="2" />
+<text  x="721.00" y="463.5" >oox..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="10.0" y="229" width="39.3" height="15.0" fill="rgb(231,126,38)" rx="2" ry="2" />
+<text  x="13.00" y="239.5" >han..</text>
+</g>
+<g >
+<title>pthread_cond_wait (1 samples, 3.33%)</title><rect x="796.7" y="229" width="39.3" height="15.0" fill="rgb(217,20,3)" rx="2" ry="2" />
+<text  x="799.67" y="239.5" >pth..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 3.33%)</title><rect x="88.7" y="517" width="39.3" height="15.0" fill="rgb(227,74,48)" rx="2" ry="2" />
+<text  x="91.67" y="527.5" >oox..</text>
+</g>
+<g >
+<title>SwFrame::PrepareMake (2 samples, 6.67%)</title><rect x="10.0" y="405" width="78.7" height="15.0" fill="rgb(222,4,2)" rx="2" ry="2" />
+<text  x="13.00" y="415.5" >SwFrame::..</text>
+</g>
+<g >
+<title>i18npool::Transliteration_body::transliterateImpl (1 samples, 3.33%)</title><rect x="639.3" y="181" width="39.4" height="15.0" fill="rgb(219,57,0)" rx="2" ry="2" />
+<text  x="642.33" y="191.5" >i18..</text>
+</g>
+<g >
+<title>std::vector&lt;net::DNSCacheEntry, std::allocator&lt;net::DNSCacheEntry&gt; &gt;::_M_realloc_insert&lt;std::string const&amp;, net::HostEntry&amp;, std::chrono::time_point&lt;std::chrono::_V2::steady_clock, std::chrono::duration&lt;long, std::ratio&lt;1l, 1000000000l&gt; &gt; &gt; const&amp;&gt; (3 samples, 10.00%)</title><rect x="954.0" y="613" width="118.0" height="15.0" fill="rgb(250,83,16)" rx="2" ry="2" />
+<text  x="957.00" y="623.5" >std::vector&lt;ne..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parse (1 samples, 3.33%)</title><rect x="914.7" y="581" width="39.3" height="15.0" fill="rgb(243,101,48)" rx="2" ry="2" />
+<text  x="917.67" y="591.5" >sax..</text>
+</g>
+<g >
+<title>SfxObjectShell::ImportFrom (9 samples, 30.00%)</title><rect x="364.0" y="485" width="354.0" height="15.0" fill="rgb(220,226,53)" rx="2" ry="2" />
+<text  x="367.00" y="495.5" >SfxObjectShell::ImportFrom</text>
+</g>
+<g >
+<title>lcl_ApplyCjkHeightAdjustment (2 samples, 6.67%)</title><rect x="128.0" y="485" width="78.7" height="15.0" fill="rgb(208,151,3)" rx="2" ry="2" />
+<text  x="131.00" y="495.5" >lcl_Apply..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="88.7" y="37" width="39.3" height="15.0" fill="rgb(227,179,26)" rx="2" ry="2" />
+<text  x="91.67" y="47.5" >sys..</text>
+</g>
+<g >
+<title>framework::LoadEnv::startLoading (1 samples, 3.33%)</title><rect x="718.0" y="597" width="39.3" height="15.0" fill="rgb(241,27,38)" rx="2" ry="2" />
+<text  x="721.00" y="607.5" >fra..</text>
+</g>
+<g >
+<title>SwTextFly::GetFrame_ (1 samples, 3.33%)</title><rect x="206.7" y="517" width="39.3" height="15.0" fill="rgb(226,62,51)" rx="2" ry="2" />
+<text  x="209.67" y="527.5" >SwT..</text>
+</g>
+<g >
+<title>SwTextFrame::Format_ (6 samples, 20.00%)</title><rect x="128.0" y="597" width="236.0" height="15.0" fill="rgb(208,209,48)" rx="2" ry="2" />
+<text  x="131.00" y="607.5" >SwTextFrame::Format_</text>
+</g>
+<g >
+<title>rtl_isOctetTextEncoding (1 samples, 3.33%)</title><rect x="718.0" y="133" width="39.3" height="15.0" fill="rgb(225,202,39)" rx="2" ry="2" />
+<text  x="721.00" y="143.5" >rtl..</text>
+</g>
+<g >
+<title>ScDocShell::ImportFrom (1 samples, 3.33%)</title><rect x="88.7" y="597" width="39.3" height="15.0" fill="rgb(228,25,29)" rx="2" ry="2" />
+<text  x="91.67" y="607.5" >ScD..</text>
+</g>
+<g >
+<title>SwViewShell::EndAction (1 samples, 3.33%)</title><rect x="757.3" y="341" width="39.4" height="15.0" fill="rgb(243,72,29)" rx="2" ry="2" />
+<text  x="760.33" y="351.5" >SwV..</text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (3 samples, 10.00%)</title><rect x="796.7" y="533" width="118.0" height="15.0" fill="rgb(215,81,54)" rx="2" ry="2" />
+<text  x="799.67" y="543.5" >framework::Loa..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="796.7" y="197" width="39.3" height="15.0" fill="rgb(254,52,51)" rx="2" ry="2" />
+<text  x="799.67" y="207.5" >han..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="364.0" y="133" width="39.3" height="15.0" fill="rgb(215,141,36)" rx="2" ry="2" />
+<text  x="367.00" y="143.5" >_IO..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="639.3" y="149" width="39.4" height="15.0" fill="rgb(239,57,18)" rx="2" ry="2" />
+<text  x="642.33" y="159.5" >_IO..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 3.33%)</title><rect x="88.7" y="405" width="39.3" height="15.0" fill="rgb(228,127,49)" rx="2" ry="2" />
+<text  x="91.67" y="415.5" >oox..</text>
+</g>
+<g >
+<title>SwFntObj::GetTextSize (1 samples, 3.33%)</title><rect x="324.7" y="453" width="39.3" height="15.0" fill="rgb(218,50,17)" rx="2" ry="2" />
+<text  x="327.67" y="463.5" >SwF..</text>
+</g>
+<g >
+<title>ImplFontCache::GetFontInstance (2 samples, 6.67%)</title><rect x="128.0" y="405" width="78.7" height="15.0" fill="rgb(249,115,11)" rx="2" ry="2" />
+<text  x="131.00" y="415.5" >ImplFontC..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 3.33%)</title><rect x="88.7" y="357" width="39.3" height="15.0" fill="rgb(250,19,30)" rx="2" ry="2" />
+<text  x="91.67" y="367.5" >sax..</text>
+</g>
+<g >
+<title>SwFrame::PrepareMake (1 samples, 3.33%)</title><rect x="757.3" y="229" width="39.4" height="15.0" fill="rgb(247,119,20)" rx="2" ry="2" />
+<text  x="760.33" y="239.5" >SwF..</text>
+</g>
+<g >
+<title>oox::xls::DefinedName::createNameObject (4 samples, 13.33%)</title><rect x="521.3" y="309" width="157.4" height="15.0" fill="rgb(242,187,22)" rx="2" ry="2" />
+<text  x="524.33" y="319.5" >oox::xls::DefinedNam..</text>
+</g>
+<g >
+<title>framework::MenuBarFactory::CreateUIElement (1 samples, 3.33%)</title><rect x="757.3" y="613" width="39.4" height="15.0" fill="rgb(235,227,51)" rx="2" ry="2" />
+<text  x="760.33" y="623.5" >fra..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="639.3" y="117" width="39.4" height="15.0" fill="rgb(245,156,1)" rx="2" ry="2" />
+<text  x="642.33" y="127.5" >sys..</text>
+</g>
+<g >
+<title>oox::core::FilterBase::filter (9 samples, 30.00%)</title><rect x="364.0" y="453" width="354.0" height="15.0" fill="rgb(229,174,20)" rx="2" ry="2" />
+<text  x="367.00" y="463.5" >oox::core::FilterBase::filter</text>
+</g>
+<g >
+<title>SfxDispatcher::QueryState (1 samples, 3.33%)</title><rect x="757.3" y="517" width="39.4" height="15.0" fill="rgb(234,11,50)" rx="2" ry="2" />
+<text  x="760.33" y="527.5" >Sfx..</text>
+</g>
+<g >
+<title>SwLayAction::FormatLayoutTab (1 samples, 3.33%)</title><rect x="757.3" y="245" width="39.4" height="15.0" fill="rgb(205,153,6)" rx="2" ry="2" />
+<text  x="760.33" y="255.5" >SwL..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (4 samples, 13.33%)</title><rect x="364.0" y="309" width="157.3" height="15.0" fill="rgb(213,147,35)" rx="2" ry="2" />
+<text  x="367.00" y="319.5" >oox::core::XmlFilter..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 3.33%)</title><rect x="836.0" y="245" width="39.3" height="15.0" fill="rgb(247,109,25)" rx="2" ry="2" />
+<text  x="839.00" y="255.5" >sax..</text>
+</g>
+<g >
+<title>i18npool::CharacterClassificationImpl::toUpper (3 samples, 10.00%)</title><rect x="521.3" y="245" width="118.0" height="15.0" fill="rgb(228,113,9)" rx="2" ry="2" />
+<text  x="524.33" y="255.5" >i18npool::Char..</text>
+</g>
+<g >
+<title>SwTextFormatter::NewPortion (2 samples, 6.67%)</title><rect x="246.0" y="533" width="78.7" height="15.0" fill="rgb(225,212,17)" rx="2" ry="2" />
+<text  x="249.00" y="543.5" >SwTextFor..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="49.3" y="309" width="39.4" height="15.0" fill="rgb(222,82,4)" rx="2" ry="2" />
+<text  x="52.33" y="319.5" >sys..</text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (9 samples, 30.00%)</title><rect x="364.0" y="517" width="354.0" height="15.0" fill="rgb(215,78,13)" rx="2" ry="2" />
+<text  x="367.00" y="527.5" >SfxObjectShell::DoLoad</text>
+</g>
+<g >
+<title>sw::DocumentStatisticsManager::IncrementalDocStatCalculate (1 samples, 3.33%)</title><rect x="757.3" y="437" width="39.4" height="15.0" fill="rgb(249,175,21)" rx="2" ry="2" />
+<text  x="760.33" y="447.5" >sw:..</text>
+</g>
+<g >
+<title>SwLayoutFrame::MakeAll (1 samples, 3.33%)</title><rect x="757.3" y="133" width="39.4" height="15.0" fill="rgb(232,195,3)" rx="2" ry="2" />
+<text  x="760.33" y="143.5" >SwL..</text>
+</g>
+<g >
+<title>writerfilter::ooxml::OOXMLDocumentImpl::resolve (1 samples, 3.33%)</title><rect x="914.7" y="469" width="39.3" height="15.0" fill="rgb(254,116,44)" rx="2" ry="2" />
+<text  x="917.67" y="479.5" >wri..</text>
+</g>
+<g >
+<title>ScDocument::InitDrawLayer (1 samples, 3.33%)</title><rect x="875.3" y="197" width="39.4" height="15.0" fill="rgb(224,51,32)" rx="2" ry="2" />
+<text  x="878.33" y="207.5" >ScD..</text>
+</g>
+<g >
+<title>SwView::StateStatusLine (1 samples, 3.33%)</title><rect x="757.3" y="485" width="39.4" height="15.0" fill="rgb(232,63,26)" rx="2" ry="2" />
+<text  x="760.33" y="495.5" >SwV..</text>
+</g>
+<g >
+<title>framework::LoadEnv::loadComponentFromURL (1 samples, 3.33%)</title><rect x="718.0" y="613" width="39.3" height="15.0" fill="rgb(253,211,37)" rx="2" ry="2" />
+<text  x="721.00" y="623.5" >fra..</text>
+</g>
+<g >
+<title>SwContentFrame::CalcLowers (2 samples, 6.67%)</title><rect x="10.0" y="357" width="78.7" height="15.0" fill="rgb(230,78,31)" rx="2" ry="2" />
+<text  x="13.00" y="367.5" >SwContent..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (3 samples, 10.00%)</title><rect x="796.7" y="341" width="118.0" height="15.0" fill="rgb(222,165,34)" rx="2" ry="2" />
+<text  x="799.67" y="351.5" >sax_fastparser..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="285.3" y="485" width="39.4" height="15.0" fill="rgb(250,163,39)" rx="2" ry="2" />
+<text  x="288.33" y="495.5" >han..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="757.3" y="69" width="39.4" height="15.0" fill="rgb(241,22,9)" rx="2" ry="2" />
+<text  x="760.33" y="79.5" >_IO..</text>
+</g>
+<g >
+<title>framework::LoadEnv::start (9 samples, 30.00%)</title><rect x="364.0" y="565" width="354.0" height="15.0" fill="rgb(221,56,2)" rx="2" ry="2" />
+<text  x="367.00" y="575.5" >framework::LoadEnv::start</text>
+</g>
+<g >
+<title>SwTextSizeInfo::GetTextSize (1 samples, 3.33%)</title><rect x="324.7" y="485" width="39.3" height="15.0" fill="rgb(241,70,14)" rx="2" ry="2" />
+<text  x="327.67" y="495.5" >SwT..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="285.3" y="501" width="39.4" height="15.0" fill="rgb(214,117,32)" rx="2" ry="2" />
+<text  x="288.33" y="511.5" >_IO..</text>
+</g>
+<g >
+<title>ScTableSheetObj::getDrawPage (1 samples, 3.33%)</title><rect x="875.3" y="229" width="39.4" height="15.0" fill="rgb(209,82,13)" rx="2" ry="2" />
+<text  x="878.33" y="239.5" >ScT..</text>
+</g>
+<g >
+<title>oox::xls::WorksheetFragment::WorksheetFragment (1 samples, 3.33%)</title><rect x="718.0" y="341" width="39.3" height="15.0" fill="rgb(254,169,31)" rx="2" ry="2" />
+<text  x="721.00" y="351.5" >oox..</text>
+</g>
+<g >
+<title>SwFntObj::GetFontAscent (2 samples, 6.67%)</title><rect x="128.0" y="501" width="78.7" height="15.0" fill="rgb(220,181,38)" rx="2" ry="2" />
+<text  x="131.00" y="511.5" >SwFntObj:..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="796.7" y="213" width="39.3" height="15.0" fill="rgb(231,30,33)" rx="2" ry="2" />
+<text  x="799.67" y="223.5" >_IO..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="836.0" y="197" width="39.3" height="15.0" fill="rgb(221,184,33)" rx="2" ry="2" />
+<text  x="839.00" y="207.5" >han..</text>
+</g>
+<g >
+<title>[unknown] (3 samples, 10.00%)</title><rect x="1072.0" y="629" width="118.0" height="15.0" fill="rgb(240,103,17)" rx="2" ry="2" />
+<text  x="1075.00" y="639.5" >[unknown]</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="796.7" y="181" width="39.3" height="15.0" fill="rgb(217,89,1)" rx="2" ry="2" />
+<text  x="799.67" y="191.5" >sys..</text>
+</g>
+<g >
+<title>writerfilter::ooxml::OOXMLDocumentImpl::resolve (1 samples, 3.33%)</title><rect x="914.7" y="613" width="39.3" height="15.0" fill="rgb(214,30,32)" rx="2" ry="2" />
+<text  x="917.67" y="623.5" >wri..</text>
+</g>
+<g >
+<title>SfxItemSet::Get (1 samples, 3.33%)</title><rect x="10.0" y="277" width="39.3" height="15.0" fill="rgb(227,173,37)" rx="2" ry="2" />
+<text  x="13.00" y="287.5" >Sfx..</text>
+</g>
+<g >
+<title>SvNumberFormatter::GetTheCurrencyTable (1 samples, 3.33%)</title><rect x="88.7" y="229" width="39.3" height="15.0" fill="rgb(249,18,29)" rx="2" ry="2" />
+<text  x="91.67" y="239.5" >SvN..</text>
+</g>
+<g >
+<title>oox::xls::WorkbookFragment::finalizeImport (1 samples, 3.33%)</title><rect x="718.0" y="357" width="39.3" height="15.0" fill="rgb(223,56,22)" rx="2" ry="2" />
+<text  x="721.00" y="367.5" >oox..</text>
+</g>
+<g >
+<title>framework::LoadEnv::startLoading (9 samples, 30.00%)</title><rect x="364.0" y="581" width="354.0" height="15.0" fill="rgb(232,16,22)" rx="2" ry="2" />
+<text  x="367.00" y="591.5" >framework::LoadEnv::startLoading</text>
+</g>
+<g >
+<title>all (30 samples, 100%)</title><rect x="10.0" y="661" width="1180.0" height="15.0" fill="rgb(252,22,43)" rx="2" ry="2" />
+<text  x="13.00" y="671.5" ></text>
+</g>
+<g >
+<title>ScRangeData::ScRangeData (1 samples, 3.33%)</title><rect x="639.3" y="261" width="39.4" height="15.0" fill="rgb(217,131,31)" rx="2" ry="2" />
+<text  x="642.33" y="271.5" >ScR..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 3.33%)</title><rect x="718.0" y="293" width="39.3" height="15.0" fill="rgb(242,167,5)" rx="2" ry="2" />
+<text  x="721.00" y="303.5" >oox..</text>
+</g>
+<g >
+<title>oox::xls::FillContext::onCreateContext (3 samples, 10.00%)</title><rect x="403.3" y="213" width="118.0" height="15.0" fill="rgb(219,129,14)" rx="2" ry="2" />
+<text  x="406.33" y="223.5" >oox::xls::Fill..</text>
+</g>
+<g >
+<title>malloc (1 samples, 3.33%)</title><rect x="88.7" y="101" width="39.3" height="15.0" fill="rgb(239,124,35)" rx="2" ry="2" />
+<text  x="91.67" y="111.5" >mal..</text>
+</g>
+<g >
+<title>oox::xls::WorkbookFragment::finalizeImport (3 samples, 10.00%)</title><rect x="796.7" y="325" width="118.0" height="15.0" fill="rgb(226,17,54)" rx="2" ry="2" />
+<text  x="799.67" y="335.5" >oox::xls::Work..</text>
+</g>
+<g >
+<title>[unknown] (24 samples, 80.00%)</title><rect x="10.0" y="629" width="944.0" height="15.0" fill="rgb(230,8,31)" rx="2" ry="2" />
+<text  x="13.00" y="639.5" >[unknown]</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 3.33%)</title><rect x="678.7" y="277" width="39.3" height="15.0" fill="rgb(244,121,3)" rx="2" ry="2" />
+<text  x="681.67" y="287.5" >oox..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 3.33%)</title><rect x="914.7" y="597" width="39.3" height="15.0" fill="rgb(238,148,44)" rx="2" ry="2" />
+<text  x="917.67" y="607.5" >sax..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="128.0" y="309" width="39.3" height="15.0" fill="rgb(234,188,4)" rx="2" ry="2" />
+<text  x="131.00" y="319.5" >sys..</text>
+</g>
+<g >
+<title>ScModelObj::queryInterface (1 samples, 3.33%)</title><rect x="88.7" y="293" width="39.3" height="15.0" fill="rgb(210,127,34)" rx="2" ry="2" />
+<text  x="91.67" y="303.5" >ScM..</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::importDocument (9 samples, 30.00%)</title><rect x="364.0" y="437" width="354.0" height="15.0" fill="rgb(218,215,42)" rx="2" ry="2" />
+<text  x="367.00" y="447.5" >oox::xls::ExcelFilter::importDocument</text>
+</g>
+<g >
+<title>i18npool::Transliteration_body::transliterateImpl (3 samples, 10.00%)</title><rect x="521.3" y="197" width="118.0" height="15.0" fill="rgb(235,141,41)" rx="2" ry="2" />
+<text  x="524.33" y="207.5" >i18npool::Tran..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::callbackStartElement (1 samples, 3.33%)</title><rect x="914.7" y="389" width="39.3" height="15.0" fill="rgb(247,157,15)" rx="2" ry="2" />
+<text  x="917.67" y="399.5" >sax..</text>
+</g>
+<g >
+<title>SwTextFrame::FormatImpl (6 samples, 20.00%)</title><rect x="128.0" y="613" width="236.0" height="15.0" fill="rgb(245,170,3)" rx="2" ry="2" />
+<text  x="131.00" y="623.5" >SwTextFrame::FormatImpl</text>
+</g>
+<g >
+<title>framework::Desktop::loadComponentFromURL (3 samples, 10.00%)</title><rect x="796.7" y="597" width="118.0" height="15.0" fill="rgb(207,200,6)" rx="2" ry="2" />
+<text  x="799.67" y="607.5" >framework::Des..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 3.33%)</title><rect x="718.0" y="373" width="39.3" height="15.0" fill="rgb(219,141,14)" rx="2" ry="2" />
+<text  x="721.00" y="383.5" >sax..</text>
+</g>
+<g >
+<title>oox::xls::(anonymous namespace)::lcl_addNewByName (1 samples, 3.33%)</title><rect x="639.3" y="277" width="39.4" height="15.0" fill="rgb(246,106,21)" rx="2" ry="2" />
+<text  x="642.33" y="287.5" >oox..</text>
+</g>
+<g >
+<title>SwContentFrame::MakeAll (1 samples, 3.33%)</title><rect x="10.0" y="325" width="39.3" height="15.0" fill="rgb(215,27,53)" rx="2" ry="2" />
+<text  x="13.00" y="335.5" >SwC..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 3.33%)</title><rect x="88.7" y="373" width="39.3" height="15.0" fill="rgb(240,188,50)" rx="2" ry="2" />
+<text  x="91.67" y="383.5" >oox..</text>
+</g>
+<g >
+<title>SfxObjectShell::ImportFrom (1 samples, 3.33%)</title><rect x="88.7" y="581" width="39.3" height="15.0" fill="rgb(226,138,3)" rx="2" ry="2" />
+<text  x="91.67" y="591.5" >Sfx..</text>
+</g>
+<g >
+<title>SvNumberFormatter::PrepForRoMode (1 samples, 3.33%)</title><rect x="88.7" y="245" width="39.3" height="15.0" fill="rgb(246,30,49)" rx="2" ry="2" />
+<text  x="91.67" y="255.5" >SvN..</text>
+</g>
+<g >
+<title>SwXText::insertTextContent (1 samples, 3.33%)</title><rect x="914.7" y="325" width="39.3" height="15.0" fill="rgb(246,34,11)" rx="2" ry="2" />
+<text  x="917.67" y="335.5" >SwX..</text>
+</g>
+<g >
+<title>oox::xls::WorkbookGlobals::createLocalNamedRangeObject (4 samples, 13.33%)</title><rect x="521.3" y="293" width="157.4" height="15.0" fill="rgb(221,199,51)" rx="2" ry="2" />
+<text  x="524.33" y="303.5" >oox::xls::WorkbookGl..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 10.00%)</title><rect x="521.3" y="165" width="118.0" height="15.0" fill="rgb(214,74,23)" rx="2" ry="2" />
+<text  x="524.33" y="175.5" >handleUserProf..</text>
+</g>
+<g >
+<title>SwViewShell::ImplEndAction (1 samples, 3.33%)</title><rect x="757.3" y="325" width="39.4" height="15.0" fill="rgb(206,8,30)" rx="2" ry="2" />
+<text  x="760.33" y="335.5" >SwV..</text>
+</g>
+<g >
+<title>SwLayAction::Action (1 samples, 3.33%)</title><rect x="757.3" y="309" width="39.4" height="15.0" fill="rgb(236,77,22)" rx="2" ry="2" />
+<text  x="760.33" y="319.5" >SwL..</text>
+</g>
+<g >
+<title>i18nutil::casefolding::getValue (1 samples, 3.33%)</title><rect x="639.3" y="165" width="39.4" height="15.0" fill="rgb(231,4,1)" rx="2" ry="2" />
+<text  x="642.33" y="175.5" >i18..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 3.33%)</title><rect x="718.0" y="421" width="39.3" height="15.0" fill="rgb(221,151,21)" rx="2" ry="2" />
+<text  x="721.00" y="431.5" >oox..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="678.7" y="181" width="39.3" height="15.0" fill="rgb(205,35,17)" rx="2" ry="2" />
+<text  x="681.67" y="191.5" >_IO..</text>
+</g>
+<g >
+<title>oox::core::FilterBase::filter (3 samples, 10.00%)</title><rect x="796.7" y="437" width="118.0" height="15.0" fill="rgb(235,159,42)" rx="2" ry="2" />
+<text  x="799.67" y="447.5" >oox::core::Fil..</text>
+</g>
+<g >
+<title>CharClass::uppercase (1 samples, 3.33%)</title><rect x="639.3" y="245" width="39.4" height="15.0" fill="rgb(212,78,40)" rx="2" ry="2" />
+<text  x="642.33" y="255.5" >Cha..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="167.3" y="325" width="39.4" height="15.0" fill="rgb(250,27,10)" rx="2" ry="2" />
+<text  x="170.33" y="335.5" >han..</text>
+</g>
+<g >
+<title>[anon] (3 samples, 10.00%)</title><rect x="954.0" y="629" width="118.0" height="15.0" fill="rgb(213,210,50)" rx="2" ry="2" />
+<text  x="957.00" y="639.5" >[anon]</text>
+</g>
+<g >
+<title>SwSubFont::GetAscent (2 samples, 6.67%)</title><rect x="128.0" y="517" width="78.7" height="15.0" fill="rgb(230,8,17)" rx="2" ry="2" />
+<text  x="131.00" y="527.5" >SwSubFont..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 3.33%)</title><rect x="836.0" y="293" width="39.3" height="15.0" fill="rgb(245,128,18)" rx="2" ry="2" />
+<text  x="839.00" y="303.5" >oox..</text>
+</g>
+<g >
+<title>svt::StatusbarController::bindListener (1 samples, 3.33%)</title><rect x="757.3" y="549" width="39.4" height="15.0" fill="rgb(218,70,49)" rx="2" ry="2" />
+<text  x="760.33" y="559.5" >svt..</text>
+</g>
+<g >
+<title>SwTextFormatter::CalcFlyWidth (1 samples, 3.33%)</title><rect x="206.7" y="533" width="39.3" height="15.0" fill="rgb(234,42,38)" rx="2" ry="2" />
+<text  x="209.67" y="543.5" >SwT..</text>
+</g>
+<g >
+<title>SwDoc::GetUniqueFrameName (1 samples, 3.33%)</title><rect x="914.7" y="245" width="39.3" height="15.0" fill="rgb(239,57,30)" rx="2" ry="2" />
+<text  x="917.67" y="255.5" >SwD..</text>
+</g>
+<g >
+<title>lo_documentLoadWithOptions (3 samples, 10.00%)</title><rect x="796.7" y="613" width="118.0" height="15.0" fill="rgb(244,41,13)" rx="2" ry="2" />
+<text  x="799.67" y="623.5" >lo_documentLoa..</text>
+</g>
+<g >
+<title>net::AsyncDNS::resolveDNS (3 samples, 10.00%)</title><rect x="1072.0" y="597" width="118.0" height="15.0" fill="rgb(229,160,2)" rx="2" ry="2" />
+<text  x="1075.00" y="607.5" >net::AsyncDNS:..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="324.7" y="373" width="39.3" height="15.0" fill="rgb(216,72,17)" rx="2" ry="2" />
+<text  x="327.67" y="383.5" >han..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (3 samples, 10.00%)</title><rect x="796.7" y="389" width="118.0" height="15.0" fill="rgb(219,154,35)" rx="2" ry="2" />
+<text  x="799.67" y="399.5" >oox::core::Xml..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 3.33%)</title><rect x="88.7" y="485" width="39.3" height="15.0" fill="rgb(212,133,22)" rx="2" ry="2" />
+<text  x="91.67" y="495.5" >oox..</text>
+</g>
+<g >
+<title>_int_malloc (3 samples, 10.00%)</title><rect x="403.3" y="149" width="118.0" height="15.0" fill="rgb(218,128,26)" rx="2" ry="2" />
+<text  x="406.33" y="159.5" >_int_malloc</text>
+</g>
+<g >
+<title>SfxObjectShell::ImportFrom (1 samples, 3.33%)</title><rect x="718.0" y="501" width="39.3" height="15.0" fill="rgb(250,136,28)" rx="2" ry="2" />
+<text  x="721.00" y="511.5" >Sfx..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="757.3" y="37" width="39.4" height="15.0" fill="rgb(242,184,44)" rx="2" ry="2" />
+<text  x="760.33" y="47.5" >sys..</text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (9 samples, 30.00%)</title><rect x="364.0" y="549" width="354.0" height="15.0" fill="rgb(240,76,7)" rx="2" ry="2" />
+<text  x="367.00" y="559.5" >framework::LoadEnv::impl_loadContent</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="49.3" y="325" width="39.4" height="15.0" fill="rgb(223,41,17)" rx="2" ry="2" />
+<text  x="52.33" y="335.5" >han..</text>
+</g>
+<g >
+<title>SwContentNotify::~SwContentNotify (1 samples, 3.33%)</title><rect x="10.0" y="309" width="39.3" height="15.0" fill="rgb(243,135,4)" rx="2" ry="2" />
+<text  x="13.00" y="319.5" >SwC..</text>
+</g>
+<g >
+<title>lcl_GetUniqueFlyName (1 samples, 3.33%)</title><rect x="914.7" y="229" width="39.3" height="15.0" fill="rgb(222,145,11)" rx="2" ry="2" />
+<text  x="917.67" y="239.5" >lcl..</text>
+</g>
+<g >
+<title>vcl::font::PhysicalFontCollection::ImplFindFontFamilyBySearchName (1 samples, 3.33%)</title><rect x="167.3" y="373" width="39.4" height="15.0" fill="rgb(217,158,25)" rx="2" ry="2" />
+<text  x="170.33" y="383.5" >vcl..</text>
+</g>
+<g >
+<title>doc_initializeForRendering (2 samples, 6.67%)</title><rect x="10.0" y="581" width="78.7" height="15.0" fill="rgb(244,68,3)" rx="2" ry="2" />
+<text  x="13.00" y="591.5" >doc_initi..</text>
+</g>
+<g >
+<title>SwXTextDocument::initializeForTiledRendering (2 samples, 6.67%)</title><rect x="10.0" y="565" width="78.7" height="15.0" fill="rgb(247,28,47)" rx="2" ry="2" />
+<text  x="13.00" y="575.5" >SwXTextDo..</text>
+</g>
+<g >
+<title>SwCursorShell::EndAction (2 samples, 6.67%)</title><rect x="10.0" y="533" width="78.7" height="15.0" fill="rgb(230,156,12)" rx="2" ry="2" />
+<text  x="13.00" y="543.5" >SwCursorS..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 10.00%)</title><rect x="403.3" y="117" width="118.0" height="15.0" fill="rgb(216,11,12)" rx="2" ry="2" />
+<text  x="406.33" y="127.5" >handleUserProf..</text>
+</g>
+<g >
+<title>SwContentFrame::CalcLowers (1 samples, 3.33%)</title><rect x="757.3" y="181" width="39.4" height="15.0" fill="rgb(248,160,47)" rx="2" ry="2" />
+<text  x="760.33" y="191.5" >SwC..</text>
+</g>
+<g >
+<title>SfxObjectShell::ImportFrom (3 samples, 10.00%)</title><rect x="796.7" y="469" width="118.0" height="15.0" fill="rgb(233,7,51)" rx="2" ry="2" />
+<text  x="799.67" y="479.5" >SfxObjectShell..</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::filter (1 samples, 3.33%)</title><rect x="718.0" y="485" width="39.3" height="15.0" fill="rgb(223,164,34)" rx="2" ry="2" />
+<text  x="721.00" y="495.5" >oox..</text>
+</g>
+<g >
+<title>rtl_string2UString_status (1 samples, 3.33%)</title><rect x="718.0" y="149" width="39.3" height="15.0" fill="rgb(220,0,50)" rx="2" ry="2" />
+<text  x="721.00" y="159.5" >rtl..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="639.3" y="133" width="39.4" height="15.0" fill="rgb(253,89,28)" rx="2" ry="2" />
+<text  x="642.33" y="143.5" >han..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="364.0" y="117" width="39.3" height="15.0" fill="rgb(244,190,41)" rx="2" ry="2" />
+<text  x="367.00" y="127.5" >han..</text>
+</g>
+<g >
+<title>ScDocShell::ImportFrom (1 samples, 3.33%)</title><rect x="718.0" y="517" width="39.3" height="15.0" fill="rgb(232,105,35)" rx="2" ry="2" />
+<text  x="721.00" y="527.5" >ScD..</text>
+</g>
+<g >
+<title>oox::core::ContextHandler2Helper::implCreateChildContext (1 samples, 3.33%)</title><rect x="718.0" y="229" width="39.3" height="15.0" fill="rgb(205,7,23)" rx="2" ry="2" />
+<text  x="721.00" y="239.5" >oox..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="678.7" y="149" width="39.3" height="15.0" fill="rgb(220,86,47)" rx="2" ry="2" />
+<text  x="681.67" y="159.5" >sys..</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::importDocument (3 samples, 10.00%)</title><rect x="796.7" y="421" width="118.0" height="15.0" fill="rgb(242,160,40)" rx="2" ry="2" />
+<text  x="799.67" y="431.5" >oox::xls::Exce..</text>
+</g>
+<g >
+<title>syscall (3 samples, 10.00%)</title><rect x="1072.0" y="581" width="118.0" height="15.0" fill="rgb(225,2,28)" rx="2" ry="2" />
+<text  x="1075.00" y="591.5" >syscall</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="914.7" y="181" width="39.3" height="15.0" fill="rgb(220,21,37)" rx="2" ry="2" />
+<text  x="917.67" y="191.5" >sys..</text>
+</g>
+<g >
+<title>SwLayAction::Action (2 samples, 6.67%)</title><rect x="10.0" y="485" width="78.7" height="15.0" fill="rgb(233,194,43)" rx="2" ry="2" />
+<text  x="13.00" y="495.5" >SwLayActi..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="757.3" y="53" width="39.4" height="15.0" fill="rgb(229,99,9)" rx="2" ry="2" />
+<text  x="760.33" y="63.5" >han..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 3.33%)</title><rect x="678.7" y="245" width="39.3" height="15.0" fill="rgb(211,68,13)" rx="2" ry="2" />
+<text  x="681.67" y="255.5" >sax..</text>
+</g>
+<g >
+<title>NumberFormatCodeMapper::getAllFormatCode (1 samples, 3.33%)</title><rect x="88.7" y="133" width="39.3" height="15.0" fill="rgb(211,177,16)" rx="2" ry="2" />
+<text  x="91.67" y="143.5" >Num..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parse (1 samples, 3.33%)</title><rect x="914.7" y="437" width="39.3" height="15.0" fill="rgb(207,3,43)" rx="2" ry="2" />
+<text  x="917.67" y="447.5" >sax..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="324.7" y="389" width="39.3" height="15.0" fill="rgb(247,211,18)" rx="2" ry="2" />
+<text  x="327.67" y="399.5" >_IO..</text>
+</g>
+<g >
+<title>oox::xls::DefinedNamesBuffer::finalizeImport (4 samples, 13.33%)</title><rect x="521.3" y="325" width="157.4" height="15.0" fill="rgb(216,64,40)" rx="2" ry="2" />
+<text  x="524.33" y="335.5" >oox::xls::DefinedNam..</text>
+</g>
+<g >
+<title>SwFrame::PrepareMake (1 samples, 3.33%)</title><rect x="757.3" y="149" width="39.4" height="15.0" fill="rgb(211,35,48)" rx="2" ry="2" />
+<text  x="760.33" y="159.5" >SwF..</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::importDocument (1 samples, 3.33%)</title><rect x="88.7" y="533" width="39.3" height="15.0" fill="rgb(220,178,29)" rx="2" ry="2" />
+<text  x="91.67" y="543.5" >oox..</text>
+</g>
+<g >
+<title>oox::xls::VmlDrawing::VmlDrawing (1 samples, 3.33%)</title><rect x="875.3" y="277" width="39.4" height="15.0" fill="rgb(217,13,33)" rx="2" ry="2" />
+<text  x="878.33" y="287.5" >oox..</text>
+</g>
+<g >
+<title>SwSubFont::GetTextSize_ (1 samples, 3.33%)</title><rect x="324.7" y="469" width="39.3" height="15.0" fill="rgb(215,86,44)" rx="2" ry="2" />
+<text  x="327.67" y="479.5" >SwS..</text>
+</g>
+<g >
+<title>SwCursorShell::EndAction (1 samples, 3.33%)</title><rect x="757.3" y="357" width="39.4" height="15.0" fill="rgb(227,1,29)" rx="2" ry="2" />
+<text  x="760.33" y="367.5" >SwC..</text>
+</g>
+<g >
+<title>oox::xls::WorksheetGlobals::getDrawPage (1 samples, 3.33%)</title><rect x="875.3" y="245" width="39.4" height="15.0" fill="rgb(225,164,23)" rx="2" ry="2" />
+<text  x="878.33" y="255.5" >oox..</text>
+</g>
+<g >
+<title>operator new (1 samples, 3.33%)</title><rect x="364.0" y="181" width="39.3" height="15.0" fill="rgb(249,48,19)" rx="2" ry="2" />
+<text  x="367.00" y="191.5" >ope..</text>
+</g>
+<g >
+<title>framework::StatusBarManager::UpdateControllers (1 samples, 3.33%)</title><rect x="757.3" y="565" width="39.4" height="15.0" fill="rgb(228,12,3)" rx="2" ry="2" />
+<text  x="760.33" y="575.5" >fra..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="836.0" y="181" width="39.3" height="15.0" fill="rgb(235,130,31)" rx="2" ry="2" />
+<text  x="839.00" y="191.5" >sys..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="364.0" y="101" width="39.3" height="15.0" fill="rgb(224,108,12)" rx="2" ry="2" />
+<text  x="367.00" y="111.5" >sys..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="206.7" y="437" width="39.3" height="15.0" fill="rgb(244,92,34)" rx="2" ry="2" />
+<text  x="209.67" y="447.5" >han..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;vcl::font::FontSelectPattern, std::pair&lt;vcl::font::FontSelectPattern const, std::_List_iterator&lt;std::pair&lt;vcl::font::FontSelectPattern, rtl::Reference&lt;LogicalFontInstance&gt; &gt; &gt; &gt;, std::pmr::polymorphic_allocator&lt;std::pair&lt;vcl::font::FontSelectPattern const, std::_List_iterator&lt;std::pair&lt;vcl::font::FontSelectPattern, rtl::Reference&lt;LogicalFontInstance&gt; &gt; &gt; &gt; &gt;, std::__detail::_Select1st, ImplFontCache::IFSD_Equal, ImplFontCache::IFSD_Hash, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt; &gt;::_M_find_before_node (1 samples, 3.33%)</title><rect x="128.0" y="373" width="39.3" height="15.0" fill="rgb(217,25,15)" rx="2" ry="2" />
+<text  x="131.00" y="383.5" >std..</text>
+</g>
+<g >
+<title>SvpSalYieldMutex::doAcquire (1 samples, 3.33%)</title><rect x="796.7" y="261" width="39.3" height="15.0" fill="rgb(227,11,36)" rx="2" ry="2" />
+<text  x="799.67" y="271.5" >Svp..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (3 samples, 10.00%)</title><rect x="796.7" y="405" width="118.0" height="15.0" fill="rgb(250,35,3)" rx="2" ry="2" />
+<text  x="799.67" y="415.5" >oox::core::Xml..</text>
+</g>
+<g >
+<title>i18npool::transliteration_commonclass::transliterateString2String (3 samples, 10.00%)</title><rect x="521.3" y="213" width="118.0" height="15.0" fill="rgb(211,4,39)" rx="2" ry="2" />
+<text  x="524.33" y="223.5" >i18npool::tran..</text>
+</g>
+<g >
+<title>ScTable::GetColOffset (1 samples, 3.33%)</title><rect x="875.3" y="165" width="39.4" height="15.0" fill="rgb(210,222,13)" rx="2" ry="2" />
+<text  x="878.33" y="175.5" >ScT..</text>
+</g>
+<g >
+<title>xmlParseChunk (1 samples, 3.33%)</title><rect x="914.7" y="421" width="39.3" height="15.0" fill="rgb(228,119,10)" rx="2" ry="2" />
+<text  x="917.67" y="431.5" >xml..</text>
+</g>
+<g >
+<title>SwTextFly::ForEach (1 samples, 3.33%)</title><rect x="206.7" y="501" width="39.3" height="15.0" fill="rgb(223,121,17)" rx="2" ry="2" />
+<text  x="209.67" y="511.5" >SwT..</text>
+</g>
+<g >
+<title>SwTabFrame::MakeAll (2 samples, 6.67%)</title><rect x="10.0" y="389" width="78.7" height="15.0" fill="rgb(253,32,19)" rx="2" ry="2" />
+<text  x="13.00" y="399.5" >SwTabFram..</text>
+</g>
+<g >
+<title>SwTextGuess::maybeAdjustPositionsForBlockAdjust (1 samples, 3.33%)</title><rect x="324.7" y="501" width="39.3" height="15.0" fill="rgb(216,41,52)" rx="2" ry="2" />
+<text  x="327.67" y="511.5" >SwT..</text>
+</g>
+<g >
+<title>GetTextArray (1 samples, 3.33%)</title><rect x="324.7" y="437" width="39.3" height="15.0" fill="rgb(219,128,22)" rx="2" ry="2" />
+<text  x="327.67" y="447.5" >Get..</text>
+</g>
+<g >
+<title>writerfilter::ooxml::OOXMLFastContextHandlerProperties::lcl_endFastElement (1 samples, 3.33%)</title><rect x="914.7" y="549" width="39.3" height="15.0" fill="rgb(235,14,11)" rx="2" ry="2" />
+<text  x="917.67" y="559.5" >wri..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 3.33%)</title><rect x="678.7" y="261" width="39.3" height="15.0" fill="rgb(222,106,36)" rx="2" ry="2" />
+<text  x="681.67" y="271.5" >oox..</text>
+</g>
+<g >
+<title>remotefontconfi (6 samples, 20.00%)</title><rect x="954.0" y="645" width="236.0" height="15.0" fill="rgb(223,96,2)" rx="2" ry="2" />
+<text  x="957.00" y="655.5" >remotefontconfi</text>
+</g>
+<g >
+<title>framework::LoadEnv::loadComponentFromURL (9 samples, 30.00%)</title><rect x="364.0" y="597" width="354.0" height="15.0" fill="rgb(206,99,41)" rx="2" ry="2" />
+<text  x="367.00" y="607.5" >framework::LoadEnv::loadComponentFromURL</text>
+</g>
+<g >
+<title>oox::xls::WorksheetHelper::getDrawPage (1 samples, 3.33%)</title><rect x="875.3" y="261" width="39.4" height="15.0" fill="rgb(229,87,30)" rx="2" ry="2" />
+<text  x="878.33" y="271.5" >oox..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (9 samples, 30.00%)</title><rect x="364.0" y="421" width="354.0" height="15.0" fill="rgb(253,94,17)" rx="2" ry="2" />
+<text  x="367.00" y="431.5" >oox::core::XmlFilterBase::importFragment</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (3 samples, 10.00%)</title><rect x="796.7" y="373" width="118.0" height="15.0" fill="rgb(251,208,10)" rx="2" ry="2" />
+<text  x="799.67" y="383.5" >oox::core::Fas..</text>
+</g>
+<g >
+<title>SwTextFormatter::FormatLine (6 samples, 20.00%)</title><rect x="128.0" y="565" width="236.0" height="15.0" fill="rgb(251,74,19)" rx="2" ry="2" />
+<text  x="131.00" y="575.5" >SwTextFormatter::FormatLine</text>
+</g>
+<g >
+<title>SwXFrame::attach (1 samples, 3.33%)</title><rect x="914.7" y="309" width="39.3" height="15.0" fill="rgb(251,201,30)" rx="2" ry="2" />
+<text  x="917.67" y="319.5" >SwX..</text>
+</g>
+<g >
+<title>oox::core::ContextHandler2Helper::implEndElement (1 samples, 3.33%)</title><rect x="836.0" y="229" width="39.3" height="15.0" fill="rgb(226,183,35)" rx="2" ry="2" />
+<text  x="839.00" y="239.5" >oox..</text>
+</g>
+<g >
+<title>i18npool::transliteration_commonclass::transliterateString2String (1 samples, 3.33%)</title><rect x="639.3" y="197" width="39.4" height="15.0" fill="rgb(252,73,53)" rx="2" ry="2" />
+<text  x="642.33" y="207.5" >i18..</text>
+</g>
+<g >
+<title>SocketPoll::logInfo (3 samples, 10.00%)</title><rect x="1072.0" y="613" width="118.0" height="15.0" fill="rgb(213,84,19)" rx="2" ry="2" />
+<text  x="1075.00" y="623.5" >SocketPoll::lo..</text>
+</g>
+<g >
+<title>SwTextPortion::Format_ (1 samples, 3.33%)</title><rect x="324.7" y="533" width="39.3" height="15.0" fill="rgb(248,19,42)" rx="2" ry="2" />
+<text  x="327.67" y="543.5" >SwT..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="167.3" y="341" width="39.4" height="15.0" fill="rgb(253,66,19)" rx="2" ry="2" />
+<text  x="170.33" y="351.5" >_IO..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="285.3" y="469" width="39.4" height="15.0" fill="rgb(225,54,19)" rx="2" ry="2" />
+<text  x="288.33" y="479.5" >sys..</text>
+</g>
+<g >
+<title>oox::xls::DxfContext::onCreateContext (1 samples, 3.33%)</title><rect x="364.0" y="213" width="39.3" height="15.0" fill="rgb(253,148,23)" rx="2" ry="2" />
+<text  x="367.00" y="223.5" >oox..</text>
+</g>
+<g >
+<title>SwLayAction::FormatLayout (2 samples, 6.67%)</title><rect x="10.0" y="437" width="78.7" height="15.0" fill="rgb(235,56,26)" rx="2" ry="2" />
+<text  x="13.00" y="447.5" >SwLayActi..</text>
+</g>
+<g >
+<title>Document::onLoad (2 samples, 6.67%)</title><rect x="10.0" y="613" width="78.7" height="15.0" fill="rgb(254,133,20)" rx="2" ry="2" />
+<text  x="13.00" y="623.5" >Document:..</text>
+</g>
+<g >
+<title>non-virtual thunk to oox::xls::FontContext::onCreateContext (1 samples, 3.33%)</title><rect x="718.0" y="213" width="39.3" height="15.0" fill="rgb(222,178,19)" rx="2" ry="2" />
+<text  x="721.00" y="223.5" >non..</text>
+</g>
+<g >
+<title>CharClass::uppercase (3 samples, 10.00%)</title><rect x="521.3" y="261" width="118.0" height="15.0" fill="rgb(226,31,46)" rx="2" ry="2" />
+<text  x="524.33" y="271.5" >CharClass::upp..</text>
+</g>
+<g >
+<title>writerfilter::ooxml::OOXMLDocumentImpl::resolveHeader (1 samples, 3.33%)</title><rect x="914.7" y="501" width="39.3" height="15.0" fill="rgb(218,145,25)" rx="2" ry="2" />
+<text  x="917.67" y="511.5" >wri..</text>
+</g>
+<g >
+<title>SwTextGuess::Guess (1 samples, 3.33%)</title><rect x="324.7" y="517" width="39.3" height="15.0" fill="rgb(241,26,46)" rx="2" ry="2" />
+<text  x="327.67" y="527.5" >SwT..</text>
+</g>
+<g >
+<title>SvpSalInstance::ImplYield (1 samples, 3.33%)</title><rect x="796.7" y="277" width="39.3" height="15.0" fill="rgb(227,143,48)" rx="2" ry="2" />
+<text  x="799.67" y="287.5" >Svp..</text>
+</g>
+<g >
+<title>FilterData::colHidden (1 samples, 3.33%)</title><rect x="875.3" y="149" width="39.4" height="15.0" fill="rgb(206,30,9)" rx="2" ry="2" />
+<text  x="878.33" y="159.5" >Fil..</text>
+</g>
+<g >
+<title>SwDocShell::DoFlushDocInfo (1 samples, 3.33%)</title><rect x="757.3" y="389" width="39.4" height="15.0" fill="rgb(244,113,30)" rx="2" ry="2" />
+<text  x="760.33" y="399.5" >SwD..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="88.7" y="69" width="39.3" height="15.0" fill="rgb(254,186,4)" rx="2" ry="2" />
+<text  x="91.67" y="79.5" >_IO..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 3.33%)</title><rect x="88.7" y="501" width="39.3" height="15.0" fill="rgb(239,149,53)" rx="2" ry="2" />
+<text  x="91.67" y="511.5" >oox..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 3.33%)</title><rect x="836.0" y="277" width="39.3" height="15.0" fill="rgb(225,81,10)" rx="2" ry="2" />
+<text  x="839.00" y="287.5" >oox..</text>
+</g>
+<g >
+<title>syscall (3 samples, 10.00%)</title><rect x="521.3" y="149" width="118.0" height="15.0" fill="rgb(240,110,39)" rx="2" ry="2" />
+<text  x="524.33" y="159.5" >syscall</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;unsigned short, std::pair&lt;unsigned short const, SfxPoolItem const*&gt;, std::allocator&lt;std::pair&lt;unsigned short const, SfxPoolItem const*&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;unsigned short&gt;, std::hash&lt;unsigned short&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::find (1 samples, 3.33%)</title><rect x="10.0" y="261" width="39.3" height="15.0" fill="rgb(224,69,43)" rx="2" ry="2" />
+<text  x="13.00" y="271.5" >std..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="10.0" y="213" width="39.3" height="15.0" fill="rgb(223,26,45)" rx="2" ry="2" />
+<text  x="13.00" y="223.5" >sys..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="836.0" y="213" width="39.3" height="15.0" fill="rgb(254,187,54)" rx="2" ry="2" />
+<text  x="839.00" y="223.5" >_IO..</text>
+</g>
+<g >
+<title>LocaleDataWrapper::loadData (1 samples, 3.33%)</title><rect x="88.7" y="165" width="39.3" height="15.0" fill="rgb(247,195,32)" rx="2" ry="2" />
+<text  x="91.67" y="175.5" >Loc..</text>
+</g>
+<g >
+<title>Document::load (2 samples, 6.67%)</title><rect x="10.0" y="597" width="78.7" height="15.0" fill="rgb(243,80,30)" rx="2" ry="2" />
+<text  x="13.00" y="607.5" >Document:..</text>
+</g>
+<g >
+<title>operator new (1 samples, 3.33%)</title><rect x="88.7" y="117" width="39.3" height="15.0" fill="rgb(243,98,31)" rx="2" ry="2" />
+<text  x="91.67" y="127.5" >ope..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (4 samples, 13.33%)</title><rect x="364.0" y="293" width="157.3" height="15.0" fill="rgb(216,66,43)" rx="2" ry="2" />
+<text  x="367.00" y="303.5" >oox::core::FastParse..</text>
+</g>
+<g >
+<title>ScInterpreterContext::prepFormatterForRoMode (1 samples, 3.33%)</title><rect x="88.7" y="261" width="39.3" height="15.0" fill="rgb(214,79,23)" rx="2" ry="2" />
+<text  x="91.67" y="271.5" >ScI..</text>
+</g>
+<g >
+<title>SwLayAction::FormatLayout (2 samples, 6.67%)</title><rect x="10.0" y="453" width="78.7" height="15.0" fill="rgb(212,174,39)" rx="2" ry="2" />
+<text  x="13.00" y="463.5" >SwLayActi..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;vcl::font::FontSelectPattern, std::pair&lt;vcl::font::FontSelectPattern const, std::_List_iterator&lt;std::pair&lt;vcl::font::FontSelectPattern, rtl::Reference&lt;LogicalFontInstance&gt; &gt; &gt; &gt;, std::pmr::polymorphic_allocator&lt;std::pair&lt;vcl::font::FontSelectPattern const, std::_List_iterator&lt;std::pair&lt;vcl::font::FontSelectPattern, rtl::Reference&lt;LogicalFontInstance&gt; &gt; &gt; &gt; &gt;, std::__detail::_Select1st, ImplFontCache::IFSD_Equal, ImplFontCache::IFSD_Hash, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt; &gt;::find (1 samples, 3.33%)</title><rect x="128.0" y="389" width="39.3" height="15.0" fill="rgb(216,130,7)" rx="2" ry="2" />
+<text  x="131.00" y="399.5" >std..</text>
+</g>
+<g >
+<title>SwLayAction::FormatLayout (1 samples, 3.33%)</title><rect x="757.3" y="277" width="39.4" height="15.0" fill="rgb(205,13,40)" rx="2" ry="2" />
+<text  x="760.33" y="287.5" >SwL..</text>
+</g>
+<g >
+<title>framework::LoadEnv::start (3 samples, 10.00%)</title><rect x="796.7" y="549" width="118.0" height="15.0" fill="rgb(211,105,19)" rx="2" ry="2" />
+<text  x="799.67" y="559.5" >framework::Loa..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 3.33%)</title><rect x="836.0" y="309" width="39.3" height="15.0" fill="rgb(210,171,26)" rx="2" ry="2" />
+<text  x="839.00" y="319.5" >oox..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="246.0" y="501" width="39.3" height="15.0" fill="rgb(232,87,40)" rx="2" ry="2" />
+<text  x="249.00" y="511.5" >_IO..</text>
+</g>
+<g >
+<title>oox::core::ContextHandler2Helper::implCreateChildContext (4 samples, 13.33%)</title><rect x="364.0" y="229" width="157.3" height="15.0" fill="rgb(247,59,43)" rx="2" ry="2" />
+<text  x="367.00" y="239.5" >oox::core::ContextHa..</text>
+</g>
+<g >
+<title>oox::PropertySet::set (1 samples, 3.33%)</title><rect x="88.7" y="309" width="39.3" height="15.0" fill="rgb(226,156,7)" rx="2" ry="2" />
+<text  x="91.67" y="319.5" >oox..</text>
+</g>
+<g >
+<title>SwViewShell::EndAction (2 samples, 6.67%)</title><rect x="10.0" y="517" width="78.7" height="15.0" fill="rgb(231,144,11)" rx="2" ry="2" />
+<text  x="13.00" y="527.5" >SwViewShe..</text>
+</g>
+<g >
+<title>LocaleDataWrapper::LocaleDataWrapper (1 samples, 3.33%)</title><rect x="88.7" y="181" width="39.3" height="15.0" fill="rgb(215,77,4)" rx="2" ry="2" />
+<text  x="91.67" y="191.5" >Loc..</text>
+</g>
+<g >
+<title>framework::LoadEnv::loadComponentFromURL (3 samples, 10.00%)</title><rect x="796.7" y="581" width="118.0" height="15.0" fill="rgb(230,202,14)" rx="2" ry="2" />
+<text  x="799.67" y="591.5" >framework::Loa..</text>
+</g>
+<g >
+<title>ImplFontCache::IFSD_Equal::operator (1 samples, 3.33%)</title><rect x="128.0" y="357" width="39.3" height="15.0" fill="rgb(232,208,30)" rx="2" ry="2" />
+<text  x="131.00" y="367.5" >Imp..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="875.3" y="133" width="39.4" height="15.0" fill="rgb(207,101,5)" rx="2" ry="2" />
+<text  x="878.33" y="143.5" >_IO..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 3.33%)</title><rect x="88.7" y="389" width="39.3" height="15.0" fill="rgb(253,209,46)" rx="2" ry="2" />
+<text  x="91.67" y="399.5" >oox..</text>
+</g>
+<g >
+<title>SfxBaseModel::load (1 samples, 3.33%)</title><rect x="718.0" y="549" width="39.3" height="15.0" fill="rgb(211,6,43)" rx="2" ry="2" />
+<text  x="721.00" y="559.5" >Sfx..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (9 samples, 30.00%)</title><rect x="364.0" y="357" width="354.0" height="15.0" fill="rgb(227,112,2)" rx="2" ry="2" />
+<text  x="367.00" y="367.5" >sax_fastparser::FastSaxParserImpl::parseStream</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 10.00%)</title><rect x="521.3" y="181" width="118.0" height="15.0" fill="rgb(235,34,5)" rx="2" ry="2" />
+<text  x="524.33" y="191.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 10.00%)</title><rect x="403.3" y="133" width="118.0" height="15.0" fill="rgb(254,165,48)" rx="2" ry="2" />
+<text  x="406.33" y="143.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="49.3" y="341" width="39.4" height="15.0" fill="rgb(249,31,39)" rx="2" ry="2" />
+<text  x="52.33" y="351.5" >_IO..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="718.0" y="117" width="39.3" height="15.0" fill="rgb(241,53,16)" rx="2" ry="2" />
+<text  x="721.00" y="127.5" >_IO..</text>
+</g>
+<g >
+<title>comphelper::OInterfaceContainerHelper4&lt;com::sun::star::util::XModifyListener&gt;::forEach&lt;comphelper::OInterfaceContainerHelper4&lt;com::sun::star::util::XModifyListener&gt;::NotifySingleListener&lt;com::sun::star::lang::EventObject&gt; &gt; (1 samples, 3.33%)</title><rect x="757.3" y="421" width="39.4" height="15.0" fill="rgb(252,188,50)" rx="2" ry="2" />
+<text  x="760.33" y="431.5" >com..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="246.0" y="469" width="39.3" height="15.0" fill="rgb(248,10,20)" rx="2" ry="2" />
+<text  x="249.00" y="479.5" >sys..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (4 samples, 13.33%)</title><rect x="364.0" y="325" width="157.3" height="15.0" fill="rgb(221,166,47)" rx="2" ry="2" />
+<text  x="367.00" y="335.5" >oox::core::XmlFilter..</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::filter (9 samples, 30.00%)</title><rect x="364.0" y="469" width="354.0" height="15.0" fill="rgb(226,119,46)" rx="2" ry="2" />
+<text  x="367.00" y="479.5" >oox::xls::ExcelFilter::filter</text>
+</g>
+<g >
+<title>SalLayoutGlyphsCache::GetLayoutGlyphs (1 samples, 3.33%)</title><rect x="324.7" y="421" width="39.3" height="15.0" fill="rgb(245,193,16)" rx="2" ry="2" />
+<text  x="327.67" y="431.5" >Sal..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="914.7" y="213" width="39.3" height="15.0" fill="rgb(215,101,30)" rx="2" ry="2" />
+<text  x="917.67" y="223.5" >_IO..</text>
+</g>
+<g >
+<title>ScDocShell::ImportFrom (3 samples, 10.00%)</title><rect x="796.7" y="485" width="118.0" height="15.0" fill="rgb(224,79,32)" rx="2" ry="2" />
+<text  x="799.67" y="495.5" >ScDocShell::Im..</text>
+</g>
+<g >
+<title>LocaleDataWrapper::get (1 samples, 3.33%)</title><rect x="88.7" y="197" width="39.3" height="15.0" fill="rgb(249,205,23)" rx="2" ry="2" />
+<text  x="91.67" y="207.5" >Loc..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="167.3" y="309" width="39.4" height="15.0" fill="rgb(207,11,23)" rx="2" ry="2" />
+<text  x="170.33" y="319.5" >sys..</text>
+</g>
+<g >
+<title>OutputDevice::GetFontCapabilities (2 samples, 6.67%)</title><rect x="128.0" y="469" width="78.7" height="15.0" fill="rgb(206,57,39)" rx="2" ry="2" />
+<text  x="131.00" y="479.5" >OutputDev..</text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (1 samples, 3.33%)</title><rect x="718.0" y="533" width="39.3" height="15.0" fill="rgb(227,165,38)" rx="2" ry="2" />
+<text  x="721.00" y="543.5" >Sfx..</text>
+</g>
+<g >
+<title>syscall (3 samples, 10.00%)</title><rect x="954.0" y="597" width="118.0" height="15.0" fill="rgb(248,4,15)" rx="2" ry="2" />
+<text  x="957.00" y="607.5" >syscall</text>
+</g>
+<g >
+<title>SvpSalInstance::DoYield (1 samples, 3.33%)</title><rect x="796.7" y="293" width="39.3" height="15.0" fill="rgb(243,194,39)" rx="2" ry="2" />
+<text  x="799.67" y="303.5" >Svp..</text>
+</g>
+<g >
+<title>SwLayAction::FormatLayout (1 samples, 3.33%)</title><rect x="757.3" y="261" width="39.4" height="15.0" fill="rgb(243,180,38)" rx="2" ry="2" />
+<text  x="760.33" y="271.5" >SwL..</text>
+</g>
+<g >
+<title>SwLayAction::FormatLayoutTab (2 samples, 6.67%)</title><rect x="10.0" y="421" width="78.7" height="15.0" fill="rgb(232,200,0)" rx="2" ry="2" />
+<text  x="13.00" y="431.5" >SwLayActi..</text>
+</g>
+<g >
+<title>osl_waitCondition (1 samples, 3.33%)</title><rect x="678.7" y="229" width="39.3" height="15.0" fill="rgb(223,92,1)" rx="2" ry="2" />
+<text  x="681.67" y="239.5" >osl..</text>
+</g>
+<g >
+<title>SwViewShell::ImplEndAction (2 samples, 6.67%)</title><rect x="10.0" y="501" width="78.7" height="15.0" fill="rgb(230,191,12)" rx="2" ry="2" />
+<text  x="13.00" y="511.5" >SwViewShe..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="678.7" y="165" width="39.3" height="15.0" fill="rgb(224,77,6)" rx="2" ry="2" />
+<text  x="681.67" y="175.5" >han..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="206.7" y="421" width="39.3" height="15.0" fill="rgb(216,49,51)" rx="2" ry="2" />
+<text  x="209.67" y="431.5" >sys..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 3.33%)</title><rect x="718.0" y="405" width="39.3" height="15.0" fill="rgb(219,123,9)" rx="2" ry="2" />
+<text  x="721.00" y="415.5" >oox..</text>
+</g>
+<g >
+<title>i18npool::cclass_Unicode::toUpper (3 samples, 10.00%)</title><rect x="521.3" y="229" width="118.0" height="15.0" fill="rgb(249,84,46)" rx="2" ry="2" />
+<text  x="524.33" y="239.5" >i18npool::ccla..</text>
+</g>
+<g >
+<title>vcl::font::PhysicalFontCollection::FindFontFamily (1 samples, 3.33%)</title><rect x="167.3" y="389" width="39.4" height="15.0" fill="rgb(210,95,26)" rx="2" ry="2" />
+<text  x="170.33" y="399.5" >vcl..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 3.33%)</title><rect x="678.7" y="309" width="39.3" height="15.0" fill="rgb(248,189,9)" rx="2" ry="2" />
+<text  x="681.67" y="319.5" >oox..</text>
+</g>
+<g >
+<title>free (1 samples, 3.33%)</title><rect x="324.7" y="405" width="39.3" height="15.0" fill="rgb(250,191,50)" rx="2" ry="2" />
+<text  x="327.67" y="415.5" >free</text>
+</g>
+<g >
+<title>SwXFrame::attachToRange (1 samples, 3.33%)</title><rect x="914.7" y="293" width="39.3" height="15.0" fill="rgb(217,106,14)" rx="2" ry="2" />
+<text  x="917.67" y="303.5" >SwX..</text>
+</g>
+<g >
+<title>SfxDispatchController_Impl::addStatusListener (1 samples, 3.33%)</title><rect x="757.3" y="533" width="39.4" height="15.0" fill="rgb(239,212,42)" rx="2" ry="2" />
+<text  x="760.33" y="543.5" >Sfx..</text>
+</g>
+<g >
+<title>framework::Desktop::loadComponentFromURL (9 samples, 30.00%)</title><rect x="364.0" y="613" width="354.0" height="15.0" fill="rgb(241,61,40)" rx="2" ry="2" />
+<text  x="367.00" y="623.5" >framework::Desktop::loadComponentFromURL</text>
+</g>
+<g >
+<title>SdrObjGroup::GetLayer (1 samples, 3.33%)</title><rect x="206.7" y="469" width="39.3" height="15.0" fill="rgb(211,87,41)" rx="2" ry="2" />
+<text  x="209.67" y="479.5" >Sdr..</text>
+</g>
+<g >
+<title>SfxObjectShell::FlushDocInfo (1 samples, 3.33%)</title><rect x="757.3" y="405" width="39.4" height="15.0" fill="rgb(237,150,31)" rx="2" ry="2" />
+<text  x="760.33" y="415.5" >Sfx..</text>
+</g>
+<g >
+<title>OutputDevice::ImplNewFont (2 samples, 6.67%)</title><rect x="128.0" y="437" width="78.7" height="15.0" fill="rgb(240,156,52)" rx="2" ry="2" />
+<text  x="131.00" y="447.5" >OutputDev..</text>
+</g>
+<g >
+<title>syscall (3 samples, 10.00%)</title><rect x="403.3" y="101" width="118.0" height="15.0" fill="rgb(216,26,6)" rx="2" ry="2" />
+<text  x="406.33" y="111.5" >syscall</text>
+</g>
+<g >
+<title>SwViewShell::UpdateFields (2 samples, 6.67%)</title><rect x="10.0" y="549" width="78.7" height="15.0" fill="rgb(222,107,44)" rx="2" ry="2" />
+<text  x="13.00" y="559.5" >SwViewShe..</text>
+</g>
+<g >
+<title>SwTextSizeInfo::GetMultiCreator (1 samples, 3.33%)</title><rect x="285.3" y="517" width="39.4" height="15.0" fill="rgb(236,77,30)" rx="2" ry="2" />
+<text  x="288.33" y="527.5" >SwT..</text>
+</g>
+<g >
+<title>SvxBoxItem::CalcLineSpace (1 samples, 3.33%)</title><rect x="757.3" y="85" width="39.4" height="15.0" fill="rgb(234,178,1)" rx="2" ry="2" />
+<text  x="760.33" y="95.5" >Svx..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;rtl::OUString, std::pair&lt;rtl::OUString const, std::unique_ptr&lt;vcl::font::PhysicalFontFamily, std::default_delete&lt;vcl::font::PhysicalFontFamily&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;rtl::OUString const, std::unique_ptr&lt;vcl::font::PhysicalFontFamily, std::default_delete&lt;vcl::font::PhysicalFontFamily&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;rtl::OUString&gt;, std::hash&lt;rtl::OUString&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt; &gt;::_M_find_before_node (1 samples, 3.33%)</title><rect x="167.3" y="357" width="39.4" height="15.0" fill="rgb(208,133,34)" rx="2" ry="2" />
+<text  x="170.33" y="367.5" >std..</text>
+</g>
+<g >
+<title>oox::xls::Font::finalizeImport (1 samples, 3.33%)</title><rect x="88.7" y="325" width="39.3" height="15.0" fill="rgb(248,111,47)" rx="2" ry="2" />
+<text  x="91.67" y="335.5" >oox..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 3.33%)</title><rect x="88.7" y="421" width="39.3" height="15.0" fill="rgb(252,112,1)" rx="2" ry="2" />
+<text  x="91.67" y="431.5" >oox..</text>
+</g>
+<g >
+<title>oox::xls::ExcelFilter::filter (3 samples, 10.00%)</title><rect x="796.7" y="453" width="118.0" height="15.0" fill="rgb(226,13,49)" rx="2" ry="2" />
+<text  x="799.67" y="463.5" >oox::xls::Exce..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="718.0" y="101" width="39.3" height="15.0" fill="rgb(225,193,41)" rx="2" ry="2" />
+<text  x="721.00" y="111.5" >han..</text>
+</g>
+<g >
+<title>SwFrame::PrepareMake (1 samples, 3.33%)</title><rect x="10.0" y="341" width="39.3" height="15.0" fill="rgb(247,93,34)" rx="2" ry="2" />
+<text  x="13.00" y="351.5" >SwF..</text>
+</g>
+<g >
+<title>oox::core::ContextHandler2::createFastChildContext (4 samples, 13.33%)</title><rect x="364.0" y="245" width="157.3" height="15.0" fill="rgb(240,14,16)" rx="2" ry="2" />
+<text  x="367.00" y="255.5" >oox::core::ContextHa..</text>
+</g>
+<g >
+<title>ScDocShell::MakeDrawLayer (1 samples, 3.33%)</title><rect x="875.3" y="213" width="39.4" height="15.0" fill="rgb(223,164,36)" rx="2" ry="2" />
+<text  x="878.33" y="223.5" >ScD..</text>
+</g>
+<g >
+<title>writerfilter::dmapper::DomainMapper_Impl::substream (1 samples, 3.33%)</title><rect x="914.7" y="485" width="39.3" height="15.0" fill="rgb(207,135,38)" rx="2" ry="2" />
+<text  x="917.67" y="495.5" >wri..</text>
+</g>
+<g >
+<title>oox::xls::WorkbookFragment::finalizeImport (1 samples, 3.33%)</title><rect x="88.7" y="437" width="39.3" height="15.0" fill="rgb(209,155,45)" rx="2" ry="2" />
+<text  x="91.67" y="447.5" >oox..</text>
+</g>
+<g >
+<title>std::condition_variable::wait (1 samples, 3.33%)</title><rect x="796.7" y="245" width="39.3" height="15.0" fill="rgb(217,121,18)" rx="2" ry="2" />
+<text  x="799.67" y="255.5" >std..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="206.7" y="453" width="39.3" height="15.0" fill="rgb(251,149,37)" rx="2" ry="2" />
+<text  x="209.67" y="463.5" >_IO..</text>
+</g>
+<g >
+<title>lcl_GetBottomLineSize (1 samples, 3.33%)</title><rect x="757.3" y="101" width="39.4" height="15.0" fill="rgb(244,127,20)" rx="2" ry="2" />
+<text  x="760.33" y="111.5" >lcl..</text>
+</g>
+<g >
+<title>SwDoc::MakeFlySection_ (1 samples, 3.33%)</title><rect x="914.7" y="261" width="39.3" height="15.0" fill="rgb(218,194,29)" rx="2" ry="2" />
+<text  x="917.67" y="271.5" >SwD..</text>
+</g>
+<g >
+<title>SfxBaseModel::load (3 samples, 10.00%)</title><rect x="796.7" y="517" width="118.0" height="15.0" fill="rgb(213,171,28)" rx="2" ry="2" />
+<text  x="799.67" y="527.5" >SfxBaseModel::..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 3.33%)</title><rect x="718.0" y="325" width="39.3" height="15.0" fill="rgb(207,201,24)" rx="2" ry="2" />
+<text  x="721.00" y="335.5" >oox..</text>
+</g>
+<g >
+<title>writerfilter::ooxml::OOXMLFactory::endAction (1 samples, 3.33%)</title><rect x="914.7" y="533" width="39.3" height="15.0" fill="rgb(236,212,6)" rx="2" ry="2" />
+<text  x="917.67" y="543.5" >wri..</text>
+</g>
+<g >
+<title>SwContentNotify::ImplDestroy (1 samples, 3.33%)</title><rect x="10.0" y="293" width="39.3" height="15.0" fill="rgb(226,61,31)" rx="2" ry="2" />
+<text  x="13.00" y="303.5" >SwC..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 3.33%)</title><rect x="718.0" y="437" width="39.3" height="15.0" fill="rgb(251,3,11)" rx="2" ry="2" />
+<text  x="721.00" y="447.5" >oox..</text>
+</g>
+<g >
+<title>std::condition_variable::wait (1 samples, 3.33%)</title><rect x="678.7" y="213" width="39.3" height="15.0" fill="rgb(216,198,20)" rx="2" ry="2" />
+<text  x="681.67" y="223.5" >std..</text>
+</g>
+<g >
+<title>syscall (1 samples, 3.33%)</title><rect x="324.7" y="357" width="39.3" height="15.0" fill="rgb(220,202,32)" rx="2" ry="2" />
+<text  x="327.67" y="367.5" >sys..</text>
+</g>
+<g >
+<title>oox::xls::(anonymous namespace)::findUnusedName (3 samples, 10.00%)</title><rect x="521.3" y="277" width="118.0" height="15.0" fill="rgb(219,72,18)" rx="2" ry="2" />
+<text  x="524.33" y="287.5" >oox::xls::(ano..</text>
+</g>
+<g >
+<title>oox::xls::WorkbookFragment::finalizeImport (9 samples, 30.00%)</title><rect x="364.0" y="341" width="354.0" height="15.0" fill="rgb(251,172,52)" rx="2" ry="2" />
+<text  x="367.00" y="351.5" >oox::xls::WorkbookFragment::finalizeImport</text>
+</g>
+<g >
+<title>LocaleDataWrapper::loadDateOrders (1 samples, 3.33%)</title><rect x="88.7" y="149" width="39.3" height="15.0" fill="rgb(230,2,48)" rx="2" ry="2" />
+<text  x="91.67" y="159.5" >Loc..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="246.0" y="485" width="39.3" height="15.0" fill="rgb(237,19,6)" rx="2" ry="2" />
+<text  x="249.00" y="495.5" >han..</text>
+</g>
+<g >
+<title>oox::core::FilterBase::filter (1 samples, 3.33%)</title><rect x="88.7" y="549" width="39.3" height="15.0" fill="rgb(208,2,31)" rx="2" ry="2" />
+<text  x="91.67" y="559.5" >oox..</text>
+</g>
+<g >
+<title>lcl_RecalcRow (1 samples, 3.33%)</title><rect x="757.3" y="197" width="39.4" height="15.0" fill="rgb(225,85,3)" rx="2" ry="2" />
+<text  x="760.33" y="207.5" >lcl..</text>
+</g>
+<g >
+<title>malloc (1 samples, 3.33%)</title><rect x="364.0" y="165" width="39.3" height="15.0" fill="rgb(237,37,7)" rx="2" ry="2" />
+<text  x="367.00" y="175.5" >mal..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="875.3" y="117" width="39.4" height="15.0" fill="rgb(253,116,36)" rx="2" ry="2" />
+<text  x="878.33" y="127.5" >han..</text>
+</g>
+<g >
+<title>SwTextFly::InitAnchoredObjList (1 samples, 3.33%)</title><rect x="206.7" y="485" width="39.3" height="15.0" fill="rgb(226,217,41)" rx="2" ry="2" />
+<text  x="209.67" y="495.5" >SwT..</text>
+</g>
+<g >
+<title>framework::StatusBarWrapper::initialize (1 samples, 3.33%)</title><rect x="757.3" y="597" width="39.4" height="15.0" fill="rgb(214,73,11)" rx="2" ry="2" />
+<text  x="760.33" y="607.5" >fra..</text>
+</g>
+<g >
+<title>SwViewShell::EndAllAction (1 samples, 3.33%)</title><rect x="757.3" y="373" width="39.4" height="15.0" fill="rgb(247,3,50)" rx="2" ry="2" />
+<text  x="760.33" y="383.5" >SwV..</text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (1 samples, 3.33%)</title><rect x="718.0" y="565" width="39.3" height="15.0" fill="rgb(209,143,42)" rx="2" ry="2" />
+<text  x="721.00" y="575.5" >fra..</text>
+</g>
+<g >
+<title>kitbroker (24 samples, 80.00%)</title><rect x="10.0" y="645" width="944.0" height="15.0" fill="rgb(222,143,27)" rx="2" ry="2" />
+<text  x="13.00" y="655.5" >kitbroker</text>
+</g>
+<g >
+<title>ScDocShell::ImportFrom (9 samples, 30.00%)</title><rect x="364.0" y="501" width="354.0" height="15.0" fill="rgb(224,34,51)" rx="2" ry="2" />
+<text  x="367.00" y="511.5" >ScDocShell::ImportFrom</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="128.0" y="341" width="39.3" height="15.0" fill="rgb(210,88,8)" rx="2" ry="2" />
+<text  x="131.00" y="351.5" >_IO..</text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (3 samples, 10.00%)</title><rect x="796.7" y="501" width="118.0" height="15.0" fill="rgb(214,126,1)" rx="2" ry="2" />
+<text  x="799.67" y="511.5" >SfxObjectShell..</text>
+</g>
+<g >
+<title>writerfilter::dmapper::DomainMapper_Impl::PushTextBoxContent (1 samples, 3.33%)</title><rect x="914.7" y="373" width="39.3" height="15.0" fill="rgb(252,78,53)" rx="2" ry="2" />
+<text  x="917.67" y="383.5" >wri..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 3.33%)</title><rect x="88.7" y="453" width="39.3" height="15.0" fill="rgb(216,195,27)" rx="2" ry="2" />
+<text  x="91.67" y="463.5" >sax..</text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (1 samples, 3.33%)</title><rect x="88.7" y="613" width="39.3" height="15.0" fill="rgb(220,61,10)" rx="2" ry="2" />
+<text  x="91.67" y="623.5" >Sfx..</text>
+</g>
+<g >
+<title>oox::xls::Dxf::createFill (1 samples, 3.33%)</title><rect x="364.0" y="197" width="39.3" height="15.0" fill="rgb(252,18,5)" rx="2" ry="2" />
+<text  x="367.00" y="207.5" >oox..</text>
+</g>
+<g >
+<title>ScModelObj::GetFormatter (1 samples, 3.33%)</title><rect x="88.7" y="277" width="39.3" height="15.0" fill="rgb(212,180,50)" rx="2" ry="2" />
+<text  x="91.67" y="287.5" >ScM..</text>
+</g>
+<g >
+<title>oox::xls::Fill::importPatternFill (3 samples, 10.00%)</title><rect x="403.3" y="197" width="118.0" height="15.0" fill="rgb(249,99,32)" rx="2" ry="2" />
+<text  x="406.33" y="207.5" >oox::xls::Fill..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 3.33%)</title><rect x="718.0" y="309" width="39.3" height="15.0" fill="rgb(220,71,28)" rx="2" ry="2" />
+<text  x="721.00" y="319.5" >oox..</text>
+</g>
+<g >
+<title>SwTextFormatter::NewTextPortion (1 samples, 3.33%)</title><rect x="246.0" y="517" width="39.3" height="15.0" fill="rgb(223,62,30)" rx="2" ry="2" />
+<text  x="249.00" y="527.5" >SwT..</text>
+</g>
+<g >
+<title>SwTextFormatter::CalcAscent (2 samples, 6.67%)</title><rect x="128.0" y="533" width="78.7" height="15.0" fill="rgb(219,94,23)" rx="2" ry="2" />
+<text  x="131.00" y="543.5" >SwTextFor..</text>
+</g>
+<g >
+<title>InnerYield (1 samples, 3.33%)</title><rect x="796.7" y="309" width="39.3" height="15.0" fill="rgb(211,86,36)" rx="2" ry="2" />
+<text  x="799.67" y="319.5" >Inn..</text>
+</g>
+<g >
+<title>oox::xls::WorksheetGlobals::WorksheetGlobals (1 samples, 3.33%)</title><rect x="875.3" y="293" width="39.4" height="15.0" fill="rgb(208,53,32)" rx="2" ry="2" />
+<text  x="878.33" y="303.5" >oox..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (9 samples, 30.00%)</title><rect x="364.0" y="405" width="354.0" height="15.0" fill="rgb(233,180,3)" rx="2" ry="2" />
+<text  x="367.00" y="415.5" >oox::core::XmlFilterBase::importFragment</text>
+</g>
+<g >
+<title>oox::core::FilterBase::filter (1 samples, 3.33%)</title><rect x="718.0" y="469" width="39.3" height="15.0" fill="rgb(220,189,5)" rx="2" ry="2" />
+<text  x="721.00" y="479.5" >oox..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (4 samples, 13.33%)</title><rect x="364.0" y="277" width="157.3" height="15.0" fill="rgb(213,93,53)" rx="2" ry="2" />
+<text  x="367.00" y="287.5" >oox::core::FastParse..</text>
+</g>
+<g >
+<title>SwFrame::PrepareMake (1 samples, 3.33%)</title><rect x="757.3" y="165" width="39.4" height="15.0" fill="rgb(244,72,41)" rx="2" ry="2" />
+<text  x="760.33" y="175.5" >SwF..</text>
+</g>
+<g >
+<title>xmlParseStartTag2.constprop.0 (1 samples, 3.33%)</title><rect x="914.7" y="405" width="39.3" height="15.0" fill="rgb(219,31,13)" rx="2" ry="2" />
+<text  x="917.67" y="415.5" >xml..</text>
+</g>
+<g >
+<title>framework::LoadEnv::startLoading (3 samples, 10.00%)</title><rect x="796.7" y="565" width="118.0" height="15.0" fill="rgb(215,195,2)" rx="2" ry="2" />
+<text  x="799.67" y="575.5" >framework::Loa..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (4 samples, 13.33%)</title><rect x="364.0" y="261" width="157.3" height="15.0" fill="rgb(236,220,25)" rx="2" ry="2" />
+<text  x="367.00" y="271.5" >sax_fastparser::Fast..</text>
+</g>
+<g >
+<title>i18npool::CharacterClassificationImpl::toUpper (1 samples, 3.33%)</title><rect x="639.3" y="229" width="39.4" height="15.0" fill="rgb(241,142,44)" rx="2" ry="2" />
+<text  x="642.33" y="239.5" >i18..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 3.33%)</title><rect x="10.0" y="245" width="39.3" height="15.0" fill="rgb(227,128,38)" rx="2" ry="2" />
+<text  x="13.00" y="255.5" >_IO..</text>
+</g>
+<g >
+<title>oox::xls::StylesBuffer::finalizeImport (1 samples, 3.33%)</title><rect x="88.7" y="341" width="39.3" height="15.0" fill="rgb(247,222,6)" rx="2" ry="2" />
+<text  x="91.67" y="351.5" >oox..</text>
+</g>
+<g >
+<title>SwXText::appendTextContent (1 samples, 3.33%)</title><rect x="914.7" y="357" width="39.3" height="15.0" fill="rgb(233,54,15)" rx="2" ry="2" />
+<text  x="917.67" y="367.5" >SwX..</text>
+</g>
+<g >
+<title>SwDoc::MakeFlySection (1 samples, 3.33%)</title><rect x="914.7" y="277" width="39.3" height="15.0" fill="rgb(242,90,24)" rx="2" ry="2" />
+<text  x="917.67" y="287.5" >SwD..</text>
+</g>
+<g >
+<title>oox::xls::WorksheetHelper::constructGlobals (1 samples, 3.33%)</title><rect x="875.3" y="309" width="39.4" height="15.0" fill="rgb(232,69,16)" rx="2" ry="2" />
+<text  x="878.33" y="319.5" >oox..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (9 samples, 30.00%)</title><rect x="364.0" y="389" width="354.0" height="15.0" fill="rgb(237,194,42)" rx="2" ry="2" />
+<text  x="367.00" y="399.5" >oox::core::FastParser::parseStream</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 3.33%)</title><rect x="718.0" y="389" width="39.3" height="15.0" fill="rgb(217,32,16)" rx="2" ry="2" />
+<text  x="721.00" y="399.5" >oox..</text>
+</g>
+<g >
+<title>SfxShell::GetSlotState (1 samples, 3.33%)</title><rect x="757.3" y="501" width="39.4" height="15.0" fill="rgb(208,167,5)" rx="2" ry="2" />
+<text  x="760.33" y="511.5" >Sfx..</text>
+</g>
+<g >
+<title>SwRowFrame::Format (1 samples, 3.33%)</title><rect x="757.3" y="117" width="39.4" height="15.0" fill="rgb(206,102,37)" rx="2" ry="2" />
+<text  x="760.33" y="127.5" >SwR..</text>
+</g>
+<g >
+<title>oox::AttributeList::getXString (1 samples, 3.33%)</title><rect x="718.0" y="165" width="39.3" height="15.0" fill="rgb(233,20,47)" rx="2" ry="2" />
+<text  x="721.00" y="175.5" >oox..</text>
+</g>
+<g >
+<title>OutputDevice::InitFont (2 samples, 6.67%)</title><rect x="128.0" y="453" width="78.7" height="15.0" fill="rgb(247,136,26)" rx="2" ry="2" />
+<text  x="131.00" y="463.5" >OutputDev..</text>
+</g>
+<g >
+<title>SwTextFormatter::BuildPortions (6 samples, 20.00%)</title><rect x="128.0" y="549" width="236.0" height="15.0" fill="rgb(241,141,14)" rx="2" ry="2" />
+<text  x="131.00" y="559.5" >SwTextFormatter::BuildPortions</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 3.33%)</title><rect x="718.0" y="261" width="39.3" height="15.0" fill="rgb(225,14,6)" rx="2" ry="2" />
+<text  x="721.00" y="271.5" >sax..</text>
+</g>
+<g >
+<title>SwTextFrame::FormatLine (6 samples, 20.00%)</title><rect x="128.0" y="581" width="236.0" height="15.0" fill="rgb(236,150,2)" rx="2" ry="2" />
+<text  x="131.00" y="591.5" >SwTextFrame::FormatLine</text>
+</g>
+<g >
+<title>ImplFontCache::GetFontInstance (2 samples, 6.67%)</title><rect x="128.0" y="421" width="78.7" height="15.0" fill="rgb(243,68,44)" rx="2" ry="2" />
+<text  x="131.00" y="431.5" >ImplFontC..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 3.33%)</title><rect x="128.0" y="325" width="39.3" height="15.0" fill="rgb(221,210,32)" rx="2" ry="2" />
+<text  x="131.00" y="335.5" >han..</text>
+</g>
+<g >
+<title>SwTabFrame::MakeAll (1 samples, 3.33%)</title><rect x="757.3" y="213" width="39.4" height="15.0" fill="rgb(232,182,54)" rx="2" ry="2" />
+<text  x="760.33" y="223.5" >SwT..</text>
+</g>
+</g>
+</svg>
