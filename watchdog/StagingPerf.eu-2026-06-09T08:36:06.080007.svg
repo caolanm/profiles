@@ -1,0 +1,3809 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="758" onload="init(evt)" viewBox="0 0 1200 758" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="758.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >StagingPerf.eu Watchdog Profile (2026-06-08T11:00:01.636660)</text>
+<text id="details" x="10.00" y="741" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="741" > </text>
+<g id="frames">
+<g >
+<title>_IO_funlockfile (3 samples, 4.84%)</title><rect x="86.1" y="485" width="57.1" height="15.0" fill="rgb(248,97,25)" rx="2" ry="2" />
+<text  x="89.13" y="495.5" >_IO_fu..</text>
+</g>
+<g >
+<title>drawinglayer::processor2d::BaseProcessor2D::process (1 samples, 1.61%)</title><rect x="523.9" y="421" width="19.0" height="15.0" fill="rgb(234,56,7)" rx="2" ry="2" />
+<text  x="526.87" y="431.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::ExportTo (1 samples, 1.61%)</title><rect x="390.6" y="533" width="19.1" height="15.0" fill="rgb(229,42,1)" rx="2" ry="2" />
+<text  x="393.65" y="543.5" ></text>
+</g>
+<g >
+<title>pthread_cond_timedwait (3 samples, 4.84%)</title><rect x="1056.8" y="341" width="57.1" height="15.0" fill="rgb(243,2,19)" rx="2" ry="2" />
+<text  x="1059.77" y="351.5" >pthrea..</text>
+</g>
+<g >
+<title>ImpEditEngine::CreateTextObject (1 samples, 1.61%)</title><rect x="714.2" y="261" width="19.0" height="15.0" fill="rgb(235,66,51)" rx="2" ry="2" />
+<text  x="717.19" y="271.5" ></text>
+</g>
+<g >
+<title>rtl::str::ensureCapacity&lt;_rtl_String&gt; (1 samples, 1.61%)</title><rect x="428.7" y="389" width="19.0" height="15.0" fill="rgb(241,27,22)" rx="2" ry="2" />
+<text  x="431.71" y="399.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::doDownloadDocument (1 samples, 1.61%)</title><rect x="67.1" y="661" width="19.0" height="15.0" fill="rgb(238,94,16)" rx="2" ry="2" />
+<text  x="70.10" y="671.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::pollThread (3 samples, 4.84%)</title><rect x="143.2" y="661" width="57.1" height="15.0" fill="rgb(243,22,13)" rx="2" ry="2" />
+<text  x="146.23" y="671.5" >Docume..</text>
+</g>
+<g >
+<title>malloc (1 samples, 1.61%)</title><rect x="428.7" y="373" width="19.0" height="15.0" fill="rgb(244,85,2)" rx="2" ry="2" />
+<text  x="431.71" y="383.5" ></text>
+</g>
+<g >
+<title>OutputDevice::ImplLayout (1 samples, 1.61%)</title><rect x="466.8" y="501" width="19.0" height="15.0" fill="rgb(248,90,20)" rx="2" ry="2" />
+<text  x="469.77" y="511.5" ></text>
+</g>
+<g >
+<title>Application::Execute (4 samples, 6.45%)</title><rect x="1056.8" y="581" width="76.1" height="15.0" fill="rgb(238,36,40)" rx="2" ry="2" />
+<text  x="1059.77" y="591.5" >Applicat..</text>
+</g>
+<g >
+<title>RequestVettingStation::createClientSession (1 samples, 1.61%)</title><rect x="219.4" y="581" width="19.0" height="15.0" fill="rgb(213,150,40)" rx="2" ry="2" />
+<text  x="222.35" y="591.5" ></text>
+</g>
+<g >
+<title>Poco::StreamCopier::copyStream (1 samples, 1.61%)</title><rect x="219.4" y="517" width="19.0" height="15.0" fill="rgb(227,21,28)" rx="2" ry="2" />
+<text  x="222.35" y="527.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="447.7" y="421" width="19.1" height="15.0" fill="rgb(236,145,3)" rx="2" ry="2" />
+<text  x="450.74" y="431.5" ></text>
+</g>
+<g >
+<title>operator delete (1 samples, 1.61%)</title><rect x="371.6" y="421" width="19.0" height="15.0" fill="rgb(249,103,6)" rx="2" ry="2" />
+<text  x="374.61" y="431.5" ></text>
+</g>
+<g >
+<title>oox::ppt::PresentationFragmentHandler::importSlide (1 samples, 1.61%)</title><rect x="542.9" y="373" width="19.0" height="15.0" fill="rgb(229,226,16)" rx="2" ry="2" />
+<text  x="545.90" y="383.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::FormatParagraphs (4 samples, 6.45%)</title><rect x="847.4" y="517" width="76.1" height="15.0" fill="rgb(244,164,4)" rx="2" ry="2" />
+<text  x="850.42" y="527.5" >ImpEditE..</text>
+</g>
+<g >
+<title>SvXMLImport::endFastElement (1 samples, 1.61%)</title><rect x="504.8" y="613" width="19.1" height="15.0" fill="rgb(212,136,33)" rx="2" ry="2" />
+<text  x="507.84" y="623.5" ></text>
+</g>
+<g >
+<title>SfxBaseModel::load (3 samples, 4.84%)</title><rect x="733.2" y="565" width="57.1" height="15.0" fill="rgb(243,133,26)" rx="2" ry="2" />
+<text  x="736.23" y="575.5" >SfxBas..</text>
+</g>
+<g >
+<title>DocumentBroker::DocumentBrokerPoll::pollingThread (2 samples, 3.23%)</title><rect x="10.0" y="661" width="38.1" height="15.0" fill="rgb(251,123,52)" rx="2" ry="2" />
+<text  x="13.00" y="671.5" >Doc..</text>
+</g>
+<g >
+<title>SSL_read (6 samples, 9.68%)</title><rect x="238.4" y="629" width="114.2" height="15.0" fill="rgb(242,56,17)" rx="2" ry="2" />
+<text  x="241.39" y="639.5" >SSL_read</text>
+</g>
+<g >
+<title>SocketPoll::pollingThreadEntry (1 samples, 1.61%)</title><rect x="219.4" y="661" width="19.0" height="15.0" fill="rgb(226,215,43)" rx="2" ry="2" />
+<text  x="222.35" y="671.5" ></text>
+</g>
+<g >
+<title>EditDoc::FindAttribs (1 samples, 1.61%)</title><rect x="923.5" y="357" width="19.1" height="15.0" fill="rgb(229,147,44)" rx="2" ry="2" />
+<text  x="926.55" y="367.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="67.1" y="421" width="19.0" height="15.0" fill="rgb(236,121,51)" rx="2" ry="2" />
+<text  x="70.10" y="431.5" ></text>
+</g>
+<g >
+<title>sd::DrawDocShell::Load (3 samples, 4.84%)</title><rect x="733.2" y="517" width="57.1" height="15.0" fill="rgb(216,122,35)" rx="2" ry="2" />
+<text  x="736.23" y="527.5" >sd::Dr..</text>
+</g>
+<g >
+<title>Poco::StreamCopier::copyStream (1 samples, 1.61%)</title><rect x="352.6" y="485" width="19.0" height="15.0" fill="rgb(210,182,44)" rx="2" ry="2" />
+<text  x="355.58" y="495.5" ></text>
+</g>
+<g >
+<title>SdXImpressDocument::InsertSdPage (1 samples, 1.61%)</title><rect x="752.3" y="405" width="19.0" height="15.0" fill="rgb(222,181,49)" rx="2" ry="2" />
+<text  x="755.26" y="415.5" ></text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::getPrimitive2DSequence (2 samples, 3.23%)</title><rect x="1018.7" y="581" width="38.1" height="15.0" fill="rgb(238,51,0)" rx="2" ry="2" />
+<text  x="1021.71" y="591.5" >sdr..</text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="390.6" y="357" width="19.1" height="15.0" fill="rgb(239,111,48)" rx="2" ry="2" />
+<text  x="393.65" y="367.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::doDownloadDocument (1 samples, 1.61%)</title><rect x="352.6" y="501" width="19.0" height="15.0" fill="rgb(222,107,49)" rx="2" ry="2" />
+<text  x="355.58" y="511.5" ></text>
+</g>
+<g >
+<title>SfxBaseModel::impl_store (2 samples, 3.23%)</title><rect x="390.6" y="613" width="38.1" height="15.0" fill="rgb(218,110,40)" rx="2" ry="2" />
+<text  x="393.65" y="623.5" >Sfx..</text>
+</g>
+<g >
+<title>boost::locale::gnu_gettext::mo_message&lt;char&gt;::get (1 samples, 1.61%)</title><rect x="752.3" y="293" width="19.0" height="15.0" fill="rgb(237,196,43)" rx="2" ry="2" />
+<text  x="755.26" y="303.5" ></text>
+</g>
+<g >
+<title>SfxItemPropertyMap::getByName (1 samples, 1.61%)</title><rect x="733.2" y="373" width="19.1" height="15.0" fill="rgb(232,109,38)" rx="2" ry="2" />
+<text  x="736.23" y="383.5" ></text>
+</g>
+<g >
+<title>png_write_find_filter (1 samples, 1.61%)</title><rect x="409.7" y="437" width="19.0" height="15.0" fill="rgb(247,121,52)" rx="2" ry="2" />
+<text  x="412.68" y="447.5" ></text>
+</g>
+<g >
+<title>_hb_graphite2_shaper_face_data_create (1 samples, 1.61%)</title><rect x="885.5" y="293" width="19.0" height="15.0" fill="rgb(211,142,19)" rx="2" ry="2" />
+<text  x="888.48" y="303.5" ></text>
+</g>
+<g >
+<title>SdrPaintView::CompleteRedraw (1 samples, 1.61%)</title><rect x="999.7" y="597" width="19.0" height="15.0" fill="rgb(233,73,1)" rx="2" ry="2" />
+<text  x="1002.68" y="607.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::CreateTextObject (1 samples, 1.61%)</title><rect x="980.6" y="325" width="19.1" height="15.0" fill="rgb(247,197,16)" rx="2" ry="2" />
+<text  x="983.65" y="335.5" ></text>
+</g>
+<g >
+<title>deflateBound (1 samples, 1.61%)</title><rect x="390.6" y="405" width="19.1" height="15.0" fill="rgb(215,161,23)" rx="2" ry="2" />
+<text  x="393.65" y="415.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="771.3" y="309" width="19.0" height="15.0" fill="rgb(227,146,50)" rx="2" ry="2" />
+<text  x="774.29" y="319.5" ></text>
+</g>
+<g >
+<title>SocketPoll::poll (3 samples, 4.84%)</title><rect x="143.2" y="645" width="57.1" height="15.0" fill="rgb(248,220,8)" rx="2" ry="2" />
+<text  x="146.23" y="655.5" >Socket..</text>
+</g>
+<g >
+<title>png_read_IDAT_data (2 samples, 3.23%)</title><rect x="1018.7" y="341" width="38.1" height="15.0" fill="rgb(248,93,13)" rx="2" ry="2" />
+<text  x="1021.71" y="351.5" >png..</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatAndLayout (1 samples, 1.61%)</title><rect x="923.5" y="517" width="19.1" height="15.0" fill="rgb(215,16,15)" rx="2" ry="2" />
+<text  x="926.55" y="527.5" ></text>
+</g>
+<g >
+<title>SfxBaseModel::load (1 samples, 1.61%)</title><rect x="542.9" y="581" width="19.0" height="15.0" fill="rgb(240,168,49)" rx="2" ry="2" />
+<text  x="545.90" y="591.5" ></text>
+</g>
+<g >
+<title>GfxLink::LoadNative (2 samples, 3.23%)</title><rect x="1018.7" y="405" width="38.1" height="15.0" fill="rgb(253,75,1)" rx="2" ry="2" />
+<text  x="1021.71" y="415.5" >Gfx..</text>
+</g>
+<g >
+<title>ScCellRangesBase::setPropertyValuesTolerant (3 samples, 4.84%)</title><rect x="561.9" y="357" width="57.1" height="15.0" fill="rgb(229,65,2)" rx="2" ry="2" />
+<text  x="564.94" y="367.5" >ScCell..</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 4.84%)</title><rect x="143.2" y="453" width="57.1" height="15.0" fill="rgb(231,80,26)" rx="2" ry="2" />
+<text  x="146.23" y="463.5" >_IO_fu..</text>
+</g>
+<g >
+<title>RenderTiles::doRender (3 samples, 4.84%)</title><rect x="1056.8" y="469" width="57.1" height="15.0" fill="rgb(206,63,35)" rx="2" ry="2" />
+<text  x="1059.77" y="479.5" >Render..</text>
+</g>
+<g >
+<title>ImpEditEngine::UpdateParagraphsWithStyleSheet (1 samples, 1.61%)</title><rect x="942.6" y="469" width="19.0" height="15.0" fill="rgb(235,40,34)" rx="2" ry="2" />
+<text  x="945.58" y="479.5" ></text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::BufferedDecompositionPrimitive2D::get2DDecomposition (1 samples, 1.61%)</title><rect x="999.7" y="389" width="19.0" height="15.0" fill="rgb(239,94,50)" rx="2" ry="2" />
+<text  x="1002.68" y="399.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="904.5" y="469" width="19.0" height="15.0" fill="rgb(239,205,24)" rx="2" ry="2" />
+<text  x="907.52" y="479.5" ></text>
+</g>
+<g >
+<title>SdXMLFilter::Import (1 samples, 1.61%)</title><rect x="1113.9" y="341" width="19.0" height="15.0" fill="rgb(234,96,16)" rx="2" ry="2" />
+<text  x="1116.87" y="351.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::APISaveAs_Impl (2 samples, 3.23%)</title><rect x="390.6" y="597" width="38.1" height="15.0" fill="rgb(218,57,17)" rx="2" ry="2" />
+<text  x="393.65" y="607.5" >Sfx..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 1.61%)</title><rect x="980.6" y="613" width="19.1" height="15.0" fill="rgb(253,43,35)" rx="2" ry="2" />
+<text  x="983.65" y="623.5" ></text>
+</g>
+<g >
+<title>vcl::pngWrite (1 samples, 1.61%)</title><rect x="390.6" y="485" width="19.1" height="15.0" fill="rgb(218,205,36)" rx="2" ry="2" />
+<text  x="393.65" y="495.5" ></text>
+</g>
+<g >
+<title>http::Session::syncDownload (1 samples, 1.61%)</title><rect x="67.1" y="597" width="19.0" height="15.0" fill="rgb(230,175,7)" rx="2" ry="2" />
+<text  x="70.10" y="607.5" ></text>
+</g>
+<g >
+<title>sd::sidebar::TemplatePageObjectProvider::LoadDocument (1 samples, 1.61%)</title><rect x="1113.9" y="421" width="19.0" height="15.0" fill="rgb(210,69,1)" rx="2" ry="2" />
+<text  x="1116.87" y="431.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::pollThread (1 samples, 1.61%)</title><rect x="219.4" y="629" width="19.0" height="15.0" fill="rgb(241,212,4)" rx="2" ry="2" />
+<text  x="222.35" y="639.5" ></text>
+</g>
+<g >
+<title>SdrPageView::CompleteRedraw (1 samples, 1.61%)</title><rect x="999.7" y="581" width="19.0" height="15.0" fill="rgb(245,22,17)" rx="2" ry="2" />
+<text  x="1002.68" y="591.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::UpdateParagraphsWithStyleSheet (1 samples, 1.61%)</title><rect x="923.5" y="533" width="19.1" height="15.0" fill="rgb(228,29,1)" rx="2" ry="2" />
+<text  x="926.55" y="543.5" ></text>
+</g>
+<g >
+<title>GfxLink::LoadNative (1 samples, 1.61%)</title><rect x="523.9" y="309" width="19.0" height="15.0" fill="rgb(254,121,13)" rx="2" ry="2" />
+<text  x="526.87" y="319.5" ></text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 1.61%)</title><rect x="638.1" y="325" width="19.0" height="15.0" fill="rgb(218,157,16)" rx="2" ry="2" />
+<text  x="641.06" y="335.5" ></text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::BufferedDecompositionPrimitive2D::get2DDecomposition (1 samples, 1.61%)</title><rect x="523.9" y="405" width="19.0" height="15.0" fill="rgb(239,10,17)" rx="2" ry="2" />
+<text  x="526.87" y="415.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::parseStream (1 samples, 1.61%)</title><rect x="714.2" y="533" width="19.0" height="15.0" fill="rgb(242,103,45)" rx="2" ry="2" />
+<text  x="717.19" y="543.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::APISaveAs_Impl (1 samples, 1.61%)</title><rect x="371.6" y="581" width="19.0" height="15.0" fill="rgb(248,75,29)" rx="2" ry="2" />
+<text  x="374.61" y="591.5" ></text>
+</g>
+<g >
+<title>sw::DocumentContentOperationsManager::CopyWithFlyInFly (1 samples, 1.61%)</title><rect x="447.7" y="517" width="19.1" height="15.0" fill="rgb(205,75,31)" rx="2" ry="2" />
+<text  x="450.74" y="527.5" ></text>
+</g>
+<g >
+<title>std::basic_streambuf&lt;char, std::char_traits&lt;char&gt; &gt;::xsputn (1 samples, 1.61%)</title><rect x="219.4" y="485" width="19.0" height="15.0" fill="rgb(241,162,6)" rx="2" ry="2" />
+<text  x="222.35" y="495.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="466.8" y="277" width="19.0" height="15.0" fill="rgb(234,81,39)" rx="2" ry="2" />
+<text  x="469.77" y="287.5" ></text>
+</g>
+<g >
+<title>std::basic_filebuf&lt;char, std::char_traits&lt;char&gt; &gt;::xsputn (1 samples, 1.61%)</title><rect x="67.1" y="469" width="19.0" height="15.0" fill="rgb(251,203,12)" rx="2" ry="2" />
+<text  x="70.10" y="479.5" ></text>
+</g>
+<g >
+<title>png_write_row (1 samples, 1.61%)</title><rect x="390.6" y="469" width="19.1" height="15.0" fill="rgb(250,61,39)" rx="2" ry="2" />
+<text  x="393.65" y="479.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::startFastElement (1 samples, 1.61%)</title><rect x="714.2" y="501" width="19.0" height="15.0" fill="rgb(217,134,7)" rx="2" ry="2" />
+<text  x="717.19" y="511.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="752.3" y="261" width="19.0" height="15.0" fill="rgb(211,48,28)" rx="2" ry="2" />
+<text  x="755.26" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="1113.9" y="37" width="19.0" height="15.0" fill="rgb(217,60,11)" rx="2" ry="2" />
+<text  x="1116.87" y="47.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="67.1" y="405" width="19.0" height="15.0" fill="rgb(235,123,34)" rx="2" ry="2" />
+<text  x="70.10" y="415.5" ></text>
+</g>
+<g >
+<title>oox::ppt::SlideFragmentHandler::SlideFragmentHandler (1 samples, 1.61%)</title><rect x="542.9" y="309" width="19.0" height="15.0" fill="rgb(208,70,21)" rx="2" ry="2" />
+<text  x="545.90" y="319.5" ></text>
+</g>
+<g >
+<title>ScMyStyleRanges::SetStylesToRanges (3 samples, 4.84%)</title><rect x="657.1" y="421" width="57.1" height="15.0" fill="rgb(235,75,12)" rx="2" ry="2" />
+<text  x="660.10" y="431.5" >ScMySt..</text>
+</g>
+<g >
+<title>std::__detail::_Prime_rehash_policy::_M_next_bkt (1 samples, 1.61%)</title><rect x="828.4" y="517" width="19.0" height="15.0" fill="rgb(207,179,12)" rx="2" ry="2" />
+<text  x="831.39" y="527.5" ></text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 1.61%)</title><rect x="638.1" y="293" width="19.0" height="15.0" fill="rgb(232,182,4)" rx="2" ry="2" />
+<text  x="641.06" y="303.5" ></text>
+</g>
+<g >
+<title>start_thread (1 samples, 1.61%)</title><rect x="352.6" y="661" width="19.0" height="15.0" fill="rgb(235,198,7)" rx="2" ry="2" />
+<text  x="355.58" y="671.5" ></text>
+</g>
+<g >
+<title>ScMyTables::DeleteTable (3 samples, 4.84%)</title><rect x="657.1" y="453" width="57.1" height="15.0" fill="rgb(230,85,48)" rx="2" ry="2" />
+<text  x="660.10" y="463.5" >ScMyTa..</text>
+</g>
+<g >
+<title>std::ostream::write (1 samples, 1.61%)</title><rect x="67.1" y="485" width="19.0" height="15.0" fill="rgb(248,86,27)" rx="2" ry="2" />
+<text  x="70.10" y="495.5" ></text>
+</g>
+<g >
+<title>SfxEnumItemInterface::operator== (1 samples, 1.61%)</title><rect x="847.4" y="373" width="19.1" height="15.0" fill="rgb(233,52,27)" rx="2" ry="2" />
+<text  x="850.42" y="383.5" ></text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::checkForPrimitive2DAnimations (1 samples, 1.61%)</title><rect x="999.7" y="453" width="19.0" height="15.0" fill="rgb(230,206,9)" rx="2" ry="2" />
+<text  x="1002.68" y="463.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="48.1" y="485" width="19.0" height="15.0" fill="rgb(205,73,43)" rx="2" ry="2" />
+<text  x="51.06" y="495.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::PreDoSaveAs_Impl (2 samples, 3.23%)</title><rect x="390.6" y="565" width="38.1" height="15.0" fill="rgb(220,223,24)" rx="2" ry="2" />
+<text  x="393.65" y="575.5" >Sfx..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="752.3" y="277" width="19.0" height="15.0" fill="rgb(226,91,38)" rx="2" ry="2" />
+<text  x="755.26" y="287.5" ></text>
+</g>
+<g >
+<title>inflate (2 samples, 3.23%)</title><rect x="1018.7" y="325" width="38.1" height="15.0" fill="rgb(218,68,54)" rx="2" ry="2" />
+<text  x="1021.71" y="335.5" >inf..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="485.8" y="533" width="19.0" height="15.0" fill="rgb(219,132,35)" rx="2" ry="2" />
+<text  x="488.81" y="543.5" ></text>
+</g>
+<g >
+<title>http::Session::syncDownload (1 samples, 1.61%)</title><rect x="48.1" y="581" width="19.0" height="15.0" fill="rgb(232,70,28)" rx="2" ry="2" />
+<text  x="51.06" y="591.5" ></text>
+</g>
+<g >
+<title>EditEngine::CreateTextObject (1 samples, 1.61%)</title><rect x="714.2" y="293" width="19.0" height="15.0" fill="rgb(231,205,24)" rx="2" ry="2" />
+<text  x="717.19" y="303.5" ></text>
+</g>
+<g >
+<title>oox::ppt::PowerPointImport::importDocument (1 samples, 1.61%)</title><rect x="638.1" y="501" width="19.0" height="15.0" fill="rgb(244,165,14)" rx="2" ry="2" />
+<text  x="641.06" y="511.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::handleInput (3 samples, 4.84%)</title><rect x="86.1" y="661" width="57.1" height="15.0" fill="rgb(206,41,25)" rx="2" ry="2" />
+<text  x="89.13" y="671.5" >Docume..</text>
+</g>
+<g >
+<title>SdDrawPagesAccess::insertNewByIndex (1 samples, 1.61%)</title><rect x="752.3" y="421" width="19.0" height="15.0" fill="rgb(221,96,38)" rx="2" ry="2" />
+<text  x="755.26" y="431.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::download (2 samples, 3.23%)</title><rect x="10.0" y="565" width="38.1" height="15.0" fill="rgb(242,73,37)" rx="2" ry="2" />
+<text  x="13.00" y="575.5" >Doc..</text>
+</g>
+<g >
+<title>FcFontSetMatch (1 samples, 1.61%)</title><rect x="466.8" y="421" width="19.0" height="15.0" fill="rgb(251,31,33)" rx="2" ry="2" />
+<text  x="469.77" y="431.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="923.5" y="341" width="19.1" height="15.0" fill="rgb(209,34,9)" rx="2" ry="2" />
+<text  x="926.55" y="351.5" ></text>
+</g>
+<g >
+<title>_int_free (1 samples, 1.61%)</title><rect x="904.5" y="485" width="19.0" height="15.0" fill="rgb(224,224,43)" rx="2" ry="2" />
+<text  x="907.52" y="495.5" ></text>
+</g>
+<g >
+<title>OutputDevice::GetTextWidth (1 samples, 1.61%)</title><rect x="885.5" y="437" width="19.0" height="15.0" fill="rgb(239,127,47)" rx="2" ry="2" />
+<text  x="888.48" y="447.5" ></text>
+</g>
+<g >
+<title>png_read_row (1 samples, 1.61%)</title><rect x="999.7" y="245" width="19.0" height="15.0" fill="rgb(244,57,46)" rx="2" ry="2" />
+<text  x="1002.68" y="255.5" ></text>
+</g>
+<g >
+<title>oox::core::RelationsFragment::~RelationsFragment (1 samples, 1.61%)</title><rect x="542.9" y="245" width="19.0" height="15.0" fill="rgb(207,211,21)" rx="2" ry="2" />
+<text  x="545.90" y="255.5" ></text>
+</g>
+<g >
+<title>oox::ppt::LayoutFragmentHandler::LayoutFragmentHandler (1 samples, 1.61%)</title><rect x="542.9" y="325" width="19.0" height="15.0" fill="rgb(224,73,48)" rx="2" ry="2" />
+<text  x="545.90" y="335.5" ></text>
+</g>
+<g >
+<title>http::Response::saveBodyToFile (1 samples, 1.61%)</title><rect x="67.1" y="501" width="19.0" height="15.0" fill="rgb(216,210,35)" rx="2" ry="2" />
+<text  x="70.10" y="511.5" ></text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::BufferedDecompositionPrimitive2D::get2DDecomposition (2 samples, 3.23%)</title><rect x="1018.7" y="533" width="38.1" height="15.0" fill="rgb(247,18,42)" rx="2" ry="2" />
+<text  x="1021.71" y="543.5" >dra..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 3.23%)</title><rect x="10.0" y="437" width="38.1" height="15.0" fill="rgb(254,49,32)" rx="2" ry="2" />
+<text  x="13.00" y="447.5" >han..</text>
+</g>
+<g >
+<title>DocumentBroker::addSession (1 samples, 1.61%)</title><rect x="48.1" y="661" width="19.0" height="15.0" fill="rgb(253,33,45)" rx="2" ry="2" />
+<text  x="51.06" y="671.5" ></text>
+</g>
+<g >
+<title>SdXImpressDocument::InsertSdPage (1 samples, 1.61%)</title><rect x="619.0" y="437" width="19.1" height="15.0" fill="rgb(246,193,5)" rx="2" ry="2" />
+<text  x="622.03" y="447.5" ></text>
+</g>
+<g >
+<title>[unknown] (40 samples, 64.52%)</title><rect x="371.6" y="677" width="761.3" height="15.0" fill="rgb(213,168,27)" rx="2" ry="2" />
+<text  x="374.61" y="687.5" >[unknown]</text>
+</g>
+<g >
+<title>SfxObjectShell::LoadOwnFormat (3 samples, 4.84%)</title><rect x="561.9" y="613" width="57.1" height="15.0" fill="rgb(242,220,29)" rx="2" ry="2" />
+<text  x="564.94" y="623.5" >SfxObj..</text>
+</g>
+<g >
+<title>SwDocStyleSheet::SetItemSet (1 samples, 1.61%)</title><rect x="504.8" y="517" width="19.1" height="15.0" fill="rgb(220,91,16)" rx="2" ry="2" />
+<text  x="507.84" y="527.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::GetItemScriptType (1 samples, 1.61%)</title><rect x="980.6" y="309" width="19.1" height="15.0" fill="rgb(248,182,13)" rx="2" ry="2" />
+<text  x="983.65" y="319.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="999.7" y="213" width="19.0" height="15.0" fill="rgb(207,119,3)" rx="2" ry="2" />
+<text  x="1002.68" y="223.5" ></text>
+</g>
+<g >
+<title>sdr::properties::RectangleProperties::SetStyleSheet (1 samples, 1.61%)</title><rect x="714.2" y="341" width="19.0" height="15.0" fill="rgb(220,186,34)" rx="2" ry="2" />
+<text  x="717.19" y="351.5" ></text>
+</g>
+<g >
+<title>XMLThemeContext::~XMLThemeContext (1 samples, 1.61%)</title><rect x="428.7" y="533" width="19.0" height="15.0" fill="rgb(207,131,38)" rx="2" ry="2" />
+<text  x="431.71" y="543.5" ></text>
+</g>
+<g >
+<title>Outliner::CreateParaObject (1 samples, 1.61%)</title><rect x="714.2" y="309" width="19.0" height="15.0" fill="rgb(253,69,27)" rx="2" ry="2" />
+<text  x="717.19" y="319.5" ></text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (2 samples, 3.23%)</title><rect x="619.0" y="613" width="38.1" height="15.0" fill="rgb(214,54,22)" rx="2" ry="2" />
+<text  x="622.03" y="623.5" >fra..</text>
+</g>
+<g >
+<title>oox::ppt::PresentationFragmentHandler::importMasterSlide (1 samples, 1.61%)</title><rect x="638.1" y="357" width="19.0" height="15.0" fill="rgb(249,193,41)" rx="2" ry="2" />
+<text  x="641.06" y="367.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::GetAttribs (2 samples, 3.23%)</title><rect x="847.4" y="405" width="38.1" height="15.0" fill="rgb(249,211,32)" rx="2" ry="2" />
+<text  x="850.42" y="415.5" >Imp..</text>
+</g>
+<g >
+<title>sd::DrawViewShell::SwitchPage (3 samples, 4.84%)</title><rect x="1056.8" y="421" width="57.1" height="15.0" fill="rgb(220,212,0)" rx="2" ry="2" />
+<text  x="1059.77" y="431.5" >sd::Dr..</text>
+</g>
+<g >
+<title>SfxBroadcaster::Forward (1 samples, 1.61%)</title><rect x="790.3" y="517" width="19.1" height="15.0" fill="rgb(235,110,26)" rx="2" ry="2" />
+<text  x="793.32" y="527.5" ></text>
+</g>
+<g >
+<title>SalLayoutGlyphsCache::GetLayoutGlyphs (1 samples, 1.61%)</title><rect x="466.8" y="533" width="19.0" height="15.0" fill="rgb(231,2,11)" rx="2" ry="2" />
+<text  x="469.77" y="543.5" ></text>
+</g>
+<g >
+<title>sw::DocumentContentOperationsManager::CopyFlyInFlyImpl (1 samples, 1.61%)</title><rect x="447.7" y="613" width="19.1" height="15.0" fill="rgb(254,64,33)" rx="2" ry="2" />
+<text  x="450.74" y="623.5" ></text>
+</g>
+<g >
+<title>std::ostream::write (1 samples, 1.61%)</title><rect x="219.4" y="501" width="19.0" height="15.0" fill="rgb(219,25,7)" rx="2" ry="2" />
+<text  x="222.35" y="511.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::parseStream (1 samples, 1.61%)</title><rect x="619.0" y="517" width="19.1" height="15.0" fill="rgb(249,117,13)" rx="2" ry="2" />
+<text  x="622.03" y="527.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (1 samples, 1.61%)</title><rect x="352.6" y="565" width="19.0" height="15.0" fill="rgb(213,182,53)" rx="2" ry="2" />
+<text  x="355.58" y="575.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="809.4" y="597" width="19.0" height="15.0" fill="rgb(252,188,22)" rx="2" ry="2" />
+<text  x="812.35" y="607.5" ></text>
+</g>
+<g >
+<title>SdGenericDrawPage::setPropertyValue (1 samples, 1.61%)</title><rect x="428.7" y="501" width="19.0" height="15.0" fill="rgb(218,114,48)" rx="2" ry="2" />
+<text  x="431.71" y="511.5" ></text>
+</g>
+<g >
+<title>GenericSalLayout::LayoutText (1 samples, 1.61%)</title><rect x="790.3" y="245" width="19.1" height="15.0" fill="rgb(244,214,54)" rx="2" ry="2" />
+<text  x="793.32" y="255.5" ></text>
+</g>
+<g >
+<title>Document::drainQueue (3 samples, 4.84%)</title><rect x="1056.8" y="501" width="57.1" height="15.0" fill="rgb(206,181,9)" rx="2" ry="2" />
+<text  x="1059.77" y="511.5" >Docume..</text>
+</g>
+<g >
+<title>ImpGraphic::swapIn (1 samples, 1.61%)</title><rect x="999.7" y="309" width="19.0" height="15.0" fill="rgb(224,93,9)" rx="2" ry="2" />
+<text  x="1002.68" y="319.5" ></text>
+</g>
+<g >
+<title>GraphicFilter::ExportGraphic (1 samples, 1.61%)</title><rect x="390.6" y="501" width="19.1" height="15.0" fill="rgb(211,207,0)" rx="2" ry="2" />
+<text  x="393.65" y="511.5" ></text>
+</g>
+<g >
+<title>EditEngine::CreateTextObject (1 samples, 1.61%)</title><rect x="980.6" y="357" width="19.1" height="15.0" fill="rgb(243,178,44)" rx="2" ry="2" />
+<text  x="983.65" y="367.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="923.5" y="309" width="19.1" height="15.0" fill="rgb(245,196,54)" rx="2" ry="2" />
+<text  x="926.55" y="319.5" ></text>
+</g>
+<g >
+<title>SdXMLStylesContext::ImpSetGraphicStyles (1 samples, 1.61%)</title><rect x="733.2" y="405" width="19.1" height="15.0" fill="rgb(217,99,34)" rx="2" ry="2" />
+<text  x="736.23" y="415.5" ></text>
+</g>
+<g >
+<title>sd::sidebar::MasterPageContainer::Implementation::UpdateDescriptor (1 samples, 1.61%)</title><rect x="1113.9" y="469" width="19.0" height="15.0" fill="rgb(226,173,26)" rx="2" ry="2" />
+<text  x="1116.87" y="479.5" ></text>
+</g>
+<g >
+<title>SfxBroadcaster::Forward (1 samples, 1.61%)</title><rect x="790.3" y="549" width="19.1" height="15.0" fill="rgb(245,117,43)" rx="2" ry="2" />
+<text  x="793.32" y="559.5" ></text>
+</g>
+<g >
+<title>OutputDevice::GetTextWidth (1 samples, 1.61%)</title><rect x="790.3" y="325" width="19.1" height="15.0" fill="rgb(206,49,22)" rx="2" ry="2" />
+<text  x="793.32" y="335.5" ></text>
+</g>
+<g >
+<title>oox::ppt::PresentationFragmentHandler::importSlide (1 samples, 1.61%)</title><rect x="638.1" y="389" width="19.0" height="15.0" fill="rgb(220,38,48)" rx="2" ry="2" />
+<text  x="641.06" y="399.5" ></text>
+</g>
+<g >
+<title>SdXMLFilter::Import (3 samples, 4.84%)</title><rect x="733.2" y="501" width="57.1" height="15.0" fill="rgb(251,50,28)" rx="2" ry="2" />
+<text  x="736.23" y="511.5" >SdXMLF..</text>
+</g>
+<g >
+<title>psp::PrintFontManager::Substitute (1 samples, 1.61%)</title><rect x="466.8" y="437" width="19.0" height="15.0" fill="rgb(234,26,44)" rx="2" ry="2" />
+<text  x="469.77" y="447.5" ></text>
+</g>
+<g >
+<title>GenericSalLayout::LayoutText (1 samples, 1.61%)</title><rect x="942.6" y="245" width="19.0" height="15.0" fill="rgb(228,148,39)" rx="2" ry="2" />
+<text  x="945.58" y="255.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::Notify (1 samples, 1.61%)</title><rect x="942.6" y="485" width="19.0" height="15.0" fill="rgb(233,222,28)" rx="2" ry="2" />
+<text  x="945.58" y="495.5" ></text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::getPrimitive2DSequence (1 samples, 1.61%)</title><rect x="999.7" y="469" width="19.0" height="15.0" fill="rgb(216,98,40)" rx="2" ry="2" />
+<text  x="1002.68" y="479.5" ></text>
+</g>
+<g >
+<title>http::Session::syncRequest (3 samples, 4.84%)</title><rect x="143.2" y="501" width="57.1" height="15.0" fill="rgb(225,93,50)" rx="2" ry="2" />
+<text  x="146.23" y="511.5" >http::..</text>
+</g>
+<g >
+<title>SdrObject::SetLogicRect (1 samples, 1.61%)</title><rect x="980.6" y="485" width="19.1" height="15.0" fill="rgb(228,36,8)" rx="2" ry="2" />
+<text  x="983.65" y="495.5" ></text>
+</g>
+<g >
+<title>SdXMLTextBoxShapeContext::startFastElement (1 samples, 1.61%)</title><rect x="714.2" y="485" width="19.0" height="15.0" fill="rgb(236,37,35)" rx="2" ry="2" />
+<text  x="717.19" y="495.5" ></text>
+</g>
+<g >
+<title>KitSocketPoll::kitPoll (3 samples, 4.84%)</title><rect x="1056.8" y="517" width="57.1" height="15.0" fill="rgb(218,19,36)" rx="2" ry="2" />
+<text  x="1059.77" y="527.5" >KitSoc..</text>
+</g>
+<g >
+<title>oox::core::FragmentHandler::FragmentHandler (1 samples, 1.61%)</title><rect x="542.9" y="277" width="19.0" height="15.0" fill="rgb(236,13,32)" rx="2" ry="2" />
+<text  x="545.90" y="287.5" ></text>
+</g>
+<g >
+<title>ImpGraphic::ImpGraphic (1 samples, 1.61%)</title><rect x="371.6" y="453" width="19.0" height="15.0" fill="rgb(237,33,52)" rx="2" ry="2" />
+<text  x="374.61" y="463.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 3.23%)</title><rect x="276.5" y="453" width="38.0" height="15.0" fill="rgb(238,103,44)" rx="2" ry="2" />
+<text  x="279.45" y="463.5" >_IO..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (3 samples, 4.84%)</title><rect x="657.1" y="501" width="57.1" height="15.0" fill="rgb(211,24,53)" rx="2" ry="2" />
+<text  x="660.10" y="511.5" >sax_fa..</text>
+</g>
+<g >
+<title>framework::LoadEnv::loadComponentFromURL (1 samples, 1.61%)</title><rect x="542.9" y="645" width="19.0" height="15.0" fill="rgb(247,217,48)" rx="2" ry="2" />
+<text  x="545.90" y="655.5" ></text>
+</g>
+<g >
+<title>SocketPoll::poll (3 samples, 4.84%)</title><rect x="86.1" y="517" width="57.1" height="15.0" fill="rgb(211,110,25)" rx="2" ry="2" />
+<text  x="89.13" y="527.5" >Socket..</text>
+</g>
+<g >
+<title>FcFontSetMatchInternal (1 samples, 1.61%)</title><rect x="466.8" y="405" width="19.0" height="15.0" fill="rgb(214,24,19)" rx="2" ry="2" />
+<text  x="469.77" y="415.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="980.6" y="197" width="19.1" height="15.0" fill="rgb(225,86,19)" rx="2" ry="2" />
+<text  x="983.65" y="207.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 3.23%)</title><rect x="276.5" y="437" width="38.0" height="15.0" fill="rgb(217,166,42)" rx="2" ry="2" />
+<text  x="279.45" y="447.5" >han..</text>
+</g>
+<g >
+<title>doc_saveAs (1 samples, 1.61%)</title><rect x="371.6" y="629" width="19.0" height="15.0" fill="rgb(212,58,39)" rx="2" ry="2" />
+<text  x="374.61" y="639.5" ></text>
+</g>
+<g >
+<title>ScXMLImportWrapper::Import (3 samples, 4.84%)</title><rect x="657.1" y="549" width="57.1" height="15.0" fill="rgb(238,105,47)" rx="2" ry="2" />
+<text  x="660.10" y="559.5" >ScXMLI..</text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContactOfSdrPage::getPrimitive2DSequenceHierarchy (2 samples, 3.23%)</title><rect x="1018.7" y="645" width="38.1" height="15.0" fill="rgb(233,221,22)" rx="2" ry="2" />
+<text  x="1021.71" y="655.5" >sdr..</text>
+</g>
+<g >
+<title>oox::PropertySet::setProperties (1 samples, 1.61%)</title><rect x="790.3" y="629" width="19.1" height="15.0" fill="rgb(252,31,0)" rx="2" ry="2" />
+<text  x="793.32" y="639.5" ></text>
+</g>
+<g >
+<title>Poco::DigestBuf::writeToDevice (1 samples, 1.61%)</title><rect x="352.6" y="421" width="19.0" height="15.0" fill="rgb(253,62,19)" rx="2" ry="2" />
+<text  x="355.58" y="431.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::endFastElement (3 samples, 4.84%)</title><rect x="657.1" y="485" width="57.1" height="15.0" fill="rgb(223,73,30)" rx="2" ry="2" />
+<text  x="660.10" y="495.5" >SvXMLI..</text>
+</g>
+<g >
+<title>syscall (3 samples, 4.84%)</title><rect x="561.9" y="245" width="57.1" height="15.0" fill="rgb(244,30,22)" rx="2" ry="2" />
+<text  x="564.94" y="255.5" >syscall</text>
+</g>
+<g >
+<title>SdXMLStylesContext::ImpSetGraphicStyles (1 samples, 1.61%)</title><rect x="1113.9" y="245" width="19.0" height="15.0" fill="rgb(253,12,1)" rx="2" ry="2" />
+<text  x="1116.87" y="255.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::FormatParagraphs (1 samples, 1.61%)</title><rect x="923.5" y="485" width="19.1" height="15.0" fill="rgb(219,224,9)" rx="2" ry="2" />
+<text  x="926.55" y="495.5" ></text>
+</g>
+<g >
+<title>oox::ppt::PowerPointImport::importDocument (1 samples, 1.61%)</title><rect x="542.9" y="485" width="19.0" height="15.0" fill="rgb(251,30,5)" rx="2" ry="2" />
+<text  x="545.90" y="495.5" ></text>
+</g>
+<g >
+<title>SwAttrIter::CtorInitAttrIter (1 samples, 1.61%)</title><rect x="485.8" y="597" width="19.0" height="15.0" fill="rgb(210,40,32)" rx="2" ry="2" />
+<text  x="488.81" y="607.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 4.84%)</title><rect x="1132.9" y="533" width="57.1" height="15.0" fill="rgb(225,86,27)" rx="2" ry="2" />
+<text  x="1135.90" y="543.5" >_IO_fu..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::create2DDecompositionOfGraphic (1 samples, 1.61%)</title><rect x="999.7" y="357" width="19.0" height="15.0" fill="rgb(215,75,38)" rx="2" ry="2" />
+<text  x="1002.68" y="367.5" ></text>
+</g>
+<g >
+<title>PaletteManager::LoadPalettes (1 samples, 1.61%)</title><rect x="428.7" y="437" width="19.0" height="15.0" fill="rgb(208,211,18)" rx="2" ry="2" />
+<text  x="431.71" y="447.5" ></text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContactOfSdrPage::getPrimitive2DSequenceHierarchy (1 samples, 1.61%)</title><rect x="999.7" y="533" width="19.0" height="15.0" fill="rgb(212,121,26)" rx="2" ry="2" />
+<text  x="1002.68" y="543.5" ></text>
+</g>
+<g >
+<title>DocumentToGraphicRenderer::renderToGraphic (1 samples, 1.61%)</title><rect x="371.6" y="485" width="19.0" height="15.0" fill="rgb(245,122,34)" rx="2" ry="2" />
+<text  x="374.61" y="495.5" ></text>
+</g>
+<g >
+<title>OutputDevice::GetPartialTextArray (1 samples, 1.61%)</title><rect x="942.6" y="293" width="19.0" height="15.0" fill="rgb(226,130,38)" rx="2" ry="2" />
+<text  x="945.58" y="303.5" ></text>
+</g>
+<g >
+<title>SocketPoll::poll (3 samples, 4.84%)</title><rect x="1132.9" y="565" width="57.1" height="15.0" fill="rgb(218,28,31)" rx="2" ry="2" />
+<text  x="1135.90" y="575.5" >Socket..</text>
+</g>
+<g >
+<title>SdPage::CreatePresObj (1 samples, 1.61%)</title><rect x="714.2" y="373" width="19.0" height="15.0" fill="rgb(246,14,43)" rx="2" ry="2" />
+<text  x="717.19" y="383.5" ></text>
+</g>
+<g >
+<title>WopiStorage::downloadStorageFileToLocal (1 samples, 1.61%)</title><rect x="48.1" y="613" width="19.0" height="15.0" fill="rgb(250,127,16)" rx="2" ry="2" />
+<text  x="51.06" y="623.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="866.5" y="357" width="19.0" height="15.0" fill="rgb(220,156,35)" rx="2" ry="2" />
+<text  x="869.45" y="367.5" ></text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::BufferedDecompositionPrimitive2D::get2DDecomposition (2 samples, 3.23%)</title><rect x="1018.7" y="501" width="38.1" height="15.0" fill="rgb(251,131,38)" rx="2" ry="2" />
+<text  x="1021.71" y="511.5" >dra..</text>
+</g>
+<g >
+<title>SfxBroadcaster::Forward (1 samples, 1.61%)</title><rect x="961.6" y="405" width="19.0" height="15.0" fill="rgb(241,53,18)" rx="2" ry="2" />
+<text  x="964.61" y="415.5" ></text>
+</g>
+<g >
+<title>framework::LoadEnv::startLoading (3 samples, 4.84%)</title><rect x="733.2" y="613" width="57.1" height="15.0" fill="rgb(235,62,14)" rx="2" ry="2" />
+<text  x="736.23" y="623.5" >framew..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="847.4" y="341" width="19.1" height="15.0" fill="rgb(225,197,29)" rx="2" ry="2" />
+<text  x="850.42" y="351.5" ></text>
+</g>
+<g >
+<title>SfxBroadcaster::Forward (2 samples, 3.23%)</title><rect x="942.6" y="501" width="38.0" height="15.0" fill="rgb(223,39,50)" rx="2" ry="2" />
+<text  x="945.58" y="511.5" >Sfx..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="466.8" y="309" width="19.0" height="15.0" fill="rgb(209,50,20)" rx="2" ry="2" />
+<text  x="469.77" y="319.5" ></text>
+</g>
+<g >
+<title>Outliner::ImplGetBulletSize (1 samples, 1.61%)</title><rect x="942.6" y="357" width="19.0" height="15.0" fill="rgb(249,212,19)" rx="2" ry="2" />
+<text  x="945.58" y="367.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="466.8" y="293" width="19.0" height="15.0" fill="rgb(214,123,44)" rx="2" ry="2" />
+<text  x="469.77" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="790.3" y="149" width="19.1" height="15.0" fill="rgb(254,223,23)" rx="2" ry="2" />
+<text  x="793.32" y="159.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="371.6" y="405" width="19.0" height="15.0" fill="rgb(239,172,22)" rx="2" ry="2" />
+<text  x="374.61" y="415.5" ></text>
+</g>
+<g >
+<title>sd::PreviewRenderer::PaintPage (1 samples, 1.61%)</title><rect x="999.7" y="629" width="19.0" height="15.0" fill="rgb(254,42,11)" rx="2" ry="2" />
+<text  x="1002.68" y="639.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::LoadOwnFormat (1 samples, 1.61%)</title><rect x="714.2" y="581" width="19.0" height="15.0" fill="rgb(246,119,33)" rx="2" ry="2" />
+<text  x="717.19" y="591.5" ></text>
+</g>
+<g >
+<title>non-virtual thunk to SdStyleSheet::Notify (1 samples, 1.61%)</title><rect x="790.3" y="565" width="19.1" height="15.0" fill="rgb(215,178,12)" rx="2" ry="2" />
+<text  x="793.32" y="575.5" ></text>
+</g>
+<g >
+<title>png_write_row (1 samples, 1.61%)</title><rect x="409.7" y="453" width="19.0" height="15.0" fill="rgb(238,27,31)" rx="2" ry="2" />
+<text  x="412.68" y="463.5" ></text>
+</g>
+<g >
+<title>SdStyleSheet::setPropertyToDefault (1 samples, 1.61%)</title><rect x="1113.9" y="229" width="19.0" height="15.0" fill="rgb(246,41,29)" rx="2" ry="2" />
+<text  x="1116.87" y="239.5" ></text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::getPrimitive2DSequenceSubHierarchy (2 samples, 3.23%)</title><rect x="1018.7" y="629" width="38.1" height="15.0" fill="rgb(214,110,49)" rx="2" ry="2" />
+<text  x="1021.71" y="639.5" >sdr..</text>
+</g>
+<g >
+<title>i18nutil::MakeScriptChangeScanner (1 samples, 1.61%)</title><rect x="980.6" y="277" width="19.1" height="15.0" fill="rgb(245,193,0)" rx="2" ry="2" />
+<text  x="983.65" y="287.5" ></text>
+</g>
+<g >
+<title>SfxBaseModel::storeToURL (1 samples, 1.61%)</title><rect x="371.6" y="613" width="19.0" height="15.0" fill="rgb(251,195,32)" rx="2" ry="2" />
+<text  x="374.61" y="623.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (1 samples, 1.61%)</title><rect x="1113.9" y="389" width="19.0" height="15.0" fill="rgb(228,205,26)" rx="2" ry="2" />
+<text  x="1116.87" y="399.5" ></text>
+</g>
+<g >
+<title>GraphicExportFilter::filterRenderDocument (1 samples, 1.61%)</title><rect x="371.6" y="501" width="19.0" height="15.0" fill="rgb(226,166,15)" rx="2" ry="2" />
+<text  x="374.61" y="511.5" ></text>
+</g>
+<g >
+<title>SdDrawDocument::AllocSdPage (1 samples, 1.61%)</title><rect x="752.3" y="389" width="19.0" height="15.0" fill="rgb(213,32,32)" rx="2" ry="2" />
+<text  x="755.26" y="399.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::addSession (1 samples, 1.61%)</title><rect x="352.6" y="533" width="19.0" height="15.0" fill="rgb(234,70,35)" rx="2" ry="2" />
+<text  x="355.58" y="543.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 4.84%)</title><rect x="86.1" y="469" width="57.1" height="15.0" fill="rgb(211,142,47)" rx="2" ry="2" />
+<text  x="89.13" y="479.5" >handle..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="390.6" y="373" width="19.1" height="15.0" fill="rgb(236,76,34)" rx="2" ry="2" />
+<text  x="393.65" y="383.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::download (1 samples, 1.61%)</title><rect x="352.6" y="517" width="19.0" height="15.0" fill="rgb(254,37,9)" rx="2" ry="2" />
+<text  x="355.58" y="527.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::FormatDoc (4 samples, 6.45%)</title><rect x="847.4" y="533" width="76.1" height="15.0" fill="rgb(236,139,28)" rx="2" ry="2" />
+<text  x="850.42" y="543.5" >ImpEditE..</text>
+</g>
+<g >
+<title>SwTextBoxHelper::getOtherTextBoxFormat (1 samples, 1.61%)</title><rect x="447.7" y="469" width="19.1" height="15.0" fill="rgb(225,200,27)" rx="2" ry="2" />
+<text  x="450.74" y="479.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="523.9" y="229" width="19.0" height="15.0" fill="rgb(222,60,34)" rx="2" ry="2" />
+<text  x="526.87" y="239.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="885.5" y="261" width="19.0" height="15.0" fill="rgb(243,8,46)" rx="2" ry="2" />
+<text  x="888.48" y="271.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::addSession (2 samples, 3.23%)</title><rect x="10.0" y="581" width="38.1" height="15.0" fill="rgb(233,205,43)" rx="2" ry="2" />
+<text  x="13.00" y="591.5" >Doc..</text>
+</g>
+<g >
+<title>syscall (3 samples, 4.84%)</title><rect x="1132.9" y="501" width="57.1" height="15.0" fill="rgb(213,130,4)" rx="2" ry="2" />
+<text  x="1135.90" y="511.5" >syscall</text>
+</g>
+<g >
+<title>SfxBroadcaster::Forward (3 samples, 4.84%)</title><rect x="923.5" y="565" width="57.1" height="15.0" fill="rgb(230,122,14)" rx="2" ry="2" />
+<text  x="926.55" y="575.5" >SfxBro..</text>
+</g>
+<g >
+<title>EVP_DecryptUpdate (4 samples, 6.45%)</title><rect x="238.4" y="533" width="76.1" height="15.0" fill="rgb(241,172,40)" rx="2" ry="2" />
+<text  x="241.39" y="543.5" >EVP_Decr..</text>
+</g>
+<g >
+<title>SdrTextObj::IsFitToSize (1 samples, 1.61%)</title><rect x="1113.9" y="149" width="19.0" height="15.0" fill="rgb(245,62,29)" rx="2" ry="2" />
+<text  x="1116.87" y="159.5" ></text>
+</g>
+<g >
+<title>OutputDevice::ImplGlyphFallbackLayout (1 samples, 1.61%)</title><rect x="466.8" y="485" width="19.0" height="15.0" fill="rgb(231,100,47)" rx="2" ry="2" />
+<text  x="469.77" y="495.5" ></text>
+</g>
+<g >
+<title>SwTextGuess::Guess (1 samples, 1.61%)</title><rect x="466.8" y="613" width="19.0" height="15.0" fill="rgb(241,178,13)" rx="2" ry="2" />
+<text  x="469.77" y="623.5" ></text>
+</g>
+<g >
+<title>http::Session::syncRequest (3 samples, 4.84%)</title><rect x="1132.9" y="597" width="57.1" height="15.0" fill="rgb(233,155,42)" rx="2" ry="2" />
+<text  x="1135.90" y="607.5" >http::..</text>
+</g>
+<g >
+<title>syscall (2 samples, 3.23%)</title><rect x="10.0" y="421" width="38.1" height="15.0" fill="rgb(251,67,52)" rx="2" ry="2" />
+<text  x="13.00" y="431.5" >sys..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="1113.9" y="69" width="19.0" height="15.0" fill="rgb(246,162,43)" rx="2" ry="2" />
+<text  x="1116.87" y="79.5" ></text>
+</g>
+<g >
+<title>hb_shape_full (1 samples, 1.61%)</title><rect x="885.5" y="341" width="19.0" height="15.0" fill="rgb(212,65,25)" rx="2" ry="2" />
+<text  x="888.48" y="351.5" ></text>
+</g>
+<g >
+<title>SwDocStyleSheet::SetItemSet (1 samples, 1.61%)</title><rect x="447.7" y="661" width="19.1" height="15.0" fill="rgb(218,197,6)" rx="2" ry="2" />
+<text  x="450.74" y="671.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::pollThread (1 samples, 1.61%)</title><rect x="352.6" y="597" width="19.0" height="15.0" fill="rgb(232,68,46)" rx="2" ry="2" />
+<text  x="355.58" y="607.5" ></text>
+</g>
+<g >
+<title>sd::DrawDocShell::ImportFrom (1 samples, 1.61%)</title><rect x="542.9" y="549" width="19.0" height="15.0" fill="rgb(218,97,11)" rx="2" ry="2" />
+<text  x="545.90" y="559.5" ></text>
+</g>
+<g >
+<title>ScXMLTableContext::endFastElement (3 samples, 4.84%)</title><rect x="657.1" y="469" width="57.1" height="15.0" fill="rgb(240,39,39)" rx="2" ry="2" />
+<text  x="660.10" y="479.5" >ScXMLT..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="714.2" y="197" width="19.0" height="15.0" fill="rgb(233,175,32)" rx="2" ry="2" />
+<text  x="717.19" y="207.5" ></text>
+</g>
+<g >
+<title>SfxBroadcaster::Forward (1 samples, 1.61%)</title><rect x="961.6" y="437" width="19.0" height="15.0" fill="rgb(247,11,5)" rx="2" ry="2" />
+<text  x="964.61" y="447.5" ></text>
+</g>
+<g >
+<title>SvXMLGraphicHelper::ImplReadGraphic (1 samples, 1.61%)</title><rect x="771.3" y="389" width="19.0" height="15.0" fill="rgb(234,147,20)" rx="2" ry="2" />
+<text  x="774.29" y="399.5" ></text>
+</g>
+<g >
+<title>png_write_find_filter (1 samples, 1.61%)</title><rect x="390.6" y="453" width="19.1" height="15.0" fill="rgb(238,38,26)" rx="2" ry="2" />
+<text  x="393.65" y="463.5" ></text>
+</g>
+<g >
+<title>ImpGraphic::getVectorGraphicData (2 samples, 3.23%)</title><rect x="1018.7" y="453" width="38.1" height="15.0" fill="rgb(209,132,46)" rx="2" ry="2" />
+<text  x="1021.71" y="463.5" >Imp..</text>
+</g>
+<g >
+<title>SdGenericDrawPage::setPropertyValue (1 samples, 1.61%)</title><rect x="980.6" y="533" width="19.1" height="15.0" fill="rgb(233,193,30)" rx="2" ry="2" />
+<text  x="983.65" y="543.5" ></text>
+</g>
+<g >
+<title>Outliner::ImpCalcBulletArea (1 samples, 1.61%)</title><rect x="790.3" y="357" width="19.1" height="15.0" fill="rgb(231,95,5)" rx="2" ry="2" />
+<text  x="793.32" y="367.5" ></text>
+</g>
+<g >
+<title>SalLayoutGlyphsCache::GetLayoutGlyphs (1 samples, 1.61%)</title><rect x="466.8" y="517" width="19.0" height="15.0" fill="rgb(223,13,27)" rx="2" ry="2" />
+<text  x="469.77" y="527.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 3.23%)</title><rect x="1018.7" y="261" width="38.1" height="15.0" fill="rgb(253,23,34)" rx="2" ry="2" />
+<text  x="1021.71" y="271.5" >sys..</text>
+</g>
+<g >
+<title>SwTextFrame::Format (1 samples, 1.61%)</title><rect x="485.8" y="661" width="19.0" height="15.0" fill="rgb(241,50,50)" rx="2" ry="2" />
+<text  x="488.81" y="671.5" ></text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::getPrimitive2DSequenceSubHierarchy (1 samples, 1.61%)</title><rect x="999.7" y="501" width="19.0" height="15.0" fill="rgb(249,107,15)" rx="2" ry="2" />
+<text  x="1002.68" y="511.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="428.7" y="357" width="19.0" height="15.0" fill="rgb(210,64,4)" rx="2" ry="2" />
+<text  x="431.71" y="367.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::InitScriptTypes (1 samples, 1.61%)</title><rect x="980.6" y="293" width="19.1" height="15.0" fill="rgb(252,0,7)" rx="2" ry="2" />
+<text  x="983.65" y="303.5" ></text>
+</g>
+<g >
+<title>SdPage::SdPage (1 samples, 1.61%)</title><rect x="752.3" y="373" width="19.0" height="15.0" fill="rgb(230,140,30)" rx="2" ry="2" />
+<text  x="755.26" y="383.5" ></text>
+</g>
+<g >
+<title>OutputDevice::ImplLayout (1 samples, 1.61%)</title><rect x="885.5" y="373" width="19.0" height="15.0" fill="rgb(209,4,39)" rx="2" ry="2" />
+<text  x="888.48" y="383.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 3.23%)</title><rect x="314.5" y="469" width="38.1" height="15.0" fill="rgb(253,49,53)" rx="2" ry="2" />
+<text  x="317.52" y="479.5" >_IO..</text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="847.4" y="325" width="19.1" height="15.0" fill="rgb(221,192,30)" rx="2" ry="2" />
+<text  x="850.42" y="335.5" ></text>
+</g>
+<g >
+<title>GraphicFilter::MakeGraphicsAvailableThreaded (3 samples, 4.84%)</title><rect x="1056.8" y="405" width="57.1" height="15.0" fill="rgb(236,68,46)" rx="2" ry="2" />
+<text  x="1059.77" y="415.5" >Graphi..</text>
+</g>
+<g >
+<title>SwTextIter::CtorInitTextIter (1 samples, 1.61%)</title><rect x="485.8" y="613" width="19.0" height="15.0" fill="rgb(239,42,27)" rx="2" ry="2" />
+<text  x="488.81" y="623.5" ></text>
+</g>
+<g >
+<title>png_compress_IDAT (1 samples, 1.61%)</title><rect x="390.6" y="437" width="19.1" height="15.0" fill="rgb(239,65,5)" rx="2" ry="2" />
+<text  x="393.65" y="447.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::doDownloadDocument (1 samples, 1.61%)</title><rect x="48.1" y="629" width="19.0" height="15.0" fill="rgb(249,20,22)" rx="2" ry="2" />
+<text  x="51.06" y="639.5" ></text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (3 samples, 4.84%)</title><rect x="561.9" y="661" width="57.1" height="15.0" fill="rgb(238,105,52)" rx="2" ry="2" />
+<text  x="564.94" y="671.5" >framew..</text>
+</g>
+<g >
+<title>SdResId (1 samples, 1.61%)</title><rect x="752.3" y="357" width="19.0" height="15.0" fill="rgb(226,184,40)" rx="2" ry="2" />
+<text  x="755.26" y="367.5" ></text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 1.61%)</title><rect x="638.1" y="485" width="19.0" height="15.0" fill="rgb(254,197,46)" rx="2" ry="2" />
+<text  x="641.06" y="495.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::LoadOwnFormat (3 samples, 4.84%)</title><rect x="657.1" y="597" width="57.1" height="15.0" fill="rgb(250,85,2)" rx="2" ry="2" />
+<text  x="660.10" y="607.5" >SfxObj..</text>
+</g>
+<g >
+<title>ImpGraphic::ensureAvailable (2 samples, 3.23%)</title><rect x="1018.7" y="437" width="38.1" height="15.0" fill="rgb(234,144,41)" rx="2" ry="2" />
+<text  x="1021.71" y="447.5" >Imp..</text>
+</g>
+<g >
+<title>operator new (3 samples, 4.84%)</title><rect x="657.1" y="261" width="57.1" height="15.0" fill="rgb(249,74,33)" rx="2" ry="2" />
+<text  x="660.10" y="271.5" >operat..</text>
+</g>
+<g >
+<title>WopiStorage::downloadDocument (1 samples, 1.61%)</title><rect x="67.1" y="629" width="19.0" height="15.0" fill="rgb(206,16,42)" rx="2" ry="2" />
+<text  x="70.10" y="639.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::endFastElement (3 samples, 4.84%)</title><rect x="561.9" y="501" width="57.1" height="15.0" fill="rgb(235,179,38)" rx="2" ry="2" />
+<text  x="564.94" y="511.5" >SvXMLI..</text>
+</g>
+<g >
+<title>SwSubFont::GetTextSize_ (1 samples, 1.61%)</title><rect x="466.8" y="581" width="19.0" height="15.0" fill="rgb(253,224,50)" rx="2" ry="2" />
+<text  x="469.77" y="591.5" ></text>
+</g>
+<g >
+<title>SdStyleSheet::setPropertyValues (1 samples, 1.61%)</title><rect x="790.3" y="597" width="19.1" height="15.0" fill="rgb(231,79,0)" rx="2" ry="2" />
+<text  x="793.32" y="607.5" ></text>
+</g>
+<g >
+<title>FcCompareValueList (1 samples, 1.61%)</title><rect x="466.8" y="373" width="19.0" height="15.0" fill="rgb(225,130,21)" rx="2" ry="2" />
+<text  x="469.77" y="383.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="371.6" y="389" width="19.0" height="15.0" fill="rgb(213,72,44)" rx="2" ry="2" />
+<text  x="374.61" y="399.5" ></text>
+</g>
+<g >
+<title>ppoll (3 samples, 4.84%)</title><rect x="143.2" y="469" width="57.1" height="15.0" fill="rgb(226,25,50)" rx="2" ry="2" />
+<text  x="146.23" y="479.5" >ppoll</text>
+</g>
+<g >
+<title>sock_read (2 samples, 3.23%)</title><rect x="314.5" y="501" width="38.1" height="15.0" fill="rgb(232,79,27)" rx="2" ry="2" />
+<text  x="317.52" y="511.5" >soc..</text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::checkForPrimitive2DAnimations (1 samples, 1.61%)</title><rect x="523.9" y="469" width="19.0" height="15.0" fill="rgb(216,5,42)" rx="2" ry="2" />
+<text  x="526.87" y="479.5" ></text>
+</g>
+<g >
+<title>SwFntObj::GetTextSize (1 samples, 1.61%)</title><rect x="466.8" y="565" width="19.0" height="15.0" fill="rgb(221,176,54)" rx="2" ry="2" />
+<text  x="469.77" y="575.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="200.3" y="437" width="19.1" height="15.0" fill="rgb(217,86,43)" rx="2" ry="2" />
+<text  x="203.32" y="447.5" ></text>
+</g>
+<g >
+<title>http::Session::syncRequest (3 samples, 4.84%)</title><rect x="1132.9" y="581" width="57.1" height="15.0" fill="rgb(205,41,26)" rx="2" ry="2" />
+<text  x="1135.90" y="591.5" >http::..</text>
+</g>
+<g >
+<title>SfxObjectShell::SaveTo_Impl (1 samples, 1.61%)</title><rect x="371.6" y="533" width="19.0" height="15.0" fill="rgb(234,113,44)" rx="2" ry="2" />
+<text  x="374.61" y="543.5" ></text>
+</g>
+<g >
+<title>oox::ppt::PresentationFragmentHandler::importMasterSlides (1 samples, 1.61%)</title><rect x="638.1" y="373" width="19.0" height="15.0" fill="rgb(222,117,0)" rx="2" ry="2" />
+<text  x="641.06" y="383.5" ></text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 1.61%)</title><rect x="638.1" y="421" width="19.0" height="15.0" fill="rgb(229,138,52)" rx="2" ry="2" />
+<text  x="641.06" y="431.5" ></text>
+</g>
+<g >
+<title>SocketPoll::poll (3 samples, 4.84%)</title><rect x="143.2" y="485" width="57.1" height="15.0" fill="rgb(211,66,18)" rx="2" ry="2" />
+<text  x="146.23" y="495.5" >Socket..</text>
+</g>
+<g >
+<title>framework::LoadEnv::start (2 samples, 3.23%)</title><rect x="619.0" y="629" width="38.1" height="15.0" fill="rgb(213,30,23)" rx="2" ry="2" />
+<text  x="622.03" y="639.5" >fra..</text>
+</g>
+<g >
+<title>lo_documentLoadWithOptions (3 samples, 4.84%)</title><rect x="733.2" y="661" width="57.1" height="15.0" fill="rgb(215,139,41)" rx="2" ry="2" />
+<text  x="736.23" y="671.5" >lo_doc..</text>
+</g>
+<g >
+<title>SfxObjectShell::LoadOwnFormat (1 samples, 1.61%)</title><rect x="428.7" y="629" width="19.0" height="15.0" fill="rgb(236,63,39)" rx="2" ry="2" />
+<text  x="431.71" y="639.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::FormatAndLayout (1 samples, 1.61%)</title><rect x="942.6" y="453" width="19.0" height="15.0" fill="rgb(214,80,26)" rx="2" ry="2" />
+<text  x="945.58" y="463.5" ></text>
+</g>
+<g >
+<title>BinaryDataContainer::Impl::readData (1 samples, 1.61%)</title><rect x="771.3" y="341" width="19.0" height="15.0" fill="rgb(216,103,48)" rx="2" ry="2" />
+<text  x="774.29" y="351.5" ></text>
+</g>
+<g >
+<title>non-virtual thunk to DOM::CAttr::getNodeValue (1 samples, 1.61%)</title><rect x="619.0" y="389" width="19.1" height="15.0" fill="rgb(232,52,5)" rx="2" ry="2" />
+<text  x="622.03" y="399.5" ></text>
+</g>
+<g >
+<title>oox::ppt::PresentationFragmentHandler::finalizeImport (1 samples, 1.61%)</title><rect x="542.9" y="389" width="19.0" height="15.0" fill="rgb(220,122,3)" rx="2" ry="2" />
+<text  x="545.90" y="399.5" ></text>
+</g>
+<g >
+<title>SdXMLBodyContext::createFastChildContext (1 samples, 1.61%)</title><rect x="980.6" y="581" width="19.1" height="15.0" fill="rgb(243,73,6)" rx="2" ry="2" />
+<text  x="983.65" y="591.5" ></text>
+</g>
+<g >
+<title>SwTextFormatter::BuildPortions (1 samples, 1.61%)</title><rect x="466.8" y="645" width="19.0" height="15.0" fill="rgb(242,83,36)" rx="2" ry="2" />
+<text  x="469.77" y="655.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="923.5" y="325" width="19.1" height="15.0" fill="rgb(238,59,30)" rx="2" ry="2" />
+<text  x="926.55" y="335.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::Notify (1 samples, 1.61%)</title><rect x="790.3" y="469" width="19.1" height="15.0" fill="rgb(214,93,25)" rx="2" ry="2" />
+<text  x="793.32" y="479.5" ></text>
+</g>
+<g >
+<title>SwTextMargin::CtorInitTextMargin (1 samples, 1.61%)</title><rect x="485.8" y="629" width="19.0" height="15.0" fill="rgb(226,211,25)" rx="2" ry="2" />
+<text  x="488.81" y="639.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::ImportFrom (1 samples, 1.61%)</title><rect x="542.9" y="533" width="19.0" height="15.0" fill="rgb(220,30,4)" rx="2" ry="2" />
+<text  x="545.90" y="543.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::parseStream (1 samples, 1.61%)</title><rect x="1113.9" y="325" width="19.0" height="15.0" fill="rgb(250,204,13)" rx="2" ry="2" />
+<text  x="1116.87" y="335.5" ></text>
+</g>
+<g >
+<title>SwTextFrame::ChgThisLines (1 samples, 1.61%)</title><rect x="485.8" y="645" width="19.0" height="15.0" fill="rgb(231,102,33)" rx="2" ry="2" />
+<text  x="488.81" y="655.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="980.6" y="229" width="19.1" height="15.0" fill="rgb(211,5,35)" rx="2" ry="2" />
+<text  x="983.65" y="239.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::ImportFrom (1 samples, 1.61%)</title><rect x="638.1" y="549" width="19.0" height="15.0" fill="rgb(233,218,23)" rx="2" ry="2" />
+<text  x="641.06" y="559.5" ></text>
+</g>
+<g >
+<title>SvxDrawPage::add (1 samples, 1.61%)</title><rect x="714.2" y="421" width="19.0" height="15.0" fill="rgb(239,76,3)" rx="2" ry="2" />
+<text  x="717.19" y="431.5" ></text>
+</g>
+<g >
+<title>ScDocShell::Load (3 samples, 4.84%)</title><rect x="657.1" y="581" width="57.1" height="15.0" fill="rgb(250,18,53)" rx="2" ry="2" />
+<text  x="660.10" y="591.5" >ScDocS..</text>
+</g>
+<g >
+<title>SocketPoll::poll (1 samples, 1.61%)</title><rect x="219.4" y="613" width="19.0" height="15.0" fill="rgb(244,205,14)" rx="2" ry="2" />
+<text  x="222.35" y="623.5" ></text>
+</g>
+<g >
+<title>startMainLoop (4 samples, 6.45%)</title><rect x="1056.8" y="661" width="76.1" height="15.0" fill="rgb(238,163,18)" rx="2" ry="2" />
+<text  x="1059.77" y="671.5" >startMai..</text>
+</g>
+<g >
+<title>ScMyStylesImportHelper::SetStylesToRanges (3 samples, 4.84%)</title><rect x="561.9" y="453" width="57.1" height="15.0" fill="rgb(252,118,16)" rx="2" ry="2" />
+<text  x="564.94" y="463.5" >ScMySt..</text>
+</g>
+<g >
+<title>ImpGraphic::ensureAvailable (1 samples, 1.61%)</title><rect x="999.7" y="325" width="19.0" height="15.0" fill="rgb(248,133,14)" rx="2" ry="2" />
+<text  x="1002.68" y="335.5" ></text>
+</g>
+<g >
+<title>http::Session::syncDownload (1 samples, 1.61%)</title><rect x="67.1" y="613" width="19.0" height="15.0" fill="rgb(250,156,53)" rx="2" ry="2" />
+<text  x="70.10" y="623.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::CreateTextObject (1 samples, 1.61%)</title><rect x="980.6" y="341" width="19.1" height="15.0" fill="rgb(213,84,13)" rx="2" ry="2" />
+<text  x="983.65" y="351.5" ></text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (3 samples, 4.84%)</title><rect x="733.2" y="581" width="57.1" height="15.0" fill="rgb(223,37,18)" rx="2" ry="2" />
+<text  x="736.23" y="591.5" >framew..</text>
+</g>
+<g >
+<title>Outliner::ImpCalcBulletFont (2 samples, 3.23%)</title><rect x="847.4" y="437" width="38.1" height="15.0" fill="rgb(208,2,33)" rx="2" ry="2" />
+<text  x="850.42" y="447.5" >Out..</text>
+</g>
+<g >
+<title>OutputDevice::GetTextWidthDouble (1 samples, 1.61%)</title><rect x="942.6" y="325" width="19.0" height="15.0" fill="rgb(241,166,49)" rx="2" ry="2" />
+<text  x="945.58" y="335.5" ></text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::BufferedDecompositionPrimitive2D::get2DDecomposition (1 samples, 1.61%)</title><rect x="523.9" y="437" width="19.0" height="15.0" fill="rgb(226,154,26)" rx="2" ry="2" />
+<text  x="526.87" y="447.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::addSession (1 samples, 1.61%)</title><rect x="219.4" y="565" width="19.0" height="15.0" fill="rgb(240,0,30)" rx="2" ry="2" />
+<text  x="222.35" y="575.5" ></text>
+</g>
+<g >
+<title>WopiStorage::downloadStorageFileToLocal (1 samples, 1.61%)</title><rect x="67.1" y="645" width="19.0" height="15.0" fill="rgb(239,72,11)" rx="2" ry="2" />
+<text  x="70.10" y="655.5" ></text>
+</g>
+<g >
+<title>oox::PropertySet::implGetPropertyValue (1 samples, 1.61%)</title><rect x="828.4" y="613" width="19.0" height="15.0" fill="rgb(228,17,26)" rx="2" ry="2" />
+<text  x="831.39" y="623.5" ></text>
+</g>
+<g >
+<title>framework::LoadEnv::start (3 samples, 4.84%)</title><rect x="657.1" y="661" width="57.1" height="15.0" fill="rgb(213,209,37)" rx="2" ry="2" />
+<text  x="660.10" y="671.5" >framew..</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatParagraphs (1 samples, 1.61%)</title><rect x="942.6" y="421" width="19.0" height="15.0" fill="rgb(233,213,19)" rx="2" ry="2" />
+<text  x="945.58" y="431.5" ></text>
+</g>
+<g >
+<title>ScDocShell::Load (3 samples, 4.84%)</title><rect x="561.9" y="597" width="57.1" height="15.0" fill="rgb(233,112,37)" rx="2" ry="2" />
+<text  x="564.94" y="607.5" >ScDocS..</text>
+</g>
+<g >
+<title>ImpEditEngine::CreateLines (1 samples, 1.61%)</title><rect x="942.6" y="405" width="19.0" height="15.0" fill="rgb(222,218,4)" rx="2" ry="2" />
+<text  x="945.58" y="415.5" ></text>
+</g>
+<g >
+<title>SdrObject::SetStyleSheet (1 samples, 1.61%)</title><rect x="714.2" y="357" width="19.0" height="15.0" fill="rgb(237,125,23)" rx="2" ry="2" />
+<text  x="717.19" y="367.5" ></text>
+</g>
+<g >
+<title>sd::sidebar::TemplatePageObjectProvider::operator (1 samples, 1.61%)</title><rect x="1113.9" y="437" width="19.0" height="15.0" fill="rgb(242,196,11)" rx="2" ry="2" />
+<text  x="1116.87" y="447.5" ></text>
+</g>
+<g >
+<title>sd::View::CompleteRedraw (1 samples, 1.61%)</title><rect x="523.9" y="629" width="19.0" height="15.0" fill="rgb(222,45,3)" rx="2" ry="2" />
+<text  x="526.87" y="639.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="638.1" y="181" width="19.0" height="15.0" fill="rgb(219,226,36)" rx="2" ry="2" />
+<text  x="641.06" y="191.5" ></text>
+</g>
+<g >
+<title>SwTextSizeInfo::GetTextSize (1 samples, 1.61%)</title><rect x="466.8" y="597" width="19.0" height="15.0" fill="rgb(250,203,21)" rx="2" ry="2" />
+<text  x="469.77" y="607.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="809.4" y="581" width="19.0" height="15.0" fill="rgb(253,100,24)" rx="2" ry="2" />
+<text  x="812.35" y="591.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::ExportTo (1 samples, 1.61%)</title><rect x="371.6" y="517" width="19.0" height="15.0" fill="rgb(249,217,28)" rx="2" ry="2" />
+<text  x="374.61" y="527.5" ></text>
+</g>
+<g >
+<title>http::Session::syncRequest (3 samples, 4.84%)</title><rect x="143.2" y="517" width="57.1" height="15.0" fill="rgb(219,100,29)" rx="2" ry="2" />
+<text  x="146.23" y="527.5" >http::..</text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (1 samples, 1.61%)</title><rect x="219.4" y="597" width="19.0" height="15.0" fill="rgb(218,194,1)" rx="2" ry="2" />
+<text  x="222.35" y="607.5" ></text>
+</g>
+<g >
+<title>http::Response::readData (1 samples, 1.61%)</title><rect x="67.1" y="517" width="19.0" height="15.0" fill="rgb(214,141,19)" rx="2" ry="2" />
+<text  x="70.10" y="527.5" ></text>
+</g>
+<g >
+<title>clock_gettime (1 samples, 1.61%)</title><rect x="200.3" y="501" width="19.1" height="15.0" fill="rgb(249,59,8)" rx="2" ry="2" />
+<text  x="203.32" y="511.5" ></text>
+</g>
+<g >
+<title>WopiStorage::downloadStorageFileToLocal (1 samples, 1.61%)</title><rect x="200.3" y="597" width="19.1" height="15.0" fill="rgb(223,17,18)" rx="2" ry="2" />
+<text  x="203.32" y="607.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="352.6" y="389" width="19.0" height="15.0" fill="rgb(239,93,7)" rx="2" ry="2" />
+<text  x="355.58" y="399.5" ></text>
+</g>
+<g >
+<title>rtl_getTextEncodingInfo (1 samples, 1.61%)</title><rect x="790.3" y="213" width="19.1" height="15.0" fill="rgb(222,2,43)" rx="2" ry="2" />
+<text  x="793.32" y="223.5" ></text>
+</g>
+<g >
+<title>non-virtual thunk to SdStyleSheet::Notify (3 samples, 4.84%)</title><rect x="923.5" y="581" width="57.1" height="15.0" fill="rgb(234,191,2)" rx="2" ry="2" />
+<text  x="926.55" y="591.5" >non-vi..</text>
+</g>
+<g >
+<title>sd::sidebar::MasterPageContainerQueue::DelayedPreviewCreation (1 samples, 1.61%)</title><rect x="1113.9" y="485" width="19.0" height="15.0" fill="rgb(208,45,39)" rx="2" ry="2" />
+<text  x="1116.87" y="495.5" ></text>
+</g>
+<g >
+<title>ScMyStyleRanges::SetStylesToRanges (3 samples, 4.84%)</title><rect x="561.9" y="437" width="57.1" height="15.0" fill="rgb(249,75,13)" rx="2" ry="2" />
+<text  x="564.94" y="447.5" >ScMySt..</text>
+</g>
+<g >
+<title>ImpGraphic::getVectorGraphicData (1 samples, 1.61%)</title><rect x="523.9" y="357" width="19.0" height="15.0" fill="rgb(218,99,21)" rx="2" ry="2" />
+<text  x="526.87" y="367.5" ></text>
+</g>
+<g >
+<title>WopiStorage::downloadDocument (1 samples, 1.61%)</title><rect x="48.1" y="597" width="19.0" height="15.0" fill="rgb(248,191,5)" rx="2" ry="2" />
+<text  x="51.06" y="607.5" ></text>
+</g>
+<g >
+<title>docbroker (19 samples, 30.65%)</title><rect x="10.0" y="693" width="361.6" height="15.0" fill="rgb(250,131,12)" rx="2" ry="2" />
+<text  x="13.00" y="703.5" >docbroker</text>
+</g>
+<g >
+<title>SwTextBoxHelper::isTextBox (1 samples, 1.61%)</title><rect x="447.7" y="453" width="19.1" height="15.0" fill="rgb(219,226,46)" rx="2" ry="2" />
+<text  x="450.74" y="463.5" ></text>
+</g>
+<g >
+<title>OutputDevice::GetTextWidthDouble (1 samples, 1.61%)</title><rect x="885.5" y="421" width="19.0" height="15.0" fill="rgb(244,2,35)" rx="2" ry="2" />
+<text  x="888.48" y="431.5" ></text>
+</g>
+<g >
+<title>GraphicFilter::ImportGraphic (1 samples, 1.61%)</title><rect x="999.7" y="277" width="19.0" height="15.0" fill="rgb(233,86,4)" rx="2" ry="2" />
+<text  x="1002.68" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="733.2" y="325" width="19.1" height="15.0" fill="rgb(253,216,11)" rx="2" ry="2" />
+<text  x="736.23" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="904.5" y="437" width="19.0" height="15.0" fill="rgb(247,8,30)" rx="2" ry="2" />
+<text  x="907.52" y="447.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::Notify (1 samples, 1.61%)</title><rect x="923.5" y="549" width="19.1" height="15.0" fill="rgb(211,107,27)" rx="2" ry="2" />
+<text  x="926.55" y="559.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 3.23%)</title><rect x="238.4" y="437" width="38.1" height="15.0" fill="rgb(229,94,54)" rx="2" ry="2" />
+<text  x="241.39" y="447.5" >han..</text>
+</g>
+<g >
+<title>sd::DrawDocShell::Load (1 samples, 1.61%)</title><rect x="714.2" y="565" width="19.0" height="15.0" fill="rgb(222,219,48)" rx="2" ry="2" />
+<text  x="717.19" y="575.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;unsigned short, std::pair&lt;unsigned short const, SfxPoolItem const*&gt;, std::allocator&lt;std::pair&lt;unsigned short const, SfxPoolItem const*&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;unsigned short&gt;, std::hash&lt;unsigned short&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::find (1 samples, 1.61%)</title><rect x="1113.9" y="85" width="19.0" height="15.0" fill="rgb(245,202,46)" rx="2" ry="2" />
+<text  x="1116.87" y="95.5" ></text>
+</g>
+<g >
+<title>GraphicFilter::readPNG (2 samples, 3.23%)</title><rect x="1018.7" y="373" width="38.1" height="15.0" fill="rgb(229,1,12)" rx="2" ry="2" />
+<text  x="1021.71" y="383.5" >Gra..</text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (2 samples, 3.23%)</title><rect x="619.0" y="581" width="38.1" height="15.0" fill="rgb(210,175,0)" rx="2" ry="2" />
+<text  x="622.03" y="591.5" >Sfx..</text>
+</g>
+<g >
+<title>DocumentBroker::download (1 samples, 1.61%)</title><rect x="200.3" y="629" width="19.1" height="15.0" fill="rgb(207,20,51)" rx="2" ry="2" />
+<text  x="203.32" y="639.5" ></text>
+</g>
+<g >
+<title>GenericSalLayout::LayoutText (1 samples, 1.61%)</title><rect x="885.5" y="357" width="19.0" height="15.0" fill="rgb(209,142,1)" rx="2" ry="2" />
+<text  x="888.48" y="367.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::endFastElement (1 samples, 1.61%)</title><rect x="1113.9" y="293" width="19.0" height="15.0" fill="rgb(233,199,18)" rx="2" ry="2" />
+<text  x="1116.87" y="303.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::FormatDoc (1 samples, 1.61%)</title><rect x="923.5" y="501" width="19.1" height="15.0" fill="rgb(229,5,19)" rx="2" ry="2" />
+<text  x="926.55" y="511.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (2 samples, 3.23%)</title><rect x="10.0" y="613" width="38.1" height="15.0" fill="rgb(239,168,43)" rx="2" ry="2" />
+<text  x="13.00" y="623.5" >std..</text>
+</g>
+<g >
+<title>SwXStyle::SetPropertyValues_Impl (1 samples, 1.61%)</title><rect x="504.8" y="533" width="19.1" height="15.0" fill="rgb(226,87,34)" rx="2" ry="2" />
+<text  x="507.84" y="543.5" ></text>
+</g>
+<g >
+<title>sdr::contact::ObjectContactOfPageView::DoProcessDisplay (1 samples, 1.61%)</title><rect x="999.7" y="549" width="19.0" height="15.0" fill="rgb(217,103,5)" rx="2" ry="2" />
+<text  x="1002.68" y="559.5" ></text>
+</g>
+<g >
+<title>sdr::properties::DefaultProperties::SetObjectItemSet (1 samples, 1.61%)</title><rect x="980.6" y="421" width="19.1" height="15.0" fill="rgb(229,161,6)" rx="2" ry="2" />
+<text  x="983.65" y="431.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::loadGraphicByURL (1 samples, 1.61%)</title><rect x="771.3" y="421" width="19.0" height="15.0" fill="rgb(220,113,11)" rx="2" ry="2" />
+<text  x="774.29" y="431.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::download (1 samples, 1.61%)</title><rect x="48.1" y="645" width="19.0" height="15.0" fill="rgb(252,119,1)" rx="2" ry="2" />
+<text  x="51.06" y="655.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="390.6" y="389" width="19.1" height="15.0" fill="rgb(221,185,29)" rx="2" ry="2" />
+<text  x="393.65" y="399.5" ></text>
+</g>
+<g >
+<title>execute_native_thread_routine (3 samples, 4.84%)</title><rect x="1132.9" y="645" width="57.1" height="15.0" fill="rgb(209,90,13)" rx="2" ry="2" />
+<text  x="1135.90" y="655.5" >execut..</text>
+</g>
+<g >
+<title>SfxBroadcaster::Forward (2 samples, 3.23%)</title><rect x="942.6" y="533" width="38.0" height="15.0" fill="rgb(248,93,2)" rx="2" ry="2" />
+<text  x="945.58" y="543.5" >Sfx..</text>
+</g>
+<g >
+<title>oox::ppt::PresentationFragmentHandler::finalizeImport (1 samples, 1.61%)</title><rect x="638.1" y="405" width="19.0" height="15.0" fill="rgb(234,197,1)" rx="2" ry="2" />
+<text  x="641.06" y="415.5" ></text>
+</g>
+<g >
+<title>SdXMLGenericPageContext::SetLayout (1 samples, 1.61%)</title><rect x="980.6" y="549" width="19.1" height="15.0" fill="rgb(221,189,27)" rx="2" ry="2" />
+<text  x="983.65" y="559.5" ></text>
+</g>
+<g >
+<title>sw::DocumentContentOperationsManager::CopyFlyInFlyImpl (1 samples, 1.61%)</title><rect x="447.7" y="501" width="19.1" height="15.0" fill="rgb(216,140,25)" rx="2" ry="2" />
+<text  x="450.74" y="511.5" ></text>
+</g>
+<g >
+<title>Poco::BasicBufferedStreamBuf&lt;char, std::char_traits&lt;char&gt;, Poco::BufferAllocator&lt;char&gt; &gt;::overflow (1 samples, 1.61%)</title><rect x="219.4" y="469" width="19.0" height="15.0" fill="rgb(217,178,14)" rx="2" ry="2" />
+<text  x="222.35" y="479.5" ></text>
+</g>
+<g >
+<title>generic_aes_gcm_cipher_update (4 samples, 6.45%)</title><rect x="238.4" y="501" width="76.1" height="15.0" fill="rgb(251,143,30)" rx="2" ry="2" />
+<text  x="241.39" y="511.5" >generic_..</text>
+</g>
+<g >
+<title>SocketPoll::poll (2 samples, 3.23%)</title><rect x="10.0" y="629" width="38.1" height="15.0" fill="rgb(242,197,37)" rx="2" ry="2" />
+<text  x="13.00" y="639.5" >Soc..</text>
+</g>
+<g >
+<title>SocketPoll::poll (1 samples, 1.61%)</title><rect x="48.1" y="533" width="19.0" height="15.0" fill="rgb(229,139,41)" rx="2" ry="2" />
+<text  x="51.06" y="543.5" ></text>
+</g>
+<g >
+<title>framework::Desktop::loadComponentFromURL (3 samples, 4.84%)</title><rect x="733.2" y="645" width="57.1" height="15.0" fill="rgb(214,155,21)" rx="2" ry="2" />
+<text  x="736.23" y="655.5" >framew..</text>
+</g>
+<g >
+<title>SdStyleSheet::getPropertyValue (1 samples, 1.61%)</title><rect x="828.4" y="597" width="19.0" height="15.0" fill="rgb(223,144,34)" rx="2" ry="2" />
+<text  x="831.39" y="607.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="504.8" y="485" width="19.1" height="15.0" fill="rgb(209,165,15)" rx="2" ry="2" />
+<text  x="507.84" y="495.5" ></text>
+</g>
+<g >
+<title>sdr::properties::TextProperties::ItemSetChanged (1 samples, 1.61%)</title><rect x="980.6" y="389" width="19.1" height="15.0" fill="rgb(242,102,19)" rx="2" ry="2" />
+<text  x="983.65" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="999.7" y="181" width="19.0" height="15.0" fill="rgb(253,204,54)" rx="2" ry="2" />
+<text  x="1002.68" y="191.5" ></text>
+</g>
+<g >
+<title>SdXMLStylesContext::SetMasterPageStyles (1 samples, 1.61%)</title><rect x="733.2" y="421" width="19.1" height="15.0" fill="rgb(236,18,32)" rx="2" ry="2" />
+<text  x="736.23" y="431.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::PreDoSaveAs_Impl (1 samples, 1.61%)</title><rect x="371.6" y="549" width="19.0" height="15.0" fill="rgb(215,125,30)" rx="2" ry="2" />
+<text  x="374.61" y="559.5" ></text>
+</g>
+<g >
+<title>Graphic::Graphic (1 samples, 1.61%)</title><rect x="371.6" y="469" width="19.0" height="15.0" fill="rgb(209,12,25)" rx="2" ry="2" />
+<text  x="374.61" y="479.5" ></text>
+</g>
+<g >
+<title>http::Session::syncRequest (2 samples, 3.23%)</title><rect x="10.0" y="501" width="38.1" height="15.0" fill="rgb(205,63,50)" rx="2" ry="2" />
+<text  x="13.00" y="511.5" >htt..</text>
+</g>
+<g >
+<title>ScCellRangesBase::GetMarkData (3 samples, 4.84%)</title><rect x="561.9" y="325" width="57.1" height="15.0" fill="rgb(205,56,51)" rx="2" ry="2" />
+<text  x="564.94" y="335.5" >ScCell..</text>
+</g>
+<g >
+<title>SfxObjectShell::CommonSaveAs_Impl (1 samples, 1.61%)</title><rect x="371.6" y="565" width="19.0" height="15.0" fill="rgb(206,62,40)" rx="2" ry="2" />
+<text  x="374.61" y="575.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::getBrowserSettingSync (2 samples, 3.23%)</title><rect x="10.0" y="549" width="38.1" height="15.0" fill="rgb(253,7,13)" rx="2" ry="2" />
+<text  x="13.00" y="559.5" >Doc..</text>
+</g>
+<g >
+<title>Document::renderTiles (3 samples, 4.84%)</title><rect x="1056.8" y="485" width="57.1" height="15.0" fill="rgb(207,109,42)" rx="2" ry="2" />
+<text  x="1059.77" y="495.5" >Docume..</text>
+</g>
+<g >
+<title>SfxObjectShell::LoadOwnFormat (1 samples, 1.61%)</title><rect x="619.0" y="565" width="19.1" height="15.0" fill="rgb(229,181,48)" rx="2" ry="2" />
+<text  x="622.03" y="575.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="542.9" y="197" width="19.0" height="15.0" fill="rgb(235,54,46)" rx="2" ry="2" />
+<text  x="545.90" y="207.5" ></text>
+</g>
+<g >
+<title>tls13_cipher (4 samples, 6.45%)</title><rect x="238.4" y="549" width="76.1" height="15.0" fill="rgb(218,103,54)" rx="2" ry="2" />
+<text  x="241.39" y="559.5" >tls13_ci..</text>
+</g>
+<g >
+<title>SfxWhichIter::GetCurWhich (1 samples, 1.61%)</title><rect x="714.2" y="229" width="19.0" height="15.0" fill="rgb(251,218,29)" rx="2" ry="2" />
+<text  x="717.19" y="239.5" ></text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 1.61%)</title><rect x="638.1" y="437" width="19.0" height="15.0" fill="rgb(247,211,35)" rx="2" ry="2" />
+<text  x="641.06" y="447.5" ></text>
+</g>
+<g >
+<title>comphelper::ThreadTaskTag::waitUntilDone (3 samples, 4.84%)</title><rect x="1056.8" y="357" width="57.1" height="15.0" fill="rgb(226,82,19)" rx="2" ry="2" />
+<text  x="1059.77" y="367.5" >comphe..</text>
+</g>
+<g >
+<title>RequestVettingStation::createClientSession (1 samples, 1.61%)</title><rect x="200.3" y="661" width="19.1" height="15.0" fill="rgb(229,219,38)" rx="2" ry="2" />
+<text  x="203.32" y="671.5" ></text>
+</g>
+<g >
+<title>GfxLink::LoadNative (1 samples, 1.61%)</title><rect x="999.7" y="293" width="19.0" height="15.0" fill="rgb(235,60,46)" rx="2" ry="2" />
+<text  x="1002.68" y="303.5" ></text>
+</g>
+<g >
+<title>ScMyTables::DeleteTable (3 samples, 4.84%)</title><rect x="561.9" y="469" width="57.1" height="15.0" fill="rgb(249,62,43)" rx="2" ry="2" />
+<text  x="564.94" y="479.5" >ScMyTa..</text>
+</g>
+<g >
+<title>drawinglayer::processor2d::BaseProcessor2D::process (1 samples, 1.61%)</title><rect x="523.9" y="453" width="19.0" height="15.0" fill="rgb(254,182,34)" rx="2" ry="2" />
+<text  x="526.87" y="463.5" ></text>
+</g>
+<g >
+<title>ClientSession::handleKitToClientMessage (3 samples, 4.84%)</title><rect x="86.1" y="629" width="57.1" height="15.0" fill="rgb(229,44,42)" rx="2" ry="2" />
+<text  x="89.13" y="639.5" >Client..</text>
+</g>
+<g >
+<title>ImpGraphic::swapIn (1 samples, 1.61%)</title><rect x="523.9" y="325" width="19.0" height="15.0" fill="rgb(214,115,45)" rx="2" ry="2" />
+<text  x="526.87" y="335.5" ></text>
+</g>
+<g >
+<title>OutputDevice::GetPartialTextArray (1 samples, 1.61%)</title><rect x="790.3" y="277" width="19.1" height="15.0" fill="rgb(222,95,30)" rx="2" ry="2" />
+<text  x="793.32" y="287.5" ></text>
+</g>
+<g >
+<title>SdrTextObj::GetFitToSize (1 samples, 1.61%)</title><rect x="1113.9" y="133" width="19.0" height="15.0" fill="rgb(240,157,26)" rx="2" ry="2" />
+<text  x="1116.87" y="143.5" ></text>
+</g>
+<g >
+<title>OutputDevice::GetTextArray (1 samples, 1.61%)</title><rect x="942.6" y="309" width="19.0" height="15.0" fill="rgb(234,54,40)" rx="2" ry="2" />
+<text  x="945.58" y="319.5" ></text>
+</g>
+<g >
+<title>SdrPageView::CompleteRedraw (1 samples, 1.61%)</title><rect x="523.9" y="597" width="19.0" height="15.0" fill="rgb(236,39,5)" rx="2" ry="2" />
+<text  x="526.87" y="607.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="828.4" y="501" width="19.0" height="15.0" fill="rgb(242,66,40)" rx="2" ry="2" />
+<text  x="831.39" y="511.5" ></text>
+</g>
+<g >
+<title>_int_free (1 samples, 1.61%)</title><rect x="809.4" y="613" width="19.0" height="15.0" fill="rgb(254,124,48)" rx="2" ry="2" />
+<text  x="812.35" y="623.5" ></text>
+</g>
+<g >
+<title>ScMarkData::ScMarkData (3 samples, 4.84%)</title><rect x="561.9" y="309" width="57.1" height="15.0" fill="rgb(226,179,51)" rx="2" ry="2" />
+<text  x="564.94" y="319.5" >ScMark..</text>
+</g>
+<g >
+<title>execute_native_thread_routine (1 samples, 1.61%)</title><rect x="352.6" y="645" width="19.0" height="15.0" fill="rgb(235,54,39)" rx="2" ry="2" />
+<text  x="355.58" y="655.5" ></text>
+</g>
+<g >
+<title>http::Session::syncRequest (3 samples, 4.84%)</title><rect x="86.1" y="549" width="57.1" height="15.0" fill="rgb(205,148,28)" rx="2" ry="2" />
+<text  x="89.13" y="559.5" >http::..</text>
+</g>
+<g >
+<title>comphelper::ThreadPool::waitUntilDone (3 samples, 4.84%)</title><rect x="1056.8" y="373" width="57.1" height="15.0" fill="rgb(240,159,27)" rx="2" ry="2" />
+<text  x="1059.77" y="383.5" >comphe..</text>
+</g>
+<g >
+<title>ScDocShell::LoadXML (3 samples, 4.84%)</title><rect x="657.1" y="565" width="57.1" height="15.0" fill="rgb(253,187,26)" rx="2" ry="2" />
+<text  x="660.10" y="575.5" >ScDocS..</text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="352.6" y="357" width="19.0" height="15.0" fill="rgb(229,99,24)" rx="2" ry="2" />
+<text  x="355.58" y="367.5" ></text>
+</g>
+<g >
+<title>SfxBaseModel::impl_store (1 samples, 1.61%)</title><rect x="371.6" y="597" width="19.0" height="15.0" fill="rgb(207,156,32)" rx="2" ry="2" />
+<text  x="374.61" y="607.5" ></text>
+</g>
+<g >
+<title>std::basic_streambuf&lt;char, std::char_traits&lt;char&gt; &gt;::xsputn (1 samples, 1.61%)</title><rect x="352.6" y="453" width="19.0" height="15.0" fill="rgb(205,219,27)" rx="2" ry="2" />
+<text  x="355.58" y="463.5" ></text>
+</g>
+<g >
+<title>ScCellRangesBase::GetMarkData (3 samples, 4.84%)</title><rect x="657.1" y="341" width="57.1" height="15.0" fill="rgb(207,200,50)" rx="2" ry="2" />
+<text  x="660.10" y="351.5" >ScCell..</text>
+</g>
+<g >
+<title>sd::slidesorter::cache::BitmapFactory::CreateBitmap (1 samples, 1.61%)</title><rect x="999.7" y="661" width="19.0" height="15.0" fill="rgb(239,179,8)" rx="2" ry="2" />
+<text  x="1002.68" y="671.5" ></text>
+</g>
+<g >
+<title>tls_get_more_records (6 samples, 9.68%)</title><rect x="238.4" y="565" width="114.2" height="15.0" fill="rgb(246,197,6)" rx="2" ry="2" />
+<text  x="241.39" y="575.5" >tls_get_more_r..</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 4.84%)</title><rect x="1056.8" y="325" width="57.1" height="15.0" fill="rgb(205,91,41)" rx="2" ry="2" />
+<text  x="1059.77" y="335.5" >_IO_fu..</text>
+</g>
+<g >
+<title>ScDocShell::LoadXML (3 samples, 4.84%)</title><rect x="561.9" y="581" width="57.1" height="15.0" fill="rgb(212,85,52)" rx="2" ry="2" />
+<text  x="564.94" y="591.5" >ScDocS..</text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="828.4" y="469" width="19.0" height="15.0" fill="rgb(236,162,18)" rx="2" ry="2" />
+<text  x="831.39" y="479.5" ></text>
+</g>
+<g >
+<title>OutlinerEditEng::GetBulletArea (1 samples, 1.61%)</title><rect x="790.3" y="373" width="19.1" height="15.0" fill="rgb(213,128,28)" rx="2" ry="2" />
+<text  x="793.32" y="383.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 4.84%)</title><rect x="657.1" y="197" width="57.1" height="15.0" fill="rgb(222,60,26)" rx="2" ry="2" />
+<text  x="660.10" y="207.5" >syscall</text>
+</g>
+<g >
+<title>doc_saveAs (2 samples, 3.23%)</title><rect x="390.6" y="645" width="38.1" height="15.0" fill="rgb(226,118,52)" rx="2" ry="2" />
+<text  x="393.65" y="655.5" >doc..</text>
+</g>
+<g >
+<title>AES_encrypt (2 samples, 3.23%)</title><rect x="238.4" y="469" width="38.1" height="15.0" fill="rgb(246,155,50)" rx="2" ry="2" />
+<text  x="241.39" y="479.5" >AES..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::GraphicPrimitive2D::create2DDecomposition (1 samples, 1.61%)</title><rect x="999.7" y="373" width="19.0" height="15.0" fill="rgb(213,31,10)" rx="2" ry="2" />
+<text  x="1002.68" y="383.5" ></text>
+</g>
+<g >
+<title>Outliner::ImplGetBulletSize (3 samples, 4.84%)</title><rect x="847.4" y="453" width="57.1" height="15.0" fill="rgb(229,202,13)" rx="2" ry="2" />
+<text  x="850.42" y="463.5" >Outlin..</text>
+</g>
+<g >
+<title>non-virtual thunk to SdStyleSheet::Notify (1 samples, 1.61%)</title><rect x="961.6" y="485" width="19.0" height="15.0" fill="rgb(208,43,28)" rx="2" ry="2" />
+<text  x="964.61" y="495.5" ></text>
+</g>
+<g >
+<title>CRYPTO_gcm128_decrypt (4 samples, 6.45%)</title><rect x="238.4" y="485" width="76.1" height="15.0" fill="rgb(233,21,18)" rx="2" ry="2" />
+<text  x="241.39" y="495.5" >CRYPTO_g..</text>
+</g>
+<g >
+<title>OutlinerEditEng::GetBulletArea (1 samples, 1.61%)</title><rect x="942.6" y="389" width="19.0" height="15.0" fill="rgb(224,7,15)" rx="2" ry="2" />
+<text  x="945.58" y="399.5" ></text>
+</g>
+<g >
+<title>OutputDevice::ImplLayout (1 samples, 1.61%)</title><rect x="790.3" y="261" width="19.1" height="15.0" fill="rgb(249,184,37)" rx="2" ry="2" />
+<text  x="793.32" y="271.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="999.7" y="197" width="19.0" height="15.0" fill="rgb(224,91,45)" rx="2" ry="2" />
+<text  x="1002.68" y="207.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::parseStream (1 samples, 1.61%)</title><rect x="980.6" y="629" width="19.1" height="15.0" fill="rgb(242,41,11)" rx="2" ry="2" />
+<text  x="983.65" y="639.5" ></text>
+</g>
+<g >
+<title>XMLThemeContext::~XMLThemeContext (1 samples, 1.61%)</title><rect x="428.7" y="517" width="19.0" height="15.0" fill="rgb(218,98,14)" rx="2" ry="2" />
+<text  x="431.71" y="527.5" ></text>
+</g>
+<g >
+<title>RemoteJSONPoll::pollingThread (3 samples, 4.84%)</title><rect x="1132.9" y="613" width="57.1" height="15.0" fill="rgb(209,23,41)" rx="2" ry="2" />
+<text  x="1135.90" y="623.5" >Remote..</text>
+</g>
+<g >
+<title>GDIMetaFile::GDIMetaFile (1 samples, 1.61%)</title><rect x="371.6" y="437" width="19.0" height="15.0" fill="rgb(252,209,9)" rx="2" ry="2" />
+<text  x="374.61" y="447.5" ></text>
+</g>
+<g >
+<title>vcl::pngWrite (1 samples, 1.61%)</title><rect x="409.7" y="469" width="19.0" height="15.0" fill="rgb(212,150,6)" rx="2" ry="2" />
+<text  x="412.68" y="479.5" ></text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 1.61%)</title><rect x="638.1" y="453" width="19.0" height="15.0" fill="rgb(217,40,39)" rx="2" ry="2" />
+<text  x="641.06" y="463.5" ></text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importRelations (1 samples, 1.61%)</title><rect x="542.9" y="261" width="19.0" height="15.0" fill="rgb(210,85,39)" rx="2" ry="2" />
+<text  x="545.90" y="271.5" ></text>
+</g>
+<g >
+<title>GraphicFilter::readPNG (1 samples, 1.61%)</title><rect x="523.9" y="277" width="19.0" height="15.0" fill="rgb(226,50,51)" rx="2" ry="2" />
+<text  x="526.87" y="287.5" ></text>
+</g>
+<g >
+<title>ScMarkData::ScMarkData (3 samples, 4.84%)</title><rect x="657.1" y="325" width="57.1" height="15.0" fill="rgb(224,39,5)" rx="2" ry="2" />
+<text  x="660.10" y="335.5" >ScMark..</text>
+</g>
+<g >
+<title>non-virtual thunk to SdStyleSheet::Notify (2 samples, 3.23%)</title><rect x="942.6" y="549" width="38.0" height="15.0" fill="rgb(206,55,52)" rx="2" ry="2" />
+<text  x="945.58" y="559.5" >non..</text>
+</g>
+<g >
+<title>DocumentBroker::doDownloadDocument (1 samples, 1.61%)</title><rect x="219.4" y="533" width="19.0" height="15.0" fill="rgb(225,188,34)" rx="2" ry="2" />
+<text  x="222.35" y="543.5" ></text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::create2DDecompositionOfGraphic (2 samples, 3.23%)</title><rect x="1018.7" y="469" width="38.1" height="15.0" fill="rgb(208,104,37)" rx="2" ry="2" />
+<text  x="1021.71" y="479.5" >dra..</text>
+</g>
+<g >
+<title>writev (1 samples, 1.61%)</title><rect x="67.1" y="437" width="19.0" height="15.0" fill="rgb(218,63,37)" rx="2" ry="2" />
+<text  x="70.10" y="447.5" ></text>
+</g>
+<g >
+<title>ImplFontCache::GetGlyphFallbackFont (1 samples, 1.61%)</title><rect x="466.8" y="469" width="19.0" height="15.0" fill="rgb(236,3,8)" rx="2" ry="2" />
+<text  x="469.77" y="479.5" ></text>
+</g>
+<g >
+<title>SdXImpressDocument::paintTile (1 samples, 1.61%)</title><rect x="523.9" y="645" width="19.0" height="15.0" fill="rgb(215,31,33)" rx="2" ry="2" />
+<text  x="526.87" y="655.5" ></text>
+</g>
+<g >
+<title>SfxBaseModel::load (3 samples, 4.84%)</title><rect x="561.9" y="645" width="57.1" height="15.0" fill="rgb(254,51,2)" rx="2" ry="2" />
+<text  x="564.94" y="655.5" >SfxBas..</text>
+</g>
+<g >
+<title>Outliner::ImpCalcBulletArea (1 samples, 1.61%)</title><rect x="923.5" y="437" width="19.1" height="15.0" fill="rgb(253,68,42)" rx="2" ry="2" />
+<text  x="926.55" y="447.5" ></text>
+</g>
+<g >
+<title>drawinglayer::processor2d::BaseProcessor2D::process (1 samples, 1.61%)</title><rect x="999.7" y="405" width="19.0" height="15.0" fill="rgb(212,105,19)" rx="2" ry="2" />
+<text  x="1002.68" y="415.5" ></text>
+</g>
+<g >
+<title>ppoll (2 samples, 3.23%)</title><rect x="10.0" y="469" width="38.1" height="15.0" fill="rgb(238,43,45)" rx="2" ry="2" />
+<text  x="13.00" y="479.5" >ppoll</text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (1 samples, 1.61%)</title><rect x="542.9" y="597" width="19.0" height="15.0" fill="rgb(224,2,27)" rx="2" ry="2" />
+<text  x="545.90" y="607.5" ></text>
+</g>
+<g >
+<title>SdrTextObj::NbcAdjustTextFrameWidthAndHeight (1 samples, 1.61%)</title><rect x="1113.9" y="181" width="19.0" height="15.0" fill="rgb(253,127,26)" rx="2" ry="2" />
+<text  x="1116.87" y="191.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (1 samples, 1.61%)</title><rect x="714.2" y="597" width="19.0" height="15.0" fill="rgb(208,158,19)" rx="2" ry="2" />
+<text  x="717.19" y="607.5" ></text>
+</g>
+<g >
+<title>oox::drawingml::TextBody::ApplyMasterTextStyle (10 samples, 16.13%)</title><rect x="790.3" y="661" width="190.3" height="15.0" fill="rgb(254,189,29)" rx="2" ry="2" />
+<text  x="793.32" y="671.5" >oox::drawingml::TextBody..</text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="942.6" y="181" width="19.0" height="15.0" fill="rgb(223,121,47)" rx="2" ry="2" />
+<text  x="945.58" y="191.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::disconnectSessionInternal (3 samples, 4.84%)</title><rect x="143.2" y="565" width="57.1" height="15.0" fill="rgb(211,70,2)" rx="2" ry="2" />
+<text  x="146.23" y="575.5" >Docume..</text>
+</g>
+<g >
+<title>framework::LoadEnv::loadComponentFromURL (3 samples, 4.84%)</title><rect x="733.2" y="629" width="57.1" height="15.0" fill="rgb(226,142,49)" rx="2" ry="2" />
+<text  x="736.23" y="639.5" >framew..</text>
+</g>
+<g >
+<title>DocumentBroker::DocumentBrokerPoll::pollingThread (1 samples, 1.61%)</title><rect x="219.4" y="645" width="19.0" height="15.0" fill="rgb(251,74,48)" rx="2" ry="2" />
+<text  x="222.35" y="655.5" ></text>
+</g>
+<g >
+<title>SdXMLMasterPageContext::endFastElement (1 samples, 1.61%)</title><rect x="733.2" y="437" width="19.1" height="15.0" fill="rgb(223,210,52)" rx="2" ry="2" />
+<text  x="736.23" y="447.5" ></text>
+</g>
+<g >
+<title>http::Session::syncRequestImpl (1 samples, 1.61%)</title><rect x="67.1" y="581" width="19.0" height="15.0" fill="rgb(234,189,1)" rx="2" ry="2" />
+<text  x="70.10" y="591.5" ></text>
+</g>
+<g >
+<title>SdXMLGraphicObjectShapeContext::startFastElement (1 samples, 1.61%)</title><rect x="771.3" y="437" width="19.0" height="15.0" fill="rgb(238,12,39)" rx="2" ry="2" />
+<text  x="774.29" y="447.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="866.5" y="325" width="19.0" height="15.0" fill="rgb(249,200,6)" rx="2" ry="2" />
+<text  x="869.45" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 3.23%)</title><rect x="314.5" y="437" width="38.1" height="15.0" fill="rgb(208,44,26)" rx="2" ry="2" />
+<text  x="317.52" y="447.5" >sys..</text>
+</g>
+<g >
+<title>oox::ppt::PresentationFragmentHandler::importMasterSlides (1 samples, 1.61%)</title><rect x="542.9" y="357" width="19.0" height="15.0" fill="rgb(239,153,21)" rx="2" ry="2" />
+<text  x="545.90" y="367.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 3.23%)</title><rect x="238.4" y="453" width="38.1" height="15.0" fill="rgb(223,65,48)" rx="2" ry="2" />
+<text  x="241.39" y="463.5" >_IO..</text>
+</g>
+<g >
+<title>SdrRectObj::NbcSetLogicRect (1 samples, 1.61%)</title><rect x="980.6" y="469" width="19.1" height="15.0" fill="rgb(223,144,24)" rx="2" ry="2" />
+<text  x="983.65" y="479.5" ></text>
+</g>
+<g >
+<title>http::Session::syncRequestImpl (1 samples, 1.61%)</title><rect x="200.3" y="533" width="19.1" height="15.0" fill="rgb(207,59,3)" rx="2" ry="2" />
+<text  x="203.32" y="543.5" ></text>
+</g>
+<g >
+<title>SfxBaseModel::load (3 samples, 4.84%)</title><rect x="657.1" y="629" width="57.1" height="15.0" fill="rgb(223,92,15)" rx="2" ry="2" />
+<text  x="660.10" y="639.5" >SfxBas..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 4.84%)</title><rect x="561.9" y="261" width="57.1" height="15.0" fill="rgb(241,50,39)" rx="2" ry="2" />
+<text  x="564.94" y="271.5" >handle..</text>
+</g>
+<g >
+<title>SdStyleSheet::setPropertyValue (7 samples, 11.29%)</title><rect x="847.4" y="613" width="133.2" height="15.0" fill="rgb(217,15,21)" rx="2" ry="2" />
+<text  x="850.42" y="623.5" >SdStyleSheet::se..</text>
+</g>
+<g >
+<title>SdXMLShapeContext::AddShape (1 samples, 1.61%)</title><rect x="714.2" y="469" width="19.0" height="15.0" fill="rgb(232,41,9)" rx="2" ry="2" />
+<text  x="717.19" y="479.5" ></text>
+</g>
+<g >
+<title>oox::PropertySet::setProperties (1 samples, 1.61%)</title><rect x="790.3" y="613" width="19.1" height="15.0" fill="rgb(237,186,46)" rx="2" ry="2" />
+<text  x="793.32" y="623.5" ></text>
+</g>
+<g >
+<title>ScXMLImport::SetStyleToRanges (3 samples, 4.84%)</title><rect x="657.1" y="405" width="57.1" height="15.0" fill="rgb(209,211,33)" rx="2" ry="2" />
+<text  x="660.10" y="415.5" >ScXMLI..</text>
+</g>
+<g >
+<title>SdrPageWindow::RedrawAll (1 samples, 1.61%)</title><rect x="999.7" y="565" width="19.0" height="15.0" fill="rgb(227,22,40)" rx="2" ry="2" />
+<text  x="1002.68" y="575.5" ></text>
+</g>
+<g >
+<title>SfxBroadcaster::Broadcast (1 samples, 1.61%)</title><rect x="790.3" y="581" width="19.1" height="15.0" fill="rgb(217,98,11)" rx="2" ry="2" />
+<text  x="793.32" y="591.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="1113.9" y="53" width="19.0" height="15.0" fill="rgb(242,205,43)" rx="2" ry="2" />
+<text  x="1116.87" y="63.5" ></text>
+</g>
+<g >
+<title>SwTextBoxNode::Clone_Impl (1 samples, 1.61%)</title><rect x="447.7" y="549" width="19.1" height="15.0" fill="rgb(232,127,38)" rx="2" ry="2" />
+<text  x="450.74" y="559.5" ></text>
+</g>
+<g >
+<title>SwXStyle::setPropertyValue (1 samples, 1.61%)</title><rect x="504.8" y="549" width="19.1" height="15.0" fill="rgb(236,186,29)" rx="2" ry="2" />
+<text  x="507.84" y="559.5" ></text>
+</g>
+<g >
+<title>sw::DocumentLayoutManager::CopyLayoutFormat (1 samples, 1.61%)</title><rect x="447.7" y="597" width="19.1" height="15.0" fill="rgb(243,215,31)" rx="2" ry="2" />
+<text  x="450.74" y="607.5" ></text>
+</g>
+<g >
+<title>BinaryDataContainer::BinaryDataContainer (1 samples, 1.61%)</title><rect x="771.3" y="357" width="19.0" height="15.0" fill="rgb(225,129,25)" rx="2" ry="2" />
+<text  x="774.29" y="367.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::UpdateParagraphsWithStyleSheet (1 samples, 1.61%)</title><rect x="790.3" y="453" width="19.1" height="15.0" fill="rgb(209,213,22)" rx="2" ry="2" />
+<text  x="793.32" y="463.5" ></text>
+</g>
+<g >
+<title>SvXMLGraphicHelper::loadGraphicAtPage (1 samples, 1.61%)</title><rect x="771.3" y="405" width="19.0" height="15.0" fill="rgb(245,227,45)" rx="2" ry="2" />
+<text  x="774.29" y="415.5" ></text>
+</g>
+<g >
+<title>http::Session::syncDownload (1 samples, 1.61%)</title><rect x="48.1" y="565" width="19.0" height="15.0" fill="rgb(224,59,43)" rx="2" ry="2" />
+<text  x="51.06" y="575.5" ></text>
+</g>
+<g >
+<title>oox::core::FilterBase::filter (1 samples, 1.61%)</title><rect x="638.1" y="517" width="19.0" height="15.0" fill="rgb(214,99,45)" rx="2" ry="2" />
+<text  x="641.06" y="527.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="447.7" y="389" width="19.1" height="15.0" fill="rgb(228,227,21)" rx="2" ry="2" />
+<text  x="450.74" y="399.5" ></text>
+</g>
+<g >
+<title>ImpGraphic::swapIn (2 samples, 3.23%)</title><rect x="1018.7" y="421" width="38.1" height="15.0" fill="rgb(238,194,21)" rx="2" ry="2" />
+<text  x="1021.71" y="431.5" >Imp..</text>
+</g>
+<g >
+<title>WopiStorage::updateLockState (3 samples, 4.84%)</title><rect x="86.1" y="565" width="57.1" height="15.0" fill="rgb(208,10,25)" rx="2" ry="2" />
+<text  x="89.13" y="575.5" >WopiSt..</text>
+</g>
+<g >
+<title>StreamSocket::readIncomingData (6 samples, 9.68%)</title><rect x="238.4" y="661" width="114.2" height="15.0" fill="rgb(251,173,22)" rx="2" ry="2" />
+<text  x="241.39" y="671.5" >StreamSocket::..</text>
+</g>
+<g >
+<title>oox::PropertySet::implSetPropertyValue (7 samples, 11.29%)</title><rect x="847.4" y="629" width="133.2" height="15.0" fill="rgb(216,54,24)" rx="2" ry="2" />
+<text  x="850.42" y="639.5" >oox::PropertySet..</text>
+</g>
+<g >
+<title>SwTextBoxNode::Clone_Impl (1 samples, 1.61%)</title><rect x="447.7" y="565" width="19.1" height="15.0" fill="rgb(207,74,40)" rx="2" ry="2" />
+<text  x="450.74" y="575.5" ></text>
+</g>
+<g >
+<title>sdr::properties::RectangleProperties::ItemSetChanged (1 samples, 1.61%)</title><rect x="980.6" y="405" width="19.1" height="15.0" fill="rgb(250,47,21)" rx="2" ry="2" />
+<text  x="983.65" y="415.5" ></text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 1.61%)</title><rect x="542.9" y="421" width="19.0" height="15.0" fill="rgb(212,154,45)" rx="2" ry="2" />
+<text  x="545.90" y="431.5" ></text>
+</g>
+<g >
+<title>png_read_filter_row_up (1 samples, 1.61%)</title><rect x="999.7" y="229" width="19.0" height="15.0" fill="rgb(226,57,15)" rx="2" ry="2" />
+<text  x="1002.68" y="239.5" ></text>
+</g>
+<g >
+<title>i18nutil::ScriptHintProvider::AdvanceTo (1 samples, 1.61%)</title><rect x="980.6" y="245" width="19.1" height="15.0" fill="rgb(254,79,9)" rx="2" ry="2" />
+<text  x="983.65" y="255.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::CreateTextObject (1 samples, 1.61%)</title><rect x="714.2" y="277" width="19.0" height="15.0" fill="rgb(215,100,34)" rx="2" ry="2" />
+<text  x="717.19" y="287.5" ></text>
+</g>
+<g >
+<title>SdXMLBodyContext::createFastChildContext (1 samples, 1.61%)</title><rect x="619.0" y="469" width="19.1" height="15.0" fill="rgb(226,102,29)" rx="2" ry="2" />
+<text  x="622.03" y="479.5" ></text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 1.61%)</title><rect x="714.2" y="517" width="19.0" height="15.0" fill="rgb(251,228,18)" rx="2" ry="2" />
+<text  x="717.19" y="527.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 3.23%)</title><rect x="10.0" y="453" width="38.1" height="15.0" fill="rgb(218,142,16)" rx="2" ry="2" />
+<text  x="13.00" y="463.5" >_IO..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="961.6" y="373" width="19.0" height="15.0" fill="rgb(218,224,31)" rx="2" ry="2" />
+<text  x="964.61" y="383.5" ></text>
+</g>
+<g >
+<title>GraphicFilter::readPNG (1 samples, 1.61%)</title><rect x="999.7" y="261" width="19.0" height="15.0" fill="rgb(247,152,30)" rx="2" ry="2" />
+<text  x="1002.68" y="271.5" ></text>
+</g>
+<g >
+<title>ScMarkArray::ScMarkArray (3 samples, 4.84%)</title><rect x="657.1" y="277" width="57.1" height="15.0" fill="rgb(243,2,18)" rx="2" ry="2" />
+<text  x="660.10" y="287.5" >ScMark..</text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="542.9" y="165" width="19.0" height="15.0" fill="rgb(247,181,52)" rx="2" ry="2" />
+<text  x="545.90" y="175.5" ></text>
+</g>
+<g >
+<title>PaletteManager::generateColorNamesJSON (1 samples, 1.61%)</title><rect x="428.7" y="469" width="19.0" height="15.0" fill="rgb(247,169,2)" rx="2" ry="2" />
+<text  x="431.71" y="479.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::download (1 samples, 1.61%)</title><rect x="219.4" y="549" width="19.0" height="15.0" fill="rgb(209,195,16)" rx="2" ry="2" />
+<text  x="222.35" y="559.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="409.7" y="421" width="19.0" height="15.0" fill="rgb(253,121,7)" rx="2" ry="2" />
+<text  x="412.68" y="431.5" ></text>
+</g>
+<g >
+<title>ChildSession::_handleInput (1 samples, 1.61%)</title><rect x="371.6" y="661" width="19.0" height="15.0" fill="rgb(208,222,13)" rx="2" ry="2" />
+<text  x="374.61" y="671.5" ></text>
+</g>
+<g >
+<title>Outliner::ImpCalcBulletArea (3 samples, 4.84%)</title><rect x="847.4" y="469" width="57.1" height="15.0" fill="rgb(217,35,26)" rx="2" ry="2" />
+<text  x="850.42" y="479.5" >Outlin..</text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="409.7" y="389" width="19.0" height="15.0" fill="rgb(236,186,6)" rx="2" ry="2" />
+<text  x="412.68" y="399.5" ></text>
+</g>
+<g >
+<title>non-virtual thunk to SdStyleSheet::Notify (1 samples, 1.61%)</title><rect x="790.3" y="533" width="19.1" height="15.0" fill="rgb(217,151,4)" rx="2" ry="2" />
+<text  x="793.32" y="543.5" ></text>
+</g>
+<g >
+<title>ScCellRangesBase::SetOnePropertyValue (3 samples, 4.84%)</title><rect x="657.1" y="357" width="57.1" height="15.0" fill="rgb(254,192,0)" rx="2" ry="2" />
+<text  x="660.10" y="367.5" >ScCell..</text>
+</g>
+<g >
+<title>Impl_getTextEncodingData (1 samples, 1.61%)</title><rect x="790.3" y="197" width="19.1" height="15.0" fill="rgb(211,208,46)" rx="2" ry="2" />
+<text  x="793.32" y="207.5" ></text>
+</g>
+<g >
+<title>ScMultiSel::Set (3 samples, 4.84%)</title><rect x="561.9" y="293" width="57.1" height="15.0" fill="rgb(225,126,48)" rx="2" ry="2" />
+<text  x="564.94" y="303.5" >ScMult..</text>
+</g>
+<g >
+<title>non-virtual thunk to SdStyleSheet::Notify (1 samples, 1.61%)</title><rect x="961.6" y="421" width="19.0" height="15.0" fill="rgb(216,12,15)" rx="2" ry="2" />
+<text  x="964.61" y="431.5" ></text>
+</g>
+<g >
+<title>hb_shape_plan_key_t::init (1 samples, 1.61%)</title><rect x="885.5" y="309" width="19.0" height="15.0" fill="rgb(224,35,16)" rx="2" ry="2" />
+<text  x="888.48" y="319.5" ></text>
+</g>
+<g >
+<title>ClientSession::onDisconnect (3 samples, 4.84%)</title><rect x="143.2" y="597" width="57.1" height="15.0" fill="rgb(254,180,40)" rx="2" ry="2" />
+<text  x="146.23" y="607.5" >Client..</text>
+</g>
+<g >
+<title>ImpEditEngine::CreateLines (1 samples, 1.61%)</title><rect x="790.3" y="389" width="19.1" height="15.0" fill="rgb(230,149,31)" rx="2" ry="2" />
+<text  x="793.32" y="399.5" ></text>
+</g>
+<g >
+<title>SocketPoll::pollingThreadEntry (1 samples, 1.61%)</title><rect x="352.6" y="629" width="19.0" height="15.0" fill="rgb(242,142,45)" rx="2" ry="2" />
+<text  x="355.58" y="639.5" ></text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 1.61%)</title><rect x="542.9" y="405" width="19.0" height="15.0" fill="rgb(233,115,40)" rx="2" ry="2" />
+<text  x="545.90" y="415.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::endFastElement (1 samples, 1.61%)</title><rect x="733.2" y="453" width="19.1" height="15.0" fill="rgb(220,157,23)" rx="2" ry="2" />
+<text  x="736.23" y="463.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::CreateLines (1 samples, 1.61%)</title><rect x="923.5" y="469" width="19.1" height="15.0" fill="rgb(210,131,47)" rx="2" ry="2" />
+<text  x="926.55" y="479.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="733.2" y="341" width="19.1" height="15.0" fill="rgb(238,191,23)" rx="2" ry="2" />
+<text  x="736.23" y="351.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="409.7" y="405" width="19.0" height="15.0" fill="rgb(205,18,30)" rx="2" ry="2" />
+<text  x="412.68" y="415.5" ></text>
+</g>
+<g >
+<title>ScXMLImportWrapper::Import (3 samples, 4.84%)</title><rect x="561.9" y="565" width="57.1" height="15.0" fill="rgb(221,115,51)" rx="2" ry="2" />
+<text  x="564.94" y="575.5" >ScXMLI..</text>
+</g>
+<g >
+<title>SvXMLStylesContext::FinishStyles (1 samples, 1.61%)</title><rect x="504.8" y="597" width="19.1" height="15.0" fill="rgb(215,71,32)" rx="2" ry="2" />
+<text  x="507.84" y="607.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::updateStorageLockState (3 samples, 4.84%)</title><rect x="86.1" y="581" width="57.1" height="15.0" fill="rgb(217,205,1)" rx="2" ry="2" />
+<text  x="89.13" y="591.5" >Docume..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="200.3" y="453" width="19.1" height="15.0" fill="rgb(225,112,43)" rx="2" ry="2" />
+<text  x="203.32" y="463.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="714.2" y="213" width="19.0" height="15.0" fill="rgb(226,134,32)" rx="2" ry="2" />
+<text  x="717.19" y="223.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="638.1" y="197" width="19.0" height="15.0" fill="rgb(223,114,24)" rx="2" ry="2" />
+<text  x="641.06" y="207.5" ></text>
+</g>
+<g >
+<title>http::Session::syncRequest (3 samples, 4.84%)</title><rect x="86.1" y="533" width="57.1" height="15.0" fill="rgb(211,4,6)" rx="2" ry="2" />
+<text  x="89.13" y="543.5" >http::..</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 4.84%)</title><rect x="657.1" y="229" width="57.1" height="15.0" fill="rgb(234,179,51)" rx="2" ry="2" />
+<text  x="660.10" y="239.5" >_IO_fu..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="619.0" y="325" width="19.1" height="15.0" fill="rgb(247,142,52)" rx="2" ry="2" />
+<text  x="622.03" y="335.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 4.84%)</title><rect x="1132.9" y="517" width="57.1" height="15.0" fill="rgb(232,108,28)" rx="2" ry="2" />
+<text  x="1135.90" y="527.5" >handle..</text>
+</g>
+<g >
+<title>SdPage::SetAutoLayout (1 samples, 1.61%)</title><rect x="619.0" y="421" width="19.1" height="15.0" fill="rgb(240,146,3)" rx="2" ry="2" />
+<text  x="622.03" y="431.5" ></text>
+</g>
+<g >
+<title>lo_runLoop (4 samples, 6.45%)</title><rect x="1056.8" y="645" width="76.1" height="15.0" fill="rgb(251,64,16)" rx="2" ry="2" />
+<text  x="1059.77" y="655.5" >lo_runLoop</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::BufferedDecompositionPrimitive2D::get2DDecomposition (1 samples, 1.61%)</title><rect x="999.7" y="421" width="19.0" height="15.0" fill="rgb(245,186,52)" rx="2" ry="2" />
+<text  x="1002.68" y="431.5" ></text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (3 samples, 4.84%)</title><rect x="561.9" y="517" width="57.1" height="15.0" fill="rgb(223,227,46)" rx="2" ry="2" />
+<text  x="564.94" y="527.5" >sax_fa..</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatAndLayout (1 samples, 1.61%)</title><rect x="790.3" y="437" width="19.1" height="15.0" fill="rgb(206,113,45)" rx="2" ry="2" />
+<text  x="793.32" y="447.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="619.0" y="309" width="19.1" height="15.0" fill="rgb(241,172,0)" rx="2" ry="2" />
+<text  x="622.03" y="319.5" ></text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 1.61%)</title><rect x="1113.9" y="309" width="19.0" height="15.0" fill="rgb(219,138,48)" rx="2" ry="2" />
+<text  x="1116.87" y="319.5" ></text>
+</g>
+<g >
+<title>sd::View::CompleteRedraw (1 samples, 1.61%)</title><rect x="999.7" y="613" width="19.0" height="15.0" fill="rgb(237,184,27)" rx="2" ry="2" />
+<text  x="1002.68" y="623.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (3 samples, 4.84%)</title><rect x="657.1" y="613" width="57.1" height="15.0" fill="rgb(229,49,7)" rx="2" ry="2" />
+<text  x="660.10" y="623.5" >SfxObj..</text>
+</g>
+<g >
+<title>OutputDevice::GetTextWidth (1 samples, 1.61%)</title><rect x="942.6" y="341" width="19.0" height="15.0" fill="rgb(246,208,51)" rx="2" ry="2" />
+<text  x="945.58" y="351.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="219.4" y="389" width="19.0" height="15.0" fill="rgb(243,36,41)" rx="2" ry="2" />
+<text  x="222.35" y="399.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="219.4" y="373" width="19.0" height="15.0" fill="rgb(218,207,27)" rx="2" ry="2" />
+<text  x="222.35" y="383.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (3 samples, 4.84%)</title><rect x="733.2" y="549" width="57.1" height="15.0" fill="rgb(242,76,44)" rx="2" ry="2" />
+<text  x="736.23" y="559.5" >SfxObj..</text>
+</g>
+<g >
+<title>SdrPaintView::CompleteRedraw (1 samples, 1.61%)</title><rect x="523.9" y="613" width="19.0" height="15.0" fill="rgb(222,6,15)" rx="2" ry="2" />
+<text  x="526.87" y="623.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 4.84%)</title><rect x="657.1" y="213" width="57.1" height="15.0" fill="rgb(213,169,41)" rx="2" ry="2" />
+<text  x="660.10" y="223.5" >handle..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 1.61%)</title><rect x="428.7" y="565" width="19.0" height="15.0" fill="rgb(213,212,0)" rx="2" ry="2" />
+<text  x="431.71" y="575.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::LoadOwnFormat (1 samples, 1.61%)</title><rect x="1113.9" y="373" width="19.0" height="15.0" fill="rgb(233,67,0)" rx="2" ry="2" />
+<text  x="1116.87" y="383.5" ></text>
+</g>
+<g >
+<title>DOM::CAttr::getValue (1 samples, 1.61%)</title><rect x="619.0" y="373" width="19.1" height="15.0" fill="rgb(220,137,4)" rx="2" ry="2" />
+<text  x="622.03" y="383.5" ></text>
+</g>
+<g >
+<title>SwTextPortion::Format_ (1 samples, 1.61%)</title><rect x="466.8" y="629" width="19.0" height="15.0" fill="rgb(220,39,48)" rx="2" ry="2" />
+<text  x="469.77" y="639.5" ></text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::GraphicPrimitive2D::create2DDecomposition (1 samples, 1.61%)</title><rect x="523.9" y="389" width="19.0" height="15.0" fill="rgb(251,111,27)" rx="2" ry="2" />
+<text  x="526.87" y="399.5" ></text>
+</g>
+<g >
+<title>SdStyleSheet::getPropertyState (1 samples, 1.61%)</title><rect x="733.2" y="389" width="19.1" height="15.0" fill="rgb(214,185,0)" rx="2" ry="2" />
+<text  x="736.23" y="399.5" ></text>
+</g>
+<g >
+<title>ChildSession::saveAs (1 samples, 1.61%)</title><rect x="371.6" y="645" width="19.0" height="15.0" fill="rgb(240,100,22)" rx="2" ry="2" />
+<text  x="374.61" y="655.5" ></text>
+</g>
+<g >
+<title>http::Session::syncDownload (1 samples, 1.61%)</title><rect x="200.3" y="565" width="19.1" height="15.0" fill="rgb(224,26,40)" rx="2" ry="2" />
+<text  x="203.32" y="575.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::startFastElement (1 samples, 1.61%)</title><rect x="619.0" y="485" width="19.1" height="15.0" fill="rgb(241,120,53)" rx="2" ry="2" />
+<text  x="622.03" y="495.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::doDownloadDocument (1 samples, 1.61%)</title><rect x="200.3" y="613" width="19.1" height="15.0" fill="rgb(218,28,28)" rx="2" ry="2" />
+<text  x="203.32" y="623.5" ></text>
+</g>
+<g >
+<title>http::Session::handleIncomingMessage (1 samples, 1.61%)</title><rect x="67.1" y="533" width="19.0" height="15.0" fill="rgb(233,156,46)" rx="2" ry="2" />
+<text  x="70.10" y="543.5" ></text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::getPrimitive2DSequenceSubHierarchy (1 samples, 1.61%)</title><rect x="523.9" y="517" width="19.0" height="15.0" fill="rgb(254,173,52)" rx="2" ry="2" />
+<text  x="526.87" y="527.5" ></text>
+</g>
+<g >
+<title>StreamSocket::handlePoll (3 samples, 4.84%)</title><rect x="143.2" y="629" width="57.1" height="15.0" fill="rgb(227,66,14)" rx="2" ry="2" />
+<text  x="146.23" y="639.5" >Stream..</text>
+</g>
+<g >
+<title>oox::PropertySet::getAnyProperty (1 samples, 1.61%)</title><rect x="828.4" y="629" width="19.0" height="15.0" fill="rgb(234,211,31)" rx="2" ry="2" />
+<text  x="831.39" y="639.5" ></text>
+</g>
+<g >
+<title>boost::locale::basic_message&lt;char&gt;::write (1 samples, 1.61%)</title><rect x="752.3" y="309" width="19.0" height="15.0" fill="rgb(208,220,53)" rx="2" ry="2" />
+<text  x="755.26" y="319.5" ></text>
+</g>
+<g >
+<title>SfxEnumItem&lt;FontWeight&gt;::operator== (1 samples, 1.61%)</title><rect x="847.4" y="389" width="19.1" height="15.0" fill="rgb(227,217,40)" rx="2" ry="2" />
+<text  x="850.42" y="399.5" ></text>
+</g>
+<g >
+<title>ChildSession::saveAs (2 samples, 3.23%)</title><rect x="390.6" y="661" width="38.1" height="15.0" fill="rgb(232,76,35)" rx="2" ry="2" />
+<text  x="393.65" y="671.5" >Chi..</text>
+</g>
+<g >
+<title>ScXMLImportWrapper::ImportFromComponent (3 samples, 4.84%)</title><rect x="561.9" y="549" width="57.1" height="15.0" fill="rgb(229,44,50)" rx="2" ry="2" />
+<text  x="564.94" y="559.5" >ScXMLI..</text>
+</g>
+<g >
+<title>sd::DrawDocShell::Load (1 samples, 1.61%)</title><rect x="980.6" y="661" width="19.1" height="15.0" fill="rgb(212,217,7)" rx="2" ry="2" />
+<text  x="983.65" y="671.5" ></text>
+</g>
+<g >
+<title>SvXMLImportPropertyMapper::FillTolerantMultiPropertySet_ (3 samples, 4.84%)</title><rect x="561.9" y="373" width="57.1" height="15.0" fill="rgb(211,41,44)" rx="2" ry="2" />
+<text  x="564.94" y="383.5" >SvXMLI..</text>
+</g>
+<g >
+<title>oox::core::FilterBase::filter (1 samples, 1.61%)</title><rect x="542.9" y="501" width="19.0" height="15.0" fill="rgb(226,176,48)" rx="2" ry="2" />
+<text  x="545.90" y="511.5" ></text>
+</g>
+<g >
+<title>sd::DrawDocShell::ImportFrom (1 samples, 1.61%)</title><rect x="638.1" y="565" width="19.0" height="15.0" fill="rgb(224,149,19)" rx="2" ry="2" />
+<text  x="641.06" y="575.5" ></text>
+</g>
+<g >
+<title>SfxBaseModel::load (2 samples, 3.23%)</title><rect x="619.0" y="597" width="38.1" height="15.0" fill="rgb(249,186,20)" rx="2" ry="2" />
+<text  x="622.03" y="607.5" >Sfx..</text>
+</g>
+<g >
+<title>SfxItemSet::Set (1 samples, 1.61%)</title><rect x="714.2" y="245" width="19.0" height="15.0" fill="rgb(217,1,47)" rx="2" ry="2" />
+<text  x="717.19" y="255.5" ></text>
+</g>
+<g >
+<title>sdr::properties::TextProperties::Notify (1 samples, 1.61%)</title><rect x="1113.9" y="197" width="19.0" height="15.0" fill="rgb(209,93,36)" rx="2" ry="2" />
+<text  x="1116.87" y="207.5" ></text>
+</g>
+<g >
+<title>SdPage::SetAutoLayout (1 samples, 1.61%)</title><rect x="980.6" y="517" width="19.1" height="15.0" fill="rgb(236,206,39)" rx="2" ry="2" />
+<text  x="983.65" y="527.5" ></text>
+</g>
+<g >
+<title>FcLangCompare (1 samples, 1.61%)</title><rect x="466.8" y="325" width="19.0" height="15.0" fill="rgb(244,147,28)" rx="2" ry="2" />
+<text  x="469.77" y="335.5" ></text>
+</g>
+<g >
+<title>GraphicExportFilter::filterRenderDocument (1 samples, 1.61%)</title><rect x="390.6" y="517" width="19.1" height="15.0" fill="rgb(249,195,36)" rx="2" ry="2" />
+<text  x="393.65" y="527.5" ></text>
+</g>
+<g >
+<title>deflate (1 samples, 1.61%)</title><rect x="390.6" y="421" width="19.1" height="15.0" fill="rgb(227,208,6)" rx="2" ry="2" />
+<text  x="393.65" y="431.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="48.1" y="469" width="19.0" height="15.0" fill="rgb(213,65,1)" rx="2" ry="2" />
+<text  x="51.06" y="479.5" ></text>
+</g>
+<g >
+<title>OutputDevice::GetPartialTextArray (1 samples, 1.61%)</title><rect x="885.5" y="389" width="19.0" height="15.0" fill="rgb(220,226,41)" rx="2" ry="2" />
+<text  x="888.48" y="399.5" ></text>
+</g>
+<g >
+<title>GraphicFilter::ImportGraphics (3 samples, 4.84%)</title><rect x="1056.8" y="389" width="57.1" height="15.0" fill="rgb(208,60,43)" rx="2" ry="2" />
+<text  x="1059.77" y="399.5" >Graphi..</text>
+</g>
+<g >
+<title>SfxBroadcaster::Broadcast (1 samples, 1.61%)</title><rect x="504.8" y="501" width="19.1" height="15.0" fill="rgb(221,143,16)" rx="2" ry="2" />
+<text  x="507.84" y="511.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="485.8" y="549" width="19.0" height="15.0" fill="rgb(209,226,7)" rx="2" ry="2" />
+<text  x="488.81" y="559.5" ></text>
+</g>
+<g >
+<title>sd::sidebar::MasterPageDescriptor::UpdatePageObject (1 samples, 1.61%)</title><rect x="1113.9" y="453" width="19.0" height="15.0" fill="rgb(223,170,5)" rx="2" ry="2" />
+<text  x="1116.87" y="463.5" ></text>
+</g>
+<g >
+<title>__vdso_clock_gettime (1 samples, 1.61%)</title><rect x="200.3" y="485" width="19.1" height="15.0" fill="rgb(229,59,13)" rx="2" ry="2" />
+<text  x="203.32" y="495.5" ></text>
+</g>
+<g >
+<title>SdrTextObj::NbcSetLogicRect (1 samples, 1.61%)</title><rect x="980.6" y="453" width="19.1" height="15.0" fill="rgb(231,203,20)" rx="2" ry="2" />
+<text  x="983.65" y="463.5" ></text>
+</g>
+<g >
+<title>SwTextBoxHelper::saveLinks (1 samples, 1.61%)</title><rect x="447.7" y="485" width="19.1" height="15.0" fill="rgb(249,29,20)" rx="2" ry="2" />
+<text  x="450.74" y="495.5" ></text>
+</g>
+<g >
+<title>XMLPropStyleContext::Finish (1 samples, 1.61%)</title><rect x="504.8" y="565" width="19.1" height="15.0" fill="rgb(235,98,31)" rx="2" ry="2" />
+<text  x="507.84" y="575.5" ></text>
+</g>
+<g >
+<title>WopiStorage::downloadDocument (1 samples, 1.61%)</title><rect x="200.3" y="581" width="19.1" height="15.0" fill="rgb(220,2,12)" rx="2" ry="2" />
+<text  x="203.32" y="591.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::UpdateParagraphsWithStyleSheet (4 samples, 6.45%)</title><rect x="847.4" y="565" width="76.1" height="15.0" fill="rgb(240,6,20)" rx="2" ry="2" />
+<text  x="850.42" y="575.5" >ImpEditE..</text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (3 samples, 4.84%)</title><rect x="561.9" y="629" width="57.1" height="15.0" fill="rgb(249,185,32)" rx="2" ry="2" />
+<text  x="564.94" y="639.5" >SfxObj..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 1.61%)</title><rect x="638.1" y="469" width="19.0" height="15.0" fill="rgb(217,166,47)" rx="2" ry="2" />
+<text  x="641.06" y="479.5" ></text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::create2DDecompositionOfGraphic (1 samples, 1.61%)</title><rect x="523.9" y="373" width="19.0" height="15.0" fill="rgb(246,112,45)" rx="2" ry="2" />
+<text  x="526.87" y="383.5" ></text>
+</g>
+<g >
+<title>StreamSocket::ensureDisconnected (3 samples, 4.84%)</title><rect x="143.2" y="613" width="57.1" height="15.0" fill="rgb(244,28,39)" rx="2" ry="2" />
+<text  x="146.23" y="623.5" >Stream..</text>
+</g>
+<g >
+<title>SvpSalInstance::ImplYield (4 samples, 6.45%)</title><rect x="1056.8" y="533" width="76.1" height="15.0" fill="rgb(215,45,28)" rx="2" ry="2" />
+<text  x="1059.77" y="543.5" >SvpSalIn..</text>
+</g>
+<g >
+<title>SocketPoll::poll (1 samples, 1.61%)</title><rect x="352.6" y="581" width="19.0" height="15.0" fill="rgb(252,179,47)" rx="2" ry="2" />
+<text  x="355.58" y="591.5" ></text>
+</g>
+<g >
+<title>drawinglayer::processor2d::BaseProcessor2D::process (2 samples, 3.23%)</title><rect x="1018.7" y="549" width="38.1" height="15.0" fill="rgb(234,103,6)" rx="2" ry="2" />
+<text  x="1021.71" y="559.5" >dra..</text>
+</g>
+<g >
+<title>sdr::contact::ObjectContactOfPageView::DoProcessDisplay (2 samples, 3.23%)</title><rect x="1018.7" y="661" width="38.1" height="15.0" fill="rgb(240,93,18)" rx="2" ry="2" />
+<text  x="1021.71" y="671.5" >sdr..</text>
+</g>
+<g >
+<title>__memset_avx2_erms (1 samples, 1.61%)</title><rect x="771.3" y="325" width="19.0" height="15.0" fill="rgb(207,116,37)" rx="2" ry="2" />
+<text  x="774.29" y="335.5" ></text>
+</g>
+<g >
+<title>ScXMLImport::SetStyleToRanges (3 samples, 4.84%)</title><rect x="561.9" y="405" width="57.1" height="15.0" fill="rgb(243,91,22)" rx="2" ry="2" />
+<text  x="564.94" y="415.5" >ScXMLI..</text>
+</g>
+<g >
+<title>SfxBroadcaster::Forward (1 samples, 1.61%)</title><rect x="790.3" y="485" width="19.1" height="15.0" fill="rgb(223,23,32)" rx="2" ry="2" />
+<text  x="793.32" y="495.5" ></text>
+</g>
+<g >
+<title>boost::locale::basic_message&lt;char&gt;::str (1 samples, 1.61%)</title><rect x="752.3" y="325" width="19.0" height="15.0" fill="rgb(232,18,52)" rx="2" ry="2" />
+<text  x="755.26" y="335.5" ></text>
+</g>
+<g >
+<title>gcm_ghash_4bit (2 samples, 3.23%)</title><rect x="276.5" y="469" width="38.0" height="15.0" fill="rgb(215,58,24)" rx="2" ry="2" />
+<text  x="279.45" y="479.5" >gcm..</text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::getPrimitive2DSequenceHierarchy (1 samples, 1.61%)</title><rect x="523.9" y="501" width="19.0" height="15.0" fill="rgb(220,184,35)" rx="2" ry="2" />
+<text  x="526.87" y="511.5" ></text>
+</g>
+<g >
+<title>SfxItemSet::PutImpl (1 samples, 1.61%)</title><rect x="828.4" y="565" width="19.0" height="15.0" fill="rgb(237,127,36)" rx="2" ry="2" />
+<text  x="831.39" y="575.5" ></text>
+</g>
+<g >
+<title>oox::ppt::PowerPointImport::filter (1 samples, 1.61%)</title><rect x="638.1" y="533" width="19.0" height="15.0" fill="rgb(242,92,27)" rx="2" ry="2" />
+<text  x="641.06" y="543.5" ></text>
+</g>
+<g >
+<title>RequestVettingStation::createClientSession (1 samples, 1.61%)</title><rect x="352.6" y="549" width="19.0" height="15.0" fill="rgb(230,112,36)" rx="2" ry="2" />
+<text  x="355.58" y="559.5" ></text>
+</g>
+<g >
+<title>ScCellRangesBase::setPropertyValue (3 samples, 4.84%)</title><rect x="657.1" y="373" width="57.1" height="15.0" fill="rgb(205,111,31)" rx="2" ry="2" />
+<text  x="660.10" y="383.5" >ScCell..</text>
+</g>
+<g >
+<title>GenericSalLayout::LayoutText (1 samples, 1.61%)</title><rect x="942.6" y="261" width="19.0" height="15.0" fill="rgb(217,149,39)" rx="2" ry="2" />
+<text  x="945.58" y="271.5" ></text>
+</g>
+<g >
+<title>XMLShapeImportHelper::addShape (1 samples, 1.61%)</title><rect x="714.2" y="437" width="19.0" height="15.0" fill="rgb(207,133,32)" rx="2" ry="2" />
+<text  x="717.19" y="447.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="504.8" y="469" width="19.1" height="15.0" fill="rgb(213,177,26)" rx="2" ry="2" />
+<text  x="507.84" y="479.5" ></text>
+</g>
+<g >
+<title>soffice_main (4 samples, 6.45%)</title><rect x="1056.8" y="629" width="76.1" height="15.0" fill="rgb(214,222,35)" rx="2" ry="2" />
+<text  x="1059.77" y="639.5" >soffice_..</text>
+</g>
+<g >
+<title>read (2 samples, 3.23%)</title><rect x="314.5" y="485" width="38.1" height="15.0" fill="rgb(241,197,36)" rx="2" ry="2" />
+<text  x="317.52" y="495.5" >read</text>
+</g>
+<g >
+<title>http::Session::syncRequestImpl (1 samples, 1.61%)</title><rect x="48.1" y="549" width="19.0" height="15.0" fill="rgb(249,68,42)" rx="2" ry="2" />
+<text  x="51.06" y="559.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 3.23%)</title><rect x="238.4" y="421" width="38.1" height="15.0" fill="rgb(239,126,16)" rx="2" ry="2" />
+<text  x="241.39" y="431.5" >sys..</text>
+</g>
+<g >
+<title>FcCompare (1 samples, 1.61%)</title><rect x="466.8" y="389" width="19.0" height="15.0" fill="rgb(244,155,10)" rx="2" ry="2" />
+<text  x="469.77" y="399.5" ></text>
+</g>
+<g >
+<title>ssl3_read (6 samples, 9.68%)</title><rect x="238.4" y="613" width="114.2" height="15.0" fill="rgb(247,202,50)" rx="2" ry="2" />
+<text  x="241.39" y="623.5" >ssl3_read</text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (1 samples, 1.61%)</title><rect x="714.2" y="629" width="19.0" height="15.0" fill="rgb(245,173,11)" rx="2" ry="2" />
+<text  x="717.19" y="639.5" ></text>
+</g>
+<g >
+<title>PaletteManager::PaletteManager (1 samples, 1.61%)</title><rect x="428.7" y="453" width="19.0" height="15.0" fill="rgb(243,45,43)" rx="2" ry="2" />
+<text  x="431.71" y="463.5" ></text>
+</g>
+<g >
+<title>osl_getNextDirectoryItem (1 samples, 1.61%)</title><rect x="428.7" y="421" width="19.0" height="15.0" fill="rgb(211,156,31)" rx="2" ry="2" />
+<text  x="431.71" y="431.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::addSession (1 samples, 1.61%)</title><rect x="200.3" y="645" width="19.1" height="15.0" fill="rgb(215,65,40)" rx="2" ry="2" />
+<text  x="203.32" y="655.5" ></text>
+</g>
+<g >
+<title>framework::Desktop::loadComponentFromURL (1 samples, 1.61%)</title><rect x="542.9" y="661" width="19.0" height="15.0" fill="rgb(217,203,17)" rx="2" ry="2" />
+<text  x="545.90" y="671.5" ></text>
+</g>
+<g >
+<title>ScXMLImportWrapper::ImportFromComponent (3 samples, 4.84%)</title><rect x="657.1" y="533" width="57.1" height="15.0" fill="rgb(242,43,43)" rx="2" ry="2" />
+<text  x="660.10" y="543.5" >ScXMLI..</text>
+</g>
+<g >
+<title>GetTextArray (1 samples, 1.61%)</title><rect x="466.8" y="549" width="19.0" height="15.0" fill="rgb(230,171,54)" rx="2" ry="2" />
+<text  x="469.77" y="559.5" ></text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::getPrimitive2DSequenceSubHierarchy (1 samples, 1.61%)</title><rect x="523.9" y="533" width="19.0" height="15.0" fill="rgb(240,156,24)" rx="2" ry="2" />
+<text  x="526.87" y="543.5" ></text>
+</g>
+<g >
+<title>SwTextFormatter::FormatLine (1 samples, 1.61%)</title><rect x="466.8" y="661" width="19.0" height="15.0" fill="rgb(213,64,16)" rx="2" ry="2" />
+<text  x="469.77" y="671.5" ></text>
+</g>
+<g >
+<title>OutlinerEditEng::GetBulletArea (1 samples, 1.61%)</title><rect x="923.5" y="453" width="19.1" height="15.0" fill="rgb(243,226,42)" rx="2" ry="2" />
+<text  x="926.55" y="463.5" ></text>
+</g>
+<g >
+<title>std::array&lt;oox::drawingml::TextParagraphProperties, 9ul&gt;::~array (1 samples, 1.61%)</title><rect x="809.4" y="629" width="19.0" height="15.0" fill="rgb(225,119,40)" rx="2" ry="2" />
+<text  x="812.35" y="639.5" ></text>
+</g>
+<g >
+<title>std::__basic_file&lt;char&gt;::xsputn_2 (1 samples, 1.61%)</title><rect x="67.1" y="453" width="19.0" height="15.0" fill="rgb(229,103,21)" rx="2" ry="2" />
+<text  x="70.10" y="463.5" ></text>
+</g>
+<g >
+<title>tls_read_record (6 samples, 9.68%)</title><rect x="238.4" y="581" width="114.2" height="15.0" fill="rgb(239,167,28)" rx="2" ry="2" />
+<text  x="241.39" y="591.5" >tls_read_record</text>
+</g>
+<g >
+<title>ScXMLTableContext::endFastElement (3 samples, 4.84%)</title><rect x="561.9" y="485" width="57.1" height="15.0" fill="rgb(214,129,6)" rx="2" ry="2" />
+<text  x="564.94" y="495.5" >ScXMLT..</text>
+</g>
+<g >
+<title>SslStreamSocket::readData (6 samples, 9.68%)</title><rect x="238.4" y="645" width="114.2" height="15.0" fill="rgb(231,1,51)" rx="2" ry="2" />
+<text  x="241.39" y="655.5" >SslStreamSocke..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="961.6" y="389" width="19.0" height="15.0" fill="rgb(250,221,21)" rx="2" ry="2" />
+<text  x="964.61" y="399.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;unsigned short, std::pair&lt;unsigned short const, SfxPoolItem const*&gt;, std::allocator&lt;std::pair&lt;unsigned short const, SfxPoolItem const*&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;unsigned short&gt;, std::hash&lt;unsigned short&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::find (1 samples, 1.61%)</title><rect x="866.5" y="373" width="19.0" height="15.0" fill="rgb(227,203,50)" rx="2" ry="2" />
+<text  x="869.45" y="383.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::pollThread (2 samples, 3.23%)</title><rect x="10.0" y="645" width="38.1" height="15.0" fill="rgb(239,143,38)" rx="2" ry="2" />
+<text  x="13.00" y="655.5" >Doc..</text>
+</g>
+<g >
+<title>SfxObjectShell::LoadOwnFormat (3 samples, 4.84%)</title><rect x="733.2" y="533" width="57.1" height="15.0" fill="rgb(246,146,29)" rx="2" ry="2" />
+<text  x="736.23" y="543.5" >SfxObj..</text>
+</g>
+<g >
+<title>Outliner::ImplGetBulletSize (1 samples, 1.61%)</title><rect x="790.3" y="341" width="19.1" height="15.0" fill="rgb(252,135,23)" rx="2" ry="2" />
+<text  x="793.32" y="351.5" ></text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::GraphicPrimitive2D::create2DDecomposition (2 samples, 3.23%)</title><rect x="1018.7" y="485" width="38.1" height="15.0" fill="rgb(233,134,32)" rx="2" ry="2" />
+<text  x="1021.71" y="495.5" >dra..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="447.7" y="405" width="19.1" height="15.0" fill="rgb(223,181,7)" rx="2" ry="2" />
+<text  x="450.74" y="415.5" ></text>
+</g>
+<g >
+<title>non-virtual thunk to SdStyleSheet::Notify (1 samples, 1.61%)</title><rect x="961.6" y="453" width="19.0" height="15.0" fill="rgb(208,220,50)" rx="2" ry="2" />
+<text  x="964.61" y="463.5" ></text>
+</g>
+<g >
+<title>std::chrono::_V2::steady_clock::now (1 samples, 1.61%)</title><rect x="200.3" y="517" width="19.1" height="15.0" fill="rgb(229,21,52)" rx="2" ry="2" />
+<text  x="203.32" y="527.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait (1 samples, 1.61%)</title><rect x="638.1" y="229" width="19.0" height="15.0" fill="rgb(240,56,15)" rx="2" ry="2" />
+<text  x="641.06" y="239.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 4.84%)</title><rect x="143.2" y="437" width="57.1" height="15.0" fill="rgb(248,199,13)" rx="2" ry="2" />
+<text  x="146.23" y="447.5" >handle..</text>
+</g>
+<g >
+<title>OutlinerEditEng::GetBulletArea (3 samples, 4.84%)</title><rect x="847.4" y="485" width="57.1" height="15.0" fill="rgb(240,23,29)" rx="2" ry="2" />
+<text  x="850.42" y="495.5" >Outlin..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 3.23%)</title><rect x="314.5" y="453" width="38.1" height="15.0" fill="rgb(252,21,37)" rx="2" ry="2" />
+<text  x="317.52" y="463.5" >han..</text>
+</g>
+<g >
+<title>GraphicFilter::ExportGraphic (1 samples, 1.61%)</title><rect x="409.7" y="485" width="19.0" height="15.0" fill="rgb(213,213,28)" rx="2" ry="2" />
+<text  x="412.68" y="495.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="485.8" y="517" width="19.0" height="15.0" fill="rgb(232,196,16)" rx="2" ry="2" />
+<text  x="488.81" y="527.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="428.7" y="325" width="19.0" height="15.0" fill="rgb(242,85,39)" rx="2" ry="2" />
+<text  x="431.71" y="335.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="790.3" y="181" width="19.1" height="15.0" fill="rgb(224,37,5)" rx="2" ry="2" />
+<text  x="793.32" y="191.5" ></text>
+</g>
+<g >
+<title>Poco::SHA1Engine::updateImpl (1 samples, 1.61%)</title><rect x="219.4" y="437" width="19.0" height="15.0" fill="rgb(213,127,40)" rx="2" ry="2" />
+<text  x="222.35" y="447.5" ></text>
+</g>
+<g >
+<title>Poco::DigestBuf::writeToDevice (1 samples, 1.61%)</title><rect x="219.4" y="453" width="19.0" height="15.0" fill="rgb(219,31,34)" rx="2" ry="2" />
+<text  x="222.35" y="463.5" ></text>
+</g>
+<g >
+<title>vcl::font::PhysicalFontCollection::GetGlyphFallbackFont (1 samples, 1.61%)</title><rect x="466.8" y="453" width="19.0" height="15.0" fill="rgb(212,62,45)" rx="2" ry="2" />
+<text  x="469.77" y="463.5" ></text>
+</g>
+<g >
+<title>svx::theme::notifyKit (1 samples, 1.61%)</title><rect x="428.7" y="485" width="19.0" height="15.0" fill="rgb(205,213,16)" rx="2" ry="2" />
+<text  x="431.71" y="495.5" ></text>
+</g>
+<g >
+<title>SdXMLStylesContext::SetMasterPageStyles (1 samples, 1.61%)</title><rect x="1113.9" y="261" width="19.0" height="15.0" fill="rgb(213,21,2)" rx="2" ry="2" />
+<text  x="1116.87" y="271.5" ></text>
+</g>
+<g >
+<title>osl::systemPathMakeAbsolutePath (1 samples, 1.61%)</title><rect x="428.7" y="405" width="19.0" height="15.0" fill="rgb(233,213,8)" rx="2" ry="2" />
+<text  x="431.71" y="415.5" ></text>
+</g>
+<g >
+<title>inflateBackEnd (2 samples, 3.23%)</title><rect x="1018.7" y="309" width="38.1" height="15.0" fill="rgb(249,42,30)" rx="2" ry="2" />
+<text  x="1021.71" y="319.5" >inf..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="219.4" y="405" width="19.0" height="15.0" fill="rgb(230,45,25)" rx="2" ry="2" />
+<text  x="222.35" y="415.5" ></text>
+</g>
+<g >
+<title>StreamSocket::handlePoll (1 samples, 1.61%)</title><rect x="67.1" y="549" width="19.0" height="15.0" fill="rgb(239,109,47)" rx="2" ry="2" />
+<text  x="70.10" y="559.5" ></text>
+</g>
+<g >
+<title>OutputDevice::GetTextArray (1 samples, 1.61%)</title><rect x="885.5" y="405" width="19.0" height="15.0" fill="rgb(247,218,0)" rx="2" ry="2" />
+<text  x="888.48" y="415.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::updateStorageLockState (3 samples, 4.84%)</title><rect x="143.2" y="549" width="57.1" height="15.0" fill="rgb(219,180,51)" rx="2" ry="2" />
+<text  x="146.23" y="559.5" >Docume..</text>
+</g>
+<g >
+<title>XMLReader::Read (1 samples, 1.61%)</title><rect x="504.8" y="661" width="19.1" height="15.0" fill="rgb(247,71,22)" rx="2" ry="2" />
+<text  x="507.84" y="671.5" ></text>
+</g>
+<g >
+<title>tls_default_read_n (2 samples, 3.23%)</title><rect x="314.5" y="549" width="38.1" height="15.0" fill="rgb(254,205,54)" rx="2" ry="2" />
+<text  x="317.52" y="559.5" >tls..</text>
+</g>
+<g >
+<title>SdStyleSheet::getPropertyValue_Impl (1 samples, 1.61%)</title><rect x="828.4" y="581" width="19.0" height="15.0" fill="rgb(254,40,46)" rx="2" ry="2" />
+<text  x="831.39" y="591.5" ></text>
+</g>
+<g >
+<title>SfxBaseModel::load (1 samples, 1.61%)</title><rect x="714.2" y="613" width="19.0" height="15.0" fill="rgb(223,206,17)" rx="2" ry="2" />
+<text  x="717.19" y="623.5" ></text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (3 samples, 4.84%)</title><rect x="733.2" y="469" width="57.1" height="15.0" fill="rgb(239,106,33)" rx="2" ry="2" />
+<text  x="736.23" y="479.5" >sax_fa..</text>
+</g>
+<g >
+<title>DocumentBroker::sendHttpSyncRequest (2 samples, 3.23%)</title><rect x="10.0" y="533" width="38.1" height="15.0" fill="rgb(251,142,21)" rx="2" ry="2" />
+<text  x="13.00" y="543.5" >Doc..</text>
+</g>
+<g >
+<title>SocketPoll::pollingThreadEntry (3 samples, 4.84%)</title><rect x="1132.9" y="629" width="57.1" height="15.0" fill="rgb(217,211,11)" rx="2" ry="2" />
+<text  x="1135.90" y="639.5" >Socket..</text>
+</g>
+<g >
+<title>sw::DocumentLayoutManager::CopyLayoutFormat (1 samples, 1.61%)</title><rect x="447.7" y="533" width="19.1" height="15.0" fill="rgb(254,138,2)" rx="2" ry="2" />
+<text  x="450.74" y="543.5" ></text>
+</g>
+<g >
+<title>SdPage::InsertAutoLayoutShape (1 samples, 1.61%)</title><rect x="980.6" y="501" width="19.1" height="15.0" fill="rgb(229,172,45)" rx="2" ry="2" />
+<text  x="983.65" y="511.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::forwardToClient (3 samples, 4.84%)</title><rect x="86.1" y="645" width="57.1" height="15.0" fill="rgb(231,108,33)" rx="2" ry="2" />
+<text  x="89.13" y="655.5" >Docume..</text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContactOfSdrPage::getPrimitive2DSequenceHierarchy (1 samples, 1.61%)</title><rect x="523.9" y="549" width="19.0" height="15.0" fill="rgb(232,136,54)" rx="2" ry="2" />
+<text  x="526.87" y="559.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::parseStream (3 samples, 4.84%)</title><rect x="657.1" y="517" width="57.1" height="15.0" fill="rgb(242,183,1)" rx="2" ry="2" />
+<text  x="660.10" y="527.5" >SvXMLI..</text>
+</g>
+<g >
+<title>SdXMLBodyContext::createFastChildContext (1 samples, 1.61%)</title><rect x="752.3" y="437" width="19.0" height="15.0" fill="rgb(217,76,1)" rx="2" ry="2" />
+<text  x="755.26" y="447.5" ></text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (3 samples, 4.84%)</title><rect x="657.1" y="645" width="57.1" height="15.0" fill="rgb(219,58,50)" rx="2" ry="2" />
+<text  x="660.10" y="655.5" >framew..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 4.84%)</title><rect x="1056.8" y="309" width="57.1" height="15.0" fill="rgb(217,162,6)" rx="2" ry="2" />
+<text  x="1059.77" y="319.5" >handle..</text>
+</g>
+<g >
+<title>framework::LoadEnv::startLoading (1 samples, 1.61%)</title><rect x="714.2" y="661" width="19.0" height="15.0" fill="rgb(206,189,37)" rx="2" ry="2" />
+<text  x="717.19" y="671.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::lockIfEditing (3 samples, 4.84%)</title><rect x="86.1" y="597" width="57.1" height="15.0" fill="rgb(245,49,37)" rx="2" ry="2" />
+<text  x="89.13" y="607.5" >Docume..</text>
+</g>
+<g >
+<title>Scheduler::CallbackTaskScheduling (1 samples, 1.61%)</title><rect x="1113.9" y="501" width="19.0" height="15.0" fill="rgb(232,104,29)" rx="2" ry="2" />
+<text  x="1116.87" y="511.5" ></text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::getPrimitive2DSequenceHierarchy (1 samples, 1.61%)</title><rect x="999.7" y="485" width="19.0" height="15.0" fill="rgb(251,183,51)" rx="2" ry="2" />
+<text  x="1002.68" y="495.5" ></text>
+</g>
+<g >
+<title>SocketPoll::poll (2 samples, 3.23%)</title><rect x="10.0" y="485" width="38.1" height="15.0" fill="rgb(236,74,41)" rx="2" ry="2" />
+<text  x="13.00" y="495.5" >Soc..</text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 3.23%)</title><rect x="1018.7" y="293" width="38.1" height="15.0" fill="rgb(211,164,32)" rx="2" ry="2" />
+<text  x="1021.71" y="303.5" >_IO..</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 4.84%)</title><rect x="561.9" y="277" width="57.1" height="15.0" fill="rgb(231,118,10)" rx="2" ry="2" />
+<text  x="564.94" y="287.5" >_IO_fu..</text>
+</g>
+<g >
+<title>SfxBaseModel::load (1 samples, 1.61%)</title><rect x="428.7" y="661" width="19.0" height="15.0" fill="rgb(205,221,49)" rx="2" ry="2" />
+<text  x="431.71" y="671.5" ></text>
+</g>
+<g >
+<title>oox::ppt::PowerPointImport::filter (1 samples, 1.61%)</title><rect x="542.9" y="517" width="19.0" height="15.0" fill="rgb(253,109,40)" rx="2" ry="2" />
+<text  x="545.90" y="527.5" ></text>
+</g>
+<g >
+<title>doc_setPartImpl (3 samples, 4.84%)</title><rect x="1056.8" y="437" width="57.1" height="15.0" fill="rgb(230,67,41)" rx="2" ry="2" />
+<text  x="1059.77" y="447.5" >doc_se..</text>
+</g>
+<g >
+<title>SdGRFFilter::Export (1 samples, 1.61%)</title><rect x="409.7" y="517" width="19.0" height="15.0" fill="rgb(238,172,31)" rx="2" ry="2" />
+<text  x="412.68" y="527.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="961.6" y="357" width="19.0" height="15.0" fill="rgb(219,215,25)" rx="2" ry="2" />
+<text  x="964.61" y="367.5" ></text>
+</g>
+<g >
+<title>SwAttrIter::InitFontAndAttrHandler (1 samples, 1.61%)</title><rect x="485.8" y="581" width="19.0" height="15.0" fill="rgb(220,88,44)" rx="2" ry="2" />
+<text  x="488.81" y="591.5" ></text>
+</g>
+<g >
+<title>Outliner::ImpCalcBulletArea (1 samples, 1.61%)</title><rect x="942.6" y="373" width="19.0" height="15.0" fill="rgb(254,152,14)" rx="2" ry="2" />
+<text  x="945.58" y="383.5" ></text>
+</g>
+<g >
+<title>all (62 samples, 100%)</title><rect x="10.0" y="709" width="1180.0" height="15.0" fill="rgb(210,36,23)" rx="2" ry="2" />
+<text  x="13.00" y="719.5" ></text>
+</g>
+<g >
+<title>framework::LoadEnv::start (3 samples, 4.84%)</title><rect x="733.2" y="597" width="57.1" height="15.0" fill="rgb(232,0,35)" rx="2" ry="2" />
+<text  x="736.23" y="607.5" >framew..</text>
+</g>
+<g >
+<title>std::condition_variable::wait (1 samples, 1.61%)</title><rect x="638.1" y="245" width="19.0" height="15.0" fill="rgb(207,109,26)" rx="2" ry="2" />
+<text  x="641.06" y="255.5" ></text>
+</g>
+<g >
+<title>framework::LoadEnv::start (1 samples, 1.61%)</title><rect x="714.2" y="645" width="19.0" height="15.0" fill="rgb(251,63,17)" rx="2" ry="2" />
+<text  x="717.19" y="655.5" ></text>
+</g>
+<g >
+<title>http::Session::syncRequest (2 samples, 3.23%)</title><rect x="10.0" y="517" width="38.1" height="15.0" fill="rgb(221,181,21)" rx="2" ry="2" />
+<text  x="13.00" y="527.5" >htt..</text>
+</g>
+<g >
+<title>rtl_string2UString_status (1 samples, 1.61%)</title><rect x="619.0" y="357" width="19.1" height="15.0" fill="rgb(231,69,11)" rx="2" ry="2" />
+<text  x="622.03" y="367.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="638.1" y="213" width="19.0" height="15.0" fill="rgb(207,212,4)" rx="2" ry="2" />
+<text  x="641.06" y="223.5" ></text>
+</g>
+<g >
+<title>SdXMLFilter::Import (1 samples, 1.61%)</title><rect x="428.7" y="597" width="19.0" height="15.0" fill="rgb(224,202,26)" rx="2" ry="2" />
+<text  x="431.71" y="607.5" ></text>
+</g>
+<g >
+<title>sd::DrawDocShell::Load (1 samples, 1.61%)</title><rect x="428.7" y="613" width="19.0" height="15.0" fill="rgb(240,181,4)" rx="2" ry="2" />
+<text  x="431.71" y="623.5" ></text>
+</g>
+<g >
+<title>Outliner::ImplGetBulletSize (1 samples, 1.61%)</title><rect x="923.5" y="421" width="19.1" height="15.0" fill="rgb(222,136,19)" rx="2" ry="2" />
+<text  x="926.55" y="431.5" ></text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 1.61%)</title><rect x="504.8" y="629" width="19.1" height="15.0" fill="rgb(248,22,21)" rx="2" ry="2" />
+<text  x="507.84" y="639.5" ></text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::getPrimitive2DSequenceSubHierarchy (1 samples, 1.61%)</title><rect x="999.7" y="517" width="19.0" height="15.0" fill="rgb(244,150,3)" rx="2" ry="2" />
+<text  x="1002.68" y="527.5" ></text>
+</g>
+<g >
+<title>FcLangSetHasLang (1 samples, 1.61%)</title><rect x="466.8" y="341" width="19.0" height="15.0" fill="rgb(225,85,52)" rx="2" ry="2" />
+<text  x="469.77" y="351.5" ></text>
+</g>
+<g >
+<title>oox::ppt::PresentationFragmentHandler::importMasterSlide (1 samples, 1.61%)</title><rect x="542.9" y="341" width="19.0" height="15.0" fill="rgb(208,66,28)" rx="2" ry="2" />
+<text  x="545.90" y="351.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="885.5" y="245" width="19.0" height="15.0" fill="rgb(229,83,35)" rx="2" ry="2" />
+<text  x="888.48" y="255.5" ></text>
+</g>
+<g >
+<title>ossl_gcm_stream_update (4 samples, 6.45%)</title><rect x="238.4" y="517" width="76.1" height="15.0" fill="rgb(224,189,35)" rx="2" ry="2" />
+<text  x="241.39" y="527.5" >ossl_gcm..</text>
+</g>
+<g >
+<title>ClientSession::handleOpenDocKitToClientMessage (3 samples, 4.84%)</title><rect x="86.1" y="613" width="57.1" height="15.0" fill="rgb(219,51,49)" rx="2" ry="2" />
+<text  x="89.13" y="623.5" >Client..</text>
+</g>
+<g >
+<title>ImpEditEngine::GetAttribs (1 samples, 1.61%)</title><rect x="923.5" y="373" width="19.1" height="15.0" fill="rgb(207,205,21)" rx="2" ry="2" />
+<text  x="926.55" y="383.5" ></text>
+</g>
+<g >
+<title>SdrTextObj::IsAutoGrowWidth (1 samples, 1.61%)</title><rect x="1113.9" y="117" width="19.0" height="15.0" fill="rgb(208,7,52)" rx="2" ry="2" />
+<text  x="1116.87" y="127.5" ></text>
+</g>
+<g >
+<title>ImpGraphic::getVectorGraphicData (1 samples, 1.61%)</title><rect x="999.7" y="341" width="19.0" height="15.0" fill="rgb(215,21,27)" rx="2" ry="2" />
+<text  x="1002.68" y="351.5" ></text>
+</g>
+<g >
+<title>SwTextBoxNode::GetTextBox (1 samples, 1.61%)</title><rect x="447.7" y="437" width="19.1" height="15.0" fill="rgb(254,8,16)" rx="2" ry="2" />
+<text  x="450.74" y="447.5" ></text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 1.61%)</title><rect x="542.9" y="453" width="19.0" height="15.0" fill="rgb(217,196,48)" rx="2" ry="2" />
+<text  x="545.90" y="463.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::startFastElement (2 samples, 3.23%)</title><rect x="752.3" y="453" width="38.0" height="15.0" fill="rgb(242,135,20)" rx="2" ry="2" />
+<text  x="755.26" y="463.5" >SvX..</text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="504.8" y="453" width="19.1" height="15.0" fill="rgb(215,158,38)" rx="2" ry="2" />
+<text  x="507.84" y="463.5" ></text>
+</g>
+<g >
+<title>framework::LoadEnv::start (1 samples, 1.61%)</title><rect x="542.9" y="613" width="19.0" height="15.0" fill="rgb(215,206,17)" rx="2" ry="2" />
+<text  x="545.90" y="623.5" ></text>
+</g>
+<g >
+<title>desktop::Desktop::Main (4 samples, 6.45%)</title><rect x="1056.8" y="597" width="76.1" height="15.0" fill="rgb(232,33,47)" rx="2" ry="2" />
+<text  x="1059.77" y="607.5" >desktop:..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="885.5" y="277" width="19.0" height="15.0" fill="rgb(230,211,12)" rx="2" ry="2" />
+<text  x="888.48" y="287.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="352.6" y="373" width="19.0" height="15.0" fill="rgb(239,186,43)" rx="2" ry="2" />
+<text  x="355.58" y="383.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="828.4" y="485" width="19.0" height="15.0" fill="rgb(226,90,42)" rx="2" ry="2" />
+<text  x="831.39" y="495.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="942.6" y="197" width="19.0" height="15.0" fill="rgb(217,126,47)" rx="2" ry="2" />
+<text  x="945.58" y="207.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="771.3" y="277" width="19.0" height="15.0" fill="rgb(221,67,12)" rx="2" ry="2" />
+<text  x="774.29" y="287.5" ></text>
+</g>
+<g >
+<title>SdDrawPagesAccess::insertNewByIndex (1 samples, 1.61%)</title><rect x="619.0" y="453" width="19.1" height="15.0" fill="rgb(224,206,53)" rx="2" ry="2" />
+<text  x="622.03" y="463.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::endFastElement (1 samples, 1.61%)</title><rect x="428.7" y="549" width="19.0" height="15.0" fill="rgb(227,25,9)" rx="2" ry="2" />
+<text  x="431.71" y="559.5" ></text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 1.61%)</title><rect x="638.1" y="309" width="19.0" height="15.0" fill="rgb(229,55,45)" rx="2" ry="2" />
+<text  x="641.06" y="319.5" ></text>
+</g>
+<g >
+<title>SdXMLShapeContext::AddShape (1 samples, 1.61%)</title><rect x="714.2" y="453" width="19.0" height="15.0" fill="rgb(247,122,11)" rx="2" ry="2" />
+<text  x="717.19" y="463.5" ></text>
+</g>
+<g >
+<title>malloc (3 samples, 4.84%)</title><rect x="657.1" y="245" width="57.1" height="15.0" fill="rgb(237,97,12)" rx="2" ry="2" />
+<text  x="660.10" y="255.5" >malloc</text>
+</g>
+<g >
+<title>ImpEditEngine::CreateLines (4 samples, 6.45%)</title><rect x="847.4" y="501" width="76.1" height="15.0" fill="rgb(250,180,52)" rx="2" ry="2" />
+<text  x="850.42" y="511.5" >ImpEditE..</text>
+</g>
+<g >
+<title>BIO_read (2 samples, 3.23%)</title><rect x="314.5" y="533" width="38.1" height="15.0" fill="rgb(223,141,40)" rx="2" ry="2" />
+<text  x="317.52" y="543.5" >BIO..</text>
+</g>
+<g >
+<title>SdrTextObj::AdjustTextFrameWidthAndHeight (1 samples, 1.61%)</title><rect x="1113.9" y="165" width="19.0" height="15.0" fill="rgb(234,30,10)" rx="2" ry="2" />
+<text  x="1116.87" y="175.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::parseStream (3 samples, 4.84%)</title><rect x="561.9" y="533" width="57.1" height="15.0" fill="rgb(223,197,51)" rx="2" ry="2" />
+<text  x="564.94" y="543.5" >SvXMLI..</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatAndLayout (4 samples, 6.45%)</title><rect x="847.4" y="549" width="76.1" height="15.0" fill="rgb(245,59,28)" rx="2" ry="2" />
+<text  x="850.42" y="559.5" >ImpEditE..</text>
+</g>
+<g >
+<title>syscall (3 samples, 4.84%)</title><rect x="1056.8" y="293" width="57.1" height="15.0" fill="rgb(230,218,27)" rx="2" ry="2" />
+<text  x="1059.77" y="303.5" >syscall</text>
+</g>
+<g >
+<title>SdXMLFilter::Import (1 samples, 1.61%)</title><rect x="980.6" y="645" width="19.1" height="15.0" fill="rgb(246,134,14)" rx="2" ry="2" />
+<text  x="983.65" y="655.5" ></text>
+</g>
+<g >
+<title>DocumentBroker::removeSession (3 samples, 4.84%)</title><rect x="143.2" y="581" width="57.1" height="15.0" fill="rgb(237,125,29)" rx="2" ry="2" />
+<text  x="146.23" y="591.5" >Docume..</text>
+</g>
+<g >
+<title>remotefontconfi (3 samples, 4.84%)</title><rect x="1132.9" y="693" width="57.1" height="15.0" fill="rgb(242,76,8)" rx="2" ry="2" />
+<text  x="1135.90" y="703.5" >remote..</text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (1 samples, 1.61%)</title><rect x="542.9" y="565" width="19.0" height="15.0" fill="rgb(208,111,10)" rx="2" ry="2" />
+<text  x="545.90" y="575.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="523.9" y="245" width="19.0" height="15.0" fill="rgb(238,225,46)" rx="2" ry="2" />
+<text  x="526.87" y="255.5" ></text>
+</g>
+<g >
+<title>OutputDevice::GetTextArray (1 samples, 1.61%)</title><rect x="790.3" y="293" width="19.1" height="15.0" fill="rgb(248,101,31)" rx="2" ry="2" />
+<text  x="793.32" y="303.5" ></text>
+</g>
+<g >
+<title>Outliner::CreateParaObject (1 samples, 1.61%)</title><rect x="980.6" y="373" width="19.1" height="15.0" fill="rgb(210,80,9)" rx="2" ry="2" />
+<text  x="983.65" y="383.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::parseStream (3 samples, 4.84%)</title><rect x="733.2" y="485" width="57.1" height="15.0" fill="rgb(243,210,39)" rx="2" ry="2" />
+<text  x="736.23" y="495.5" >SvXMLI..</text>
+</g>
+<g >
+<title>kitbroker (40 samples, 64.52%)</title><rect x="371.6" y="693" width="761.3" height="15.0" fill="rgb(254,189,5)" rx="2" ry="2" />
+<text  x="374.61" y="703.5" >kitbroker</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="542.9" y="181" width="19.0" height="15.0" fill="rgb(221,8,24)" rx="2" ry="2" />
+<text  x="545.90" y="191.5" ></text>
+</g>
+<g >
+<title>non-virtual thunk to SdStyleSheet::Notify (2 samples, 3.23%)</title><rect x="942.6" y="517" width="38.0" height="15.0" fill="rgb(226,138,35)" rx="2" ry="2" />
+<text  x="945.58" y="527.5" >non..</text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;unsigned short, std::pair&lt;unsigned short const, SfxPoolItem const*&gt;, std::allocator&lt;std::pair&lt;unsigned short const, SfxPoolItem const*&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;unsigned short&gt;, std::hash&lt;unsigned short&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt;, true&gt;::operator[] (1 samples, 1.61%)</title><rect x="828.4" y="549" width="19.0" height="15.0" fill="rgb(246,122,4)" rx="2" ry="2" />
+<text  x="831.39" y="559.5" ></text>
+</g>
+<g >
+<title>SfxBroadcaster::Broadcast (1 samples, 1.61%)</title><rect x="1113.9" y="213" width="19.0" height="15.0" fill="rgb(239,6,13)" rx="2" ry="2" />
+<text  x="1116.87" y="223.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (1 samples, 1.61%)</title><rect x="428.7" y="645" width="19.0" height="15.0" fill="rgb(234,46,1)" rx="2" ry="2" />
+<text  x="431.71" y="655.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 3.23%)</title><rect x="1018.7" y="277" width="38.1" height="15.0" fill="rgb(218,160,36)" rx="2" ry="2" />
+<text  x="1021.71" y="287.5" >han..</text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::getPrimitive2DSequenceHierarchy (2 samples, 3.23%)</title><rect x="1018.7" y="597" width="38.1" height="15.0" fill="rgb(232,17,53)" rx="2" ry="2" />
+<text  x="1021.71" y="607.5" >sdr..</text>
+</g>
+<g >
+<title>std::_Sp_counted_ptr_inplace&lt;oox::core::FragmentBaseData, std::allocator&lt;void&gt;,  (1 samples, 1.61%)</title><rect x="542.9" y="213" width="19.0" height="15.0" fill="rgb(205,148,35)" rx="2" ry="2" />
+<text  x="545.90" y="223.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="847.4" y="357" width="19.1" height="15.0" fill="rgb(225,101,39)" rx="2" ry="2" />
+<text  x="850.42" y="367.5" ></text>
+</g>
+<g >
+<title>framework::LoadEnv::loadComponentFromURL (2 samples, 3.23%)</title><rect x="619.0" y="661" width="38.1" height="15.0" fill="rgb(253,218,5)" rx="2" ry="2" />
+<text  x="622.03" y="671.5" >fra..</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatDoc (1 samples, 1.61%)</title><rect x="790.3" y="421" width="19.1" height="15.0" fill="rgb(234,123,5)" rx="2" ry="2" />
+<text  x="793.32" y="431.5" ></text>
+</g>
+<g >
+<title>SwDoc::CopyPageDescHeaderFooterImpl (1 samples, 1.61%)</title><rect x="447.7" y="629" width="19.1" height="15.0" fill="rgb(206,173,3)" rx="2" ry="2" />
+<text  x="450.74" y="639.5" ></text>
+</g>
+<g >
+<title>Poco::SHA1Engine::transform (1 samples, 1.61%)</title><rect x="219.4" y="421" width="19.0" height="15.0" fill="rgb(233,136,41)" rx="2" ry="2" />
+<text  x="222.35" y="431.5" ></text>
+</g>
+<g >
+<title>drawinglayer::processor2d::BaseProcessor2D::process (2 samples, 3.23%)</title><rect x="1018.7" y="517" width="38.1" height="15.0" fill="rgb(223,195,40)" rx="2" ry="2" />
+<text  x="1021.71" y="527.5" >dra..</text>
+</g>
+<g >
+<title>SwAttrHandler::Init (1 samples, 1.61%)</title><rect x="485.8" y="565" width="19.0" height="15.0" fill="rgb(241,159,35)" rx="2" ry="2" />
+<text  x="488.81" y="575.5" ></text>
+</g>
+<g >
+<title>framework::LoadEnv::startLoading (1 samples, 1.61%)</title><rect x="542.9" y="629" width="19.0" height="15.0" fill="rgb(247,223,3)" rx="2" ry="2" />
+<text  x="545.90" y="639.5" ></text>
+</g>
+<g >
+<title>ppoll (1 samples, 1.61%)</title><rect x="48.1" y="517" width="19.0" height="15.0" fill="rgb(251,49,54)" rx="2" ry="2" />
+<text  x="51.06" y="527.5" ></text>
+</g>
+<g >
+<title>SfxBroadcaster::Broadcast (7 samples, 11.29%)</title><rect x="847.4" y="597" width="133.2" height="15.0" fill="rgb(210,220,41)" rx="2" ry="2" />
+<text  x="850.42" y="607.5" >SfxBroadcaster::..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 1.61%)</title><rect x="638.1" y="277" width="19.0" height="15.0" fill="rgb(220,173,36)" rx="2" ry="2" />
+<text  x="641.06" y="287.5" ></text>
+</g>
+<g >
+<title>WopiStorage::updateLockState (3 samples, 4.84%)</title><rect x="143.2" y="533" width="57.1" height="15.0" fill="rgb(242,36,36)" rx="2" ry="2" />
+<text  x="146.23" y="543.5" >WopiSt..</text>
+</g>
+<g >
+<title>SdXMLFilter::Import (1 samples, 1.61%)</title><rect x="714.2" y="549" width="19.0" height="15.0" fill="rgb(250,65,37)" rx="2" ry="2" />
+<text  x="717.19" y="559.5" ></text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::checkForPrimitive2DAnimations (2 samples, 3.23%)</title><rect x="1018.7" y="565" width="38.1" height="15.0" fill="rgb(205,166,29)" rx="2" ry="2" />
+<text  x="1021.71" y="575.5" >sdr..</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatParagraphs (1 samples, 1.61%)</title><rect x="790.3" y="405" width="19.1" height="15.0" fill="rgb(207,88,44)" rx="2" ry="2" />
+<text  x="793.32" y="415.5" ></text>
+</g>
+<g >
+<title>SfxApplication::LoadTemplate (1 samples, 1.61%)</title><rect x="1113.9" y="405" width="19.0" height="15.0" fill="rgb(229,39,6)" rx="2" ry="2" />
+<text  x="1116.87" y="415.5" ></text>
+</g>
+<g >
+<title>hb_shape_plan_create_cached2 (1 samples, 1.61%)</title><rect x="885.5" y="325" width="19.0" height="15.0" fill="rgb(224,94,41)" rx="2" ry="2" />
+<text  x="888.48" y="335.5" ></text>
+</g>
+<g >
+<title>SdrPageWindow::RedrawAll (1 samples, 1.61%)</title><rect x="523.9" y="581" width="19.0" height="15.0" fill="rgb(242,105,39)" rx="2" ry="2" />
+<text  x="526.87" y="591.5" ></text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (1 samples, 1.61%)</title><rect x="619.0" y="501" width="19.1" height="15.0" fill="rgb(211,58,44)" rx="2" ry="2" />
+<text  x="622.03" y="511.5" ></text>
+</g>
+<g >
+<title>CalcAutoLayoutRectangles (1 samples, 1.61%)</title><rect x="619.0" y="405" width="19.1" height="15.0" fill="rgb(238,132,45)" rx="2" ry="2" />
+<text  x="622.03" y="415.5" ></text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::getPrimitive2DSequenceSubHierarchy (2 samples, 3.23%)</title><rect x="1018.7" y="613" width="38.1" height="15.0" fill="rgb(208,115,22)" rx="2" ry="2" />
+<text  x="1021.71" y="623.5" >sdr..</text>
+</g>
+<g >
+<title>SvXMLImportPropertyMapper::FillPropertySet (3 samples, 4.84%)</title><rect x="561.9" y="389" width="57.1" height="15.0" fill="rgb(243,72,30)" rx="2" ry="2" />
+<text  x="564.94" y="399.5" >SvXMLI..</text>
+</g>
+<g >
+<title>SdrTextObj::AdaptTextMinSize (1 samples, 1.61%)</title><rect x="980.6" y="437" width="19.1" height="15.0" fill="rgb(216,9,37)" rx="2" ry="2" />
+<text  x="983.65" y="447.5" ></text>
+</g>
+<g >
+<title>GraphicFilter::ImportUnloadedGraphic (1 samples, 1.61%)</title><rect x="771.3" y="373" width="19.0" height="15.0" fill="rgb(229,41,39)" rx="2" ry="2" />
+<text  x="774.29" y="383.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="48.1" y="501" width="19.0" height="15.0" fill="rgb(252,222,36)" rx="2" ry="2" />
+<text  x="51.06" y="511.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::SaveTo_Impl (2 samples, 3.23%)</title><rect x="390.6" y="549" width="38.1" height="15.0" fill="rgb(218,24,8)" rx="2" ry="2" />
+<text  x="393.65" y="559.5" >Sfx..</text>
+</g>
+<g >
+<title>SdXMLMasterPageContext::endFastElement (1 samples, 1.61%)</title><rect x="1113.9" y="277" width="19.0" height="15.0" fill="rgb(222,70,43)" rx="2" ry="2" />
+<text  x="1116.87" y="287.5" ></text>
+</g>
+<g >
+<title>ScXMLImport::SetStyleToRanges (3 samples, 4.84%)</title><rect x="657.1" y="389" width="57.1" height="15.0" fill="rgb(227,61,11)" rx="2" ry="2" />
+<text  x="660.10" y="399.5" >ScXMLI..</text>
+</g>
+<g >
+<title>ScMultiSel::Set (3 samples, 4.84%)</title><rect x="657.1" y="309" width="57.1" height="15.0" fill="rgb(241,115,31)" rx="2" ry="2" />
+<text  x="660.10" y="319.5" >ScMult..</text>
+</g>
+<g >
+<title>OutputDevice::ImplLayout (1 samples, 1.61%)</title><rect x="942.6" y="277" width="19.0" height="15.0" fill="rgb(230,62,15)" rx="2" ry="2" />
+<text  x="945.58" y="287.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Prime_rehash_policy::_M_need_rehash (1 samples, 1.61%)</title><rect x="828.4" y="533" width="19.0" height="15.0" fill="rgb(252,213,54)" rx="2" ry="2" />
+<text  x="831.39" y="543.5" ></text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (1 samples, 1.61%)</title><rect x="542.9" y="437" width="19.0" height="15.0" fill="rgb(236,138,16)" rx="2" ry="2" />
+<text  x="545.90" y="447.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="752.3" y="245" width="19.0" height="15.0" fill="rgb(215,85,46)" rx="2" ry="2" />
+<text  x="755.26" y="255.5" ></text>
+</g>
+<g >
+<title>ScCellRangesBase::SetOnePropertyValue (3 samples, 4.84%)</title><rect x="561.9" y="341" width="57.1" height="15.0" fill="rgb(216,184,12)" rx="2" ry="2" />
+<text  x="564.94" y="351.5" >ScCell..</text>
+</g>
+<g >
+<title>oox::core::FragmentHandler2::FragmentHandler2 (1 samples, 1.61%)</title><rect x="542.9" y="293" width="19.0" height="15.0" fill="rgb(230,98,54)" rx="2" ry="2" />
+<text  x="545.90" y="303.5" ></text>
+</g>
+<g >
+<title>SvpSalInstance::CheckTimeout (1 samples, 1.61%)</title><rect x="1113.9" y="517" width="19.0" height="15.0" fill="rgb(215,199,28)" rx="2" ry="2" />
+<text  x="1116.87" y="527.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="809.4" y="565" width="19.0" height="15.0" fill="rgb(210,132,33)" rx="2" ry="2" />
+<text  x="812.35" y="575.5" ></text>
+</g>
+<g >
+<title>ImpEditEngine::FormatDoc (1 samples, 1.61%)</title><rect x="942.6" y="437" width="19.0" height="15.0" fill="rgb(239,81,38)" rx="2" ry="2" />
+<text  x="945.58" y="447.5" ></text>
+</g>
+<g >
+<title>sd::DrawDocShell::Load (1 samples, 1.61%)</title><rect x="619.0" y="549" width="19.1" height="15.0" fill="rgb(242,76,22)" rx="2" ry="2" />
+<text  x="622.03" y="559.5" ></text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 1.61%)</title><rect x="542.9" y="469" width="19.0" height="15.0" fill="rgb(242,157,41)" rx="2" ry="2" />
+<text  x="545.90" y="479.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="200.3" y="469" width="19.1" height="15.0" fill="rgb(210,44,14)" rx="2" ry="2" />
+<text  x="203.32" y="479.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="428.7" y="341" width="19.0" height="15.0" fill="rgb(214,189,46)" rx="2" ry="2" />
+<text  x="431.71" y="351.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 4.84%)</title><rect x="86.1" y="453" width="57.1" height="15.0" fill="rgb(239,188,6)" rx="2" ry="2" />
+<text  x="89.13" y="463.5" >syscall</text>
+</g>
+<g >
+<title>__clone (3 samples, 4.84%)</title><rect x="1132.9" y="677" width="57.1" height="15.0" fill="rgb(210,35,36)" rx="2" ry="2" />
+<text  x="1135.90" y="687.5" >__clone</text>
+</g>
+<g >
+<title>SdXMLDrawPageContext::SdXMLDrawPageContext (1 samples, 1.61%)</title><rect x="980.6" y="565" width="19.1" height="15.0" fill="rgb(223,152,29)" rx="2" ry="2" />
+<text  x="983.65" y="575.5" ></text>
+</g>
+<g >
+<title>EditEngine::GetAttribs (2 samples, 3.23%)</title><rect x="847.4" y="421" width="38.1" height="15.0" fill="rgb(205,203,16)" rx="2" ry="2" />
+<text  x="850.42" y="431.5" >Edi..</text>
+</g>
+<g >
+<title>ppoll (3 samples, 4.84%)</title><rect x="1132.9" y="549" width="57.1" height="15.0" fill="rgb(249,166,46)" rx="2" ry="2" />
+<text  x="1135.90" y="559.5" >ppoll</text>
+</g>
+<g >
+<title>doc_paintPartTile.cold (3 samples, 4.84%)</title><rect x="1056.8" y="453" width="57.1" height="15.0" fill="rgb(235,81,51)" rx="2" ry="2" />
+<text  x="1059.77" y="463.5" >doc_pa..</text>
+</g>
+<g >
+<title>ImpGraphic::ensureAvailable (1 samples, 1.61%)</title><rect x="523.9" y="341" width="19.0" height="15.0" fill="rgb(207,28,49)" rx="2" ry="2" />
+<text  x="526.87" y="351.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="790.3" y="165" width="19.1" height="15.0" fill="rgb(215,29,35)" rx="2" ry="2" />
+<text  x="793.32" y="175.5" ></text>
+</g>
+<g >
+<title>SvpSalInstance::DoYield (4 samples, 6.45%)</title><rect x="1056.8" y="549" width="76.1" height="15.0" fill="rgb(223,107,33)" rx="2" ry="2" />
+<text  x="1059.77" y="559.5" >SvpSalIn..</text>
+</g>
+<g >
+<title>SocketPoll::poll (1 samples, 1.61%)</title><rect x="67.1" y="565" width="19.0" height="15.0" fill="rgb(233,38,13)" rx="2" ry="2" />
+<text  x="70.10" y="575.5" ></text>
+</g>
+<g >
+<title>GraphicFilter::ImportGraphic (2 samples, 3.23%)</title><rect x="1018.7" y="389" width="38.1" height="15.0" fill="rgb(228,57,47)" rx="2" ry="2" />
+<text  x="1021.71" y="399.5" >Gra..</text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="67.1" y="389" width="19.0" height="15.0" fill="rgb(237,50,24)" rx="2" ry="2" />
+<text  x="70.10" y="399.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="771.3" y="293" width="19.0" height="15.0" fill="rgb(212,72,24)" rx="2" ry="2" />
+<text  x="774.29" y="303.5" ></text>
+</g>
+<g >
+<title>SdXMLFilter::Import (1 samples, 1.61%)</title><rect x="619.0" y="533" width="19.1" height="15.0" fill="rgb(208,67,40)" rx="2" ry="2" />
+<text  x="622.03" y="543.5" ></text>
+</g>
+<g >
+<title>InnerYield (4 samples, 6.45%)</title><rect x="1056.8" y="565" width="76.1" height="15.0" fill="rgb(232,110,14)" rx="2" ry="2" />
+<text  x="1059.77" y="575.5" >InnerYield</text>
+</g>
+<g >
+<title>framework::LoadEnv::startLoading (2 samples, 3.23%)</title><rect x="619.0" y="645" width="38.1" height="15.0" fill="rgb(226,18,2)" rx="2" ry="2" />
+<text  x="622.03" y="655.5" >fra..</text>
+</g>
+<g >
+<title>DocumentBroker::DocumentBrokerPoll::pollingThread (1 samples, 1.61%)</title><rect x="352.6" y="613" width="19.0" height="15.0" fill="rgb(213,114,7)" rx="2" ry="2" />
+<text  x="355.58" y="623.5" ></text>
+</g>
+<g >
+<title>GraphicFilter::ImportGraphic (1 samples, 1.61%)</title><rect x="523.9" y="293" width="19.0" height="15.0" fill="rgb(247,209,42)" rx="2" ry="2" />
+<text  x="526.87" y="303.5" ></text>
+</g>
+<g >
+<title>OutputDevice::GetTextWidthDouble (1 samples, 1.61%)</title><rect x="790.3" y="309" width="19.1" height="15.0" fill="rgb(209,110,29)" rx="2" ry="2" />
+<text  x="793.32" y="319.5" ></text>
+</g>
+<g >
+<title>start_thread (3 samples, 4.84%)</title><rect x="1132.9" y="661" width="57.1" height="15.0" fill="rgb(205,98,39)" rx="2" ry="2" />
+<text  x="1135.90" y="671.5" >start_..</text>
+</g>
+<g >
+<title>ScMyStylesImportHelper::SetStylesToRanges (3 samples, 4.84%)</title><rect x="657.1" y="437" width="57.1" height="15.0" fill="rgb(220,91,32)" rx="2" ry="2" />
+<text  x="660.10" y="447.5" >ScMySt..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="733.2" y="357" width="19.1" height="15.0" fill="rgb(249,9,17)" rx="2" ry="2" />
+<text  x="736.23" y="367.5" ></text>
+</g>
+<g >
+<title>ScXMLImport::SetStyleToRanges (3 samples, 4.84%)</title><rect x="561.9" y="421" width="57.1" height="15.0" fill="rgb(235,103,39)" rx="2" ry="2" />
+<text  x="564.94" y="431.5" >ScXMLI..</text>
+</g>
+<g >
+<title>ssl3_read_bytes (6 samples, 9.68%)</title><rect x="238.4" y="597" width="114.2" height="15.0" fill="rgb(228,116,22)" rx="2" ry="2" />
+<text  x="241.39" y="607.5" >ssl3_read_bytes</text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="371.6" y="373" width="19.0" height="15.0" fill="rgb(205,164,25)" rx="2" ry="2" />
+<text  x="374.61" y="383.5" ></text>
+</g>
+<g >
+<title>std::ostream::write (1 samples, 1.61%)</title><rect x="352.6" y="469" width="19.0" height="15.0" fill="rgb(225,3,53)" rx="2" ry="2" />
+<text  x="355.58" y="479.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::parseStream (1 samples, 1.61%)</title><rect x="428.7" y="581" width="19.0" height="15.0" fill="rgb(247,79,19)" rx="2" ry="2" />
+<text  x="431.71" y="591.5" ></text>
+</g>
+<g >
+<title>[unknown] (19 samples, 30.65%)</title><rect x="10.0" y="677" width="361.6" height="15.0" fill="rgb(233,146,15)" rx="2" ry="2" />
+<text  x="13.00" y="687.5" >[unknown]</text>
+</g>
+<g >
+<title>ImpEditEngine::Notify (4 samples, 6.45%)</title><rect x="847.4" y="581" width="76.1" height="15.0" fill="rgb(230,188,54)" rx="2" ry="2" />
+<text  x="850.42" y="591.5" >ImpEditE..</text>
+</g>
+<g >
+<title>sdr::contact::ObjectContactOfPageView::DoProcessDisplay (1 samples, 1.61%)</title><rect x="523.9" y="565" width="19.0" height="15.0" fill="rgb(224,130,42)" rx="2" ry="2" />
+<text  x="526.87" y="575.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="942.6" y="213" width="19.0" height="15.0" fill="rgb(235,52,20)" rx="2" ry="2" />
+<text  x="945.58" y="223.5" ></text>
+</g>
+<g >
+<title>SwDoc::CopyPageDesc (1 samples, 1.61%)</title><rect x="447.7" y="645" width="19.1" height="15.0" fill="rgb(214,8,48)" rx="2" ry="2" />
+<text  x="450.74" y="655.5" ></text>
+</g>
+<g >
+<title>EditEngine::GetAttribs (1 samples, 1.61%)</title><rect x="923.5" y="389" width="19.1" height="15.0" fill="rgb(215,119,8)" rx="2" ry="2" />
+<text  x="926.55" y="399.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="980.6" y="213" width="19.1" height="15.0" fill="rgb(223,145,35)" rx="2" ry="2" />
+<text  x="983.65" y="223.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="523.9" y="261" width="19.0" height="15.0" fill="rgb(238,134,8)" rx="2" ry="2" />
+<text  x="526.87" y="271.5" ></text>
+</g>
+<g >
+<title>SfxBroadcaster::Forward (1 samples, 1.61%)</title><rect x="961.6" y="469" width="19.0" height="15.0" fill="rgb(231,188,54)" rx="2" ry="2" />
+<text  x="964.61" y="479.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="866.5" y="341" width="19.0" height="15.0" fill="rgb(212,61,25)" rx="2" ry="2" />
+<text  x="869.45" y="351.5" ></text>
+</g>
+<g >
+<title>RequestVettingStation::createClientSession (2 samples, 3.23%)</title><rect x="10.0" y="597" width="38.1" height="15.0" fill="rgb(215,97,47)" rx="2" ry="2" />
+<text  x="13.00" y="607.5" >Req..</text>
+</g>
+<g >
+<title>sd::PreviewRenderer::RenderPage (1 samples, 1.61%)</title><rect x="999.7" y="645" width="19.0" height="15.0" fill="rgb(236,11,41)" rx="2" ry="2" />
+<text  x="1002.68" y="655.5" ></text>
+</g>
+<g >
+<title>drawinglayer::processor2d::BaseProcessor2D::process (1 samples, 1.61%)</title><rect x="999.7" y="437" width="19.0" height="15.0" fill="rgb(229,131,13)" rx="2" ry="2" />
+<text  x="1002.68" y="447.5" ></text>
+</g>
+<g >
+<title>Outliner::ImpCalcBulletFont (1 samples, 1.61%)</title><rect x="923.5" y="405" width="19.1" height="15.0" fill="rgb(237,154,41)" rx="2" ry="2" />
+<text  x="926.55" y="415.5" ></text>
+</g>
+<g >
+<title>SfxItemSet::Get (1 samples, 1.61%)</title><rect x="866.5" y="389" width="19.0" height="15.0" fill="rgb(236,166,22)" rx="2" ry="2" />
+<text  x="869.45" y="399.5" ></text>
+</g>
+<g >
+<title>Poco::SHA1Engine::updateImpl (1 samples, 1.61%)</title><rect x="352.6" y="405" width="19.0" height="15.0" fill="rgb(251,50,53)" rx="2" ry="2" />
+<text  x="355.58" y="415.5" ></text>
+</g>
+<g >
+<title>bread_conv (2 samples, 3.23%)</title><rect x="314.5" y="517" width="38.1" height="15.0" fill="rgb(235,25,17)" rx="2" ry="2" />
+<text  x="317.52" y="527.5" >bre..</text>
+</g>
+<g >
+<title>XMLTextStyleContext::Finish (1 samples, 1.61%)</title><rect x="504.8" y="581" width="19.1" height="15.0" fill="rgb(215,227,3)" rx="2" ry="2" />
+<text  x="507.84" y="591.5" ></text>
+</g>
+<g >
+<title>i18nutil::(anonymous namespace)::GreedyScriptChangeScanner::AdvanceOnce (1 samples, 1.61%)</title><rect x="980.6" y="261" width="19.1" height="15.0" fill="rgb(220,189,31)" rx="2" ry="2" />
+<text  x="983.65" y="271.5" ></text>
+</g>
+<g >
+<title>SfxObjectShell::CommonSaveAs_Impl (2 samples, 3.23%)</title><rect x="390.6" y="581" width="38.1" height="15.0" fill="rgb(233,53,17)" rx="2" ry="2" />
+<text  x="393.65" y="591.5" >Sfx..</text>
+</g>
+<g >
+<title>SwTextBoxNode::Clone (1 samples, 1.61%)</title><rect x="447.7" y="581" width="19.1" height="15.0" fill="rgb(240,209,14)" rx="2" ry="2" />
+<text  x="450.74" y="591.5" ></text>
+</g>
+<g >
+<title>Poco::BasicBufferedStreamBuf&lt;char, std::char_traits&lt;char&gt;, Poco::BufferAllocator&lt;char&gt; &gt;::overflow (1 samples, 1.61%)</title><rect x="352.6" y="437" width="19.0" height="15.0" fill="rgb(219,142,12)" rx="2" ry="2" />
+<text  x="355.58" y="447.5" ></text>
+</g>
+<g >
+<title>SdGenericDrawPage::CreateSdrObject_ (1 samples, 1.61%)</title><rect x="714.2" y="389" width="19.0" height="15.0" fill="rgb(253,103,36)" rx="2" ry="2" />
+<text  x="717.19" y="399.5" ></text>
+</g>
+<g >
+<title>SvxDrawPage::CreateSdrObject (1 samples, 1.61%)</title><rect x="714.2" y="405" width="19.0" height="15.0" fill="rgb(223,214,21)" rx="2" ry="2" />
+<text  x="717.19" y="415.5" ></text>
+</g>
+<g >
+<title>oox::drawingml::TextParagraphProperties::pushToPropSet (8 samples, 12.90%)</title><rect x="828.4" y="645" width="152.2" height="15.0" fill="rgb(219,97,27)" rx="2" ry="2" />
+<text  x="831.39" y="655.5" >oox::drawingml::Tex..</text>
+</g>
+<g >
+<title>osl_waitCondition (1 samples, 1.61%)</title><rect x="638.1" y="261" width="19.0" height="15.0" fill="rgb(231,196,42)" rx="2" ry="2" />
+<text  x="641.06" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 4.84%)</title><rect x="143.2" y="421" width="57.1" height="15.0" fill="rgb(254,68,1)" rx="2" ry="2" />
+<text  x="146.23" y="431.5" >syscall</text>
+</g>
+<g >
+<title>Translate::get (1 samples, 1.61%)</title><rect x="752.3" y="341" width="19.0" height="15.0" fill="rgb(223,192,51)" rx="2" ry="2" />
+<text  x="755.26" y="351.5" ></text>
+</g>
+<g >
+<title>ImplSVMain (4 samples, 6.45%)</title><rect x="1056.8" y="613" width="76.1" height="15.0" fill="rgb(231,143,41)" rx="2" ry="2" />
+<text  x="1059.77" y="623.5" >ImplSVMain</text>
+</g>
+<g >
+<title>syscall (1 samples, 1.61%)</title><rect x="714.2" y="181" width="19.0" height="15.0" fill="rgb(221,73,53)" rx="2" ry="2" />
+<text  x="717.19" y="191.5" ></text>
+</g>
+<g >
+<title>http::Session::syncDownload (1 samples, 1.61%)</title><rect x="200.3" y="549" width="19.1" height="15.0" fill="rgb(207,207,53)" rx="2" ry="2" />
+<text  x="203.32" y="559.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 1.61%)</title><rect x="904.5" y="453" width="19.0" height="15.0" fill="rgb(222,45,23)" rx="2" ry="2" />
+<text  x="907.52" y="463.5" ></text>
+</g>
+<g >
+<title>SvXMLImport::startFastElement (1 samples, 1.61%)</title><rect x="980.6" y="597" width="19.1" height="15.0" fill="rgb(212,136,25)" rx="2" ry="2" />
+<text  x="983.65" y="607.5" ></text>
+</g>
+<g >
+<title>sal_detail_log_report (1 samples, 1.61%)</title><rect x="942.6" y="229" width="19.0" height="15.0" fill="rgb(232,130,28)" rx="2" ry="2" />
+<text  x="945.58" y="239.5" ></text>
+</g>
+<g >
+<title>oox::core::ContextHandler::~ContextHandler (1 samples, 1.61%)</title><rect x="542.9" y="229" width="19.0" height="15.0" fill="rgb(239,88,39)" rx="2" ry="2" />
+<text  x="545.90" y="239.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;ScMarkArray, std::allocator&lt;ScMarkArray&gt; &gt;::_M_fill_insert (3 samples, 4.84%)</title><rect x="657.1" y="293" width="57.1" height="15.0" fill="rgb(231,222,31)" rx="2" ry="2" />
+<text  x="660.10" y="303.5" >std::v..</text>
+</g>
+<g >
+<title>sd::DrawDocShell::Load (1 samples, 1.61%)</title><rect x="1113.9" y="357" width="19.0" height="15.0" fill="rgb(254,147,30)" rx="2" ry="2" />
+<text  x="1116.87" y="367.5" ></text>
+</g>
+<g >
+<title>ppoll (3 samples, 4.84%)</title><rect x="86.1" y="501" width="57.1" height="15.0" fill="rgb(216,128,29)" rx="2" ry="2" />
+<text  x="89.13" y="511.5" >ppoll</text>
+</g>
+<g >
+<title>FcCompareLang (1 samples, 1.61%)</title><rect x="466.8" y="357" width="19.0" height="15.0" fill="rgb(216,187,54)" rx="2" ry="2" />
+<text  x="469.77" y="367.5" ></text>
+</g>
+<g >
+<title>rtl_impl_convertUStringToString (1 samples, 1.61%)</title><rect x="790.3" y="229" width="19.1" height="15.0" fill="rgb(228,166,54)" rx="2" ry="2" />
+<text  x="793.32" y="239.5" ></text>
+</g>
+<g >
+<title>png_read_row (2 samples, 3.23%)</title><rect x="1018.7" y="357" width="38.1" height="15.0" fill="rgb(210,2,2)" rx="2" ry="2" />
+<text  x="1021.71" y="367.5" >png..</text>
+</g>
+<g >
+<title>doc_paintTile (1 samples, 1.61%)</title><rect x="523.9" y="661" width="19.0" height="15.0" fill="rgb(248,210,24)" rx="2" ry="2" />
+<text  x="526.87" y="671.5" ></text>
+</g>
+<g >
+<title>oox::drawingml::TextListStyle::~TextListStyle (1 samples, 1.61%)</title><rect x="809.4" y="645" width="19.0" height="15.0" fill="rgb(232,8,23)" rx="2" ry="2" />
+<text  x="812.35" y="655.5" ></text>
+</g>
+<g >
+<title>XOutBitmap::ExportGraphic (1 samples, 1.61%)</title><rect x="409.7" y="501" width="19.0" height="15.0" fill="rgb(221,147,10)" rx="2" ry="2" />
+<text  x="412.68" y="511.5" ></text>
+</g>
+<g >
+<title>SfxBaseModel::storeToURL (2 samples, 3.23%)</title><rect x="390.6" y="629" width="38.1" height="15.0" fill="rgb(237,77,47)" rx="2" ry="2" />
+<text  x="393.65" y="639.5" >Sfx..</text>
+</g>
+<g >
+<title>SvXMLImport::parseStream (1 samples, 1.61%)</title><rect x="504.8" y="645" width="19.1" height="15.0" fill="rgb(217,16,49)" rx="2" ry="2" />
+<text  x="507.84" y="655.5" ></text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 1.61%)</title><rect x="619.0" y="341" width="19.1" height="15.0" fill="rgb(240,196,46)" rx="2" ry="2" />
+<text  x="622.03" y="351.5" ></text>
+</g>
+<g >
+<title>sdr::properties::TextProperties::SetStyleSheet (1 samples, 1.61%)</title><rect x="714.2" y="325" width="19.0" height="15.0" fill="rgb(219,15,31)" rx="2" ry="2" />
+<text  x="717.19" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 3.23%)</title><rect x="276.5" y="421" width="38.0" height="15.0" fill="rgb(219,128,14)" rx="2" ry="2" />
+<text  x="279.45" y="431.5" >sys..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (1 samples, 1.61%)</title><rect x="638.1" y="341" width="19.0" height="15.0" fill="rgb(224,5,49)" rx="2" ry="2" />
+<text  x="641.06" y="351.5" ></text>
+</g>
+<g >
+<title>sd::DrawDocShell::ConvertTo (1 samples, 1.61%)</title><rect x="409.7" y="533" width="19.0" height="15.0" fill="rgb(251,180,40)" rx="2" ry="2" />
+<text  x="412.68" y="543.5" ></text>
+</g>
+<g >
+<title>SfxItemSet::Get (1 samples, 1.61%)</title><rect x="1113.9" y="101" width="19.0" height="15.0" fill="rgb(216,50,42)" rx="2" ry="2" />
+<text  x="1116.87" y="111.5" ></text>
+</g>
+<g >
+<title>sdr::contact::ViewObjectContact::getPrimitive2DSequence (1 samples, 1.61%)</title><rect x="523.9" y="485" width="19.0" height="15.0" fill="rgb(240,89,14)" rx="2" ry="2" />
+<text  x="526.87" y="495.5" ></text>
+</g>
+<g >
+<title>oox::drawingml::TextCharacterProperties::pushToPropSet (1 samples, 1.61%)</title><rect x="790.3" y="645" width="19.1" height="15.0" fill="rgb(206,155,48)" rx="2" ry="2" />
+<text  x="793.32" y="655.5" ></text>
+</g>
+<g >
+<title>non-virtual thunk to SdStyleSheet::Notify (1 samples, 1.61%)</title><rect x="790.3" y="501" width="19.1" height="15.0" fill="rgb(248,89,29)" rx="2" ry="2" />
+<text  x="793.32" y="511.5" ></text>
+</g>
+</g>
+</svg>
