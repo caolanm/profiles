@@ -1,0 +1,1249 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="1110" onload="init(evt)" viewBox="0 0 1200 1110" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="1110.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >StagingPerf.eu Watchdog Profile (2026-09-03T11:00:01.700906)</text>
+<text id="details" x="10.00" y="1093" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="1093" > </text>
+<g id="frames">
+<g >
+<title>free@plt (1 samples, 5.00%)</title><rect x="718.0" y="213" width="59.0" height="15.0" fill="rgb(228,33,11)" rx="2" ry="2" />
+<text  x="721.00" y="223.5" >free@plt</text>
+</g>
+<g >
+<title>sd::PreviewRenderer::PaintPage (3 samples, 15.00%)</title><rect x="954.0" y="693" width="177.0" height="15.0" fill="rgb(219,200,49)" rx="2" ry="2" />
+<text  x="957.00" y="703.5" >sd::PreviewRenderer::Pa..</text>
+</g>
+<g >
+<title>soffice_main (7 samples, 35.00%)</title><rect x="718.0" y="901" width="413.0" height="15.0" fill="rgb(205,114,47)" rx="2" ry="2" />
+<text  x="721.00" y="911.5" >soffice_main</text>
+</g>
+<g >
+<title>fetch_pixel_no_alpha_32 (3 samples, 15.00%)</title><rect x="541.0" y="901" width="177.0" height="15.0" fill="rgb(216,200,17)" rx="2" ry="2" />
+<text  x="544.00" y="911.5" >fetch_pixel_no_alpha_32</text>
+</g>
+<g >
+<title>desktop::COKitDocumentImpl::renderShapeSelection (3 samples, 15.00%)</title><rect x="718.0" y="693" width="177.0" height="15.0" fill="rgb(246,93,17)" rx="2" ry="2" />
+<text  x="721.00" y="703.5" >desktop::COKitDocumentI..</text>
+</g>
+<g >
+<title>Outliner::SetText (1 samples, 5.00%)</title><rect x="718.0" y="309" width="59.0" height="15.0" fill="rgb(245,197,11)" rx="2" ry="2" />
+<text  x="721.00" y="319.5" >Outlin..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (4 samples, 20.00%)</title><rect x="305.0" y="885" width="236.0" height="15.0" fill="rgb(207,113,18)" rx="2" ry="2" />
+<text  x="308.00" y="895.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatAndLayout (1 samples, 5.00%)</title><rect x="836.0" y="229" width="59.0" height="15.0" fill="rgb(217,165,44)" rx="2" ry="2" />
+<text  x="839.00" y="239.5" >ImpEdi..</text>
+</g>
+<g >
+<title>start_thread (1 samples, 5.00%)</title><rect x="1131.0" y="1013" width="59.0" height="15.0" fill="rgb(233,143,8)" rx="2" ry="2" />
+<text  x="1134.00" y="1023.5" >start_..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::getB2DRangeFromPrimitive2DReference (3 samples, 15.00%)</title><rect x="954.0" y="437" width="177.0" height="15.0" fill="rgb(222,160,14)" rx="2" ry="2" />
+<text  x="957.00" y="447.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>EditDoc::Clear (1 samples, 5.00%)</title><rect x="718.0" y="229" width="59.0" height="15.0" fill="rgb(217,159,4)" rx="2" ry="2" />
+<text  x="721.00" y="239.5" >EditDo..</text>
+</g>
+<g >
+<title>all (20 samples, 100%)</title><rect x="10.0" y="1061" width="1180.0" height="15.0" fill="rgb(207,88,28)" rx="2" ry="2" />
+<text  x="13.00" y="1071.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 5.00%)</title><rect x="718.0" y="181" width="59.0" height="15.0" fill="rgb(228,2,7)" rx="2" ry="2" />
+<text  x="721.00" y="191.5" >handle..</text>
+</g>
+<g >
+<title>Outliner::ImpCalcBulletFont (1 samples, 5.00%)</title><rect x="777.0" y="149" width="59.0" height="15.0" fill="rgb(212,167,11)" rx="2" ry="2" />
+<text  x="780.00" y="159.5" >Outlin..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;unsigned short, std::pair&lt;unsigned short const, SfxPoolItem const*&gt;, std::allocator&lt;std::pair&lt;unsigned short const, SfxPoolItem const*&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;unsigned short&gt;, std::hash&lt;unsigned short&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::find (1 samples, 5.00%)</title><rect x="836.0" y="101" width="59.0" height="15.0" fill="rgb(238,118,28)" rx="2" ry="2" />
+<text  x="839.00" y="111.5" >std::_..</text>
+</g>
+<g >
+<title>SVGFilter::implExportImpressOrDraw (3 samples, 15.00%)</title><rect x="718.0" y="501" width="177.0" height="15.0" fill="rgb(224,98,37)" rx="2" ry="2" />
+<text  x="721.00" y="511.5" >SVGFilter::implExportIm..</text>
+</g>
+<g >
+<title>Outliner::Init (1 samples, 5.00%)</title><rect x="718.0" y="293" width="59.0" height="15.0" fill="rgb(254,59,35)" rx="2" ry="2" />
+<text  x="721.00" y="303.5" >Outlin..</text>
+</g>
+<g >
+<title>execute_native_thread_routine (5 samples, 25.00%)</title><rect x="10.0" y="997" width="295.0" height="15.0" fill="rgb(232,155,33)" rx="2" ry="2" />
+<text  x="13.00" y="1007.5" >execute_native_thread_routine</text>
+</g>
+<g >
+<title>SfxItemSet::GetItemState_ForWhichID (1 samples, 5.00%)</title><rect x="777.0" y="101" width="59.0" height="15.0" fill="rgb(252,19,45)" rx="2" ry="2" />
+<text  x="780.00" y="111.5" >SfxIte..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::BasePrimitive2D::getB2DRange (3 samples, 15.00%)</title><rect x="954.0" y="293" width="177.0" height="15.0" fill="rgb(207,163,36)" rx="2" ry="2" />
+<text  x="957.00" y="303.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 5.00%)</title><rect x="895.0" y="661" width="59.0" height="15.0" fill="rgb(212,125,24)" rx="2" ry="2" />
+<text  x="898.00" y="671.5" >_IO_fu..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 5.00%)</title><rect x="718.0" y="197" width="59.0" height="15.0" fill="rgb(207,69,37)" rx="2" ry="2" />
+<text  x="721.00" y="207.5" >_IO_fu..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::getB2DRangeFromPrimitive2DReference (3 samples, 15.00%)</title><rect x="954.0" y="485" width="177.0" height="15.0" fill="rgb(216,2,54)" rx="2" ry="2" />
+<text  x="957.00" y="495.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>forkCOKit (7 samples, 35.00%)</title><rect x="718.0" y="981" width="413.0" height="15.0" fill="rgb(248,54,7)" rx="2" ry="2" />
+<text  x="721.00" y="991.5" >forkCOKit</text>
+</g>
+<g >
+<title>pixman_image_composite32 (7 samples, 35.00%)</title><rect x="305.0" y="949" width="413.0" height="15.0" fill="rgb(248,11,29)" rx="2" ry="2" />
+<text  x="308.00" y="959.5" >pixman_image_composite32</text>
+</g>
+<g >
+<title>SvpSalInstance::CheckTimeout (3 samples, 15.00%)</title><rect x="954.0" y="789" width="177.0" height="15.0" fill="rgb(254,158,36)" rx="2" ry="2" />
+<text  x="957.00" y="799.5" >SvpSalInstance::CheckTi..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 5.00%)</title><rect x="1131.0" y="885" width="59.0" height="15.0" fill="rgb(247,180,25)" rx="2" ry="2" />
+<text  x="1134.00" y="895.5" >_IO_fu..</text>
+</g>
+<g >
+<title>SfxObjectShell::APISaveAs_Impl (3 samples, 15.00%)</title><rect x="718.0" y="629" width="177.0" height="15.0" fill="rgb(253,107,49)" rx="2" ry="2" />
+<text  x="721.00" y="639.5" >SfxObjectShell::APISave..</text>
+</g>
+<g >
+<title>SVGActionWriter::ImplWriteActions (3 samples, 15.00%)</title><rect x="718.0" y="405" width="177.0" height="15.0" fill="rgb(218,25,7)" rx="2" ry="2" />
+<text  x="721.00" y="415.5" >SVGActionWriter::ImplWr..</text>
+</g>
+<g >
+<title>__bits_image_fetch_affine_no_alpha (7 samples, 35.00%)</title><rect x="305.0" y="917" width="413.0" height="15.0" fill="rgb(230,149,20)" rx="2" ry="2" />
+<text  x="308.00" y="927.5" >__bits_image_fetch_affine_no_alpha</text>
+</g>
+<g >
+<title>DocumentBroker::pollThread (5 samples, 25.00%)</title><rect x="10.0" y="949" width="295.0" height="15.0" fill="rgb(205,80,2)" rx="2" ry="2" />
+<text  x="13.00" y="959.5" >DocumentBroker::pollThread</text>
+</g>
+<g >
+<title>SocketPoll::pollingThreadEntry (1 samples, 5.00%)</title><rect x="1131.0" y="981" width="59.0" height="15.0" fill="rgb(247,85,10)" rx="2" ry="2" />
+<text  x="1134.00" y="991.5" >Socket..</text>
+</g>
+<g >
+<title>SfxBaseModel::storeToURL (3 samples, 15.00%)</title><rect x="718.0" y="661" width="177.0" height="15.0" fill="rgb(229,85,34)" rx="2" ry="2" />
+<text  x="721.00" y="671.5" >SfxBaseModel::storeToURL</text>
+</g>
+<g >
+<title>sd::PreviewRenderer::RenderPage (3 samples, 15.00%)</title><rect x="954.0" y="709" width="177.0" height="15.0" fill="rgb(232,165,28)" rx="2" ry="2" />
+<text  x="957.00" y="719.5" >sd::PreviewRenderer::Re..</text>
+</g>
+<g >
+<title>SvxUnoTextRangeBase::getPropertyValue (1 samples, 5.00%)</title><rect x="836.0" y="325" width="59.0" height="15.0" fill="rgb(240,225,14)" rx="2" ry="2" />
+<text  x="839.00" y="335.5" >SvxUno..</text>
+</g>
+<g >
+<title>ImpEditEngine::GetAttribs (1 samples, 5.00%)</title><rect x="777.0" y="117" width="59.0" height="15.0" fill="rgb(235,152,26)" rx="2" ry="2" />
+<text  x="780.00" y="127.5" >ImpEdi..</text>
+</g>
+<g >
+<title>SfxItemSet::Get (1 samples, 5.00%)</title><rect x="836.0" y="117" width="59.0" height="15.0" fill="rgb(230,29,35)" rx="2" ry="2" />
+<text  x="839.00" y="127.5" >SfxIte..</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 15.00%)</title><rect x="954.0" y="117" width="177.0" height="15.0" fill="rgb(239,113,39)" rx="2" ry="2" />
+<text  x="957.00" y="127.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>SVGTextWriter::nextParagraph (2 samples, 10.00%)</title><rect x="777.0" y="373" width="118.0" height="15.0" fill="rgb(223,179,7)" rx="2" ry="2" />
+<text  x="780.00" y="383.5" >SVGTextWriter:..</text>
+</g>
+<g >
+<title>syscall (4 samples, 20.00%)</title><rect x="305.0" y="869" width="236.0" height="15.0" fill="rgb(223,159,40)" rx="2" ry="2" />
+<text  x="308.00" y="879.5" >syscall</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::Primitive2DContainer::getB2DRange (3 samples, 15.00%)</title><rect x="954.0" y="325" width="177.0" height="15.0" fill="rgb(220,193,35)" rx="2" ry="2" />
+<text  x="957.00" y="335.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>_IO_funlockfile (5 samples, 25.00%)</title><rect x="10.0" y="757" width="295.0" height="15.0" fill="rgb(222,213,48)" rx="2" ry="2" />
+<text  x="13.00" y="767.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>SfxObjectShell::CommonSaveAs_Impl (3 samples, 15.00%)</title><rect x="718.0" y="613" width="177.0" height="15.0" fill="rgb(218,62,37)" rx="2" ry="2" />
+<text  x="721.00" y="623.5" >SfxObjectShell::CommonS..</text>
+</g>
+<g >
+<title>ppoll (1 samples, 5.00%)</title><rect x="1131.0" y="901" width="59.0" height="15.0" fill="rgb(219,46,44)" rx="2" ry="2" />
+<text  x="1134.00" y="911.5" >ppoll</text>
+</g>
+<g >
+<title>http::Session::syncRequest (1 samples, 5.00%)</title><rect x="1131.0" y="933" width="59.0" height="15.0" fill="rgb(210,171,3)" rx="2" ry="2" />
+<text  x="1134.00" y="943.5" >http::..</text>
+</g>
+<g >
+<title>__vdso_clock_gettime (3 samples, 15.00%)</title><rect x="954.0" y="133" width="177.0" height="15.0" fill="rgb(236,181,22)" rx="2" ry="2" />
+<text  x="957.00" y="143.5" >__vdso_clock_gettime</text>
+</g>
+<g >
+<title>SVGTextWriter::nextTextPortion (1 samples, 5.00%)</title><rect x="718.0" y="373" width="59.0" height="15.0" fill="rgb(248,64,17)" rx="2" ry="2" />
+<text  x="721.00" y="383.5" >SVGTex..</text>
+</g>
+<g >
+<title>SfxBindings::UpdateSlotServer_Impl (1 samples, 5.00%)</title><rect x="895.0" y="693" width="59.0" height="15.0" fill="rgb(254,88,18)" rx="2" ry="2" />
+<text  x="898.00" y="703.5" >SfxBin..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::(anonymous namespace)::B2DRangeVisitor::visit (3 samples, 15.00%)</title><rect x="954.0" y="341" width="177.0" height="15.0" fill="rgb(221,151,15)" rx="2" ry="2" />
+<text  x="957.00" y="351.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>SdrViewIter::ForAllViews (3 samples, 15.00%)</title><rect x="954.0" y="613" width="177.0" height="15.0" fill="rgb(249,228,44)" rx="2" ry="2" />
+<text  x="957.00" y="623.5" >SdrViewIter::ForAllViews</text>
+</g>
+<g >
+<title>EditEngine::SetUpdateLayout (1 samples, 5.00%)</title><rect x="836.0" y="261" width="59.0" height="15.0" fill="rgb(238,118,46)" rx="2" ry="2" />
+<text  x="839.00" y="271.5" >EditEn..</text>
+</g>
+<g >
+<title>http::Session::syncRequest (5 samples, 25.00%)</title><rect x="10.0" y="805" width="295.0" height="15.0" fill="rgb(241,33,34)" rx="2" ry="2" />
+<text  x="13.00" y="815.5" >http::Session::syncRequest</text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (7 samples, 35.00%)</title><rect x="718.0" y="965" width="413.0" height="15.0" fill="rgb(230,45,50)" rx="2" ry="2" />
+<text  x="721.00" y="975.5" >std::_Function_handler&lt;void </text>
+</g>
+<g >
+<title>SvxTextEditSourceImpl::GetBackgroundTextForwarder (1 samples, 5.00%)</title><rect x="718.0" y="325" width="59.0" height="15.0" fill="rgb(240,156,13)" rx="2" ry="2" />
+<text  x="721.00" y="335.5" >SvxTex..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::TransformPrimitive2D::getB2DRange (3 samples, 15.00%)</title><rect x="954.0" y="469" width="177.0" height="15.0" fill="rgb(242,184,47)" rx="2" ry="2" />
+<text  x="957.00" y="479.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>sd::View::CompleteRedraw (3 samples, 15.00%)</title><rect x="954.0" y="677" width="177.0" height="15.0" fill="rgb(209,41,52)" rx="2" ry="2" />
+<text  x="957.00" y="687.5" >sd::View::CompleteRedraw</text>
+</g>
+<g >
+<title>Outliner::ImpCalcBulletArea (1 samples, 5.00%)</title><rect x="777.0" y="181" width="59.0" height="15.0" fill="rgb(220,224,6)" rx="2" ry="2" />
+<text  x="780.00" y="191.5" >Outlin..</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatParagraphs (1 samples, 5.00%)</title><rect x="777.0" y="229" width="59.0" height="15.0" fill="rgb(226,110,20)" rx="2" ry="2" />
+<text  x="780.00" y="239.5" >ImpEdi..</text>
+</g>
+<g >
+<title>syscall (3 samples, 15.00%)</title><rect x="954.0" y="85" width="177.0" height="15.0" fill="rgb(252,91,53)" rx="2" ry="2" />
+<text  x="957.00" y="95.5" >syscall</text>
+</g>
+<g >
+<title>SdrPaintView::EndCompleteRedraw (3 samples, 15.00%)</title><rect x="954.0" y="629" width="177.0" height="15.0" fill="rgb(254,70,5)" rx="2" ry="2" />
+<text  x="957.00" y="639.5" >SdrPaintView::EndComple..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::(anonymous namespace)::B2DRangeVisitor::visit (3 samples, 15.00%)</title><rect x="954.0" y="277" width="177.0" height="15.0" fill="rgb(237,184,54)" rx="2" ry="2" />
+<text  x="957.00" y="287.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>OutlinerEditEng::GetBulletArea (1 samples, 5.00%)</title><rect x="836.0" y="165" width="59.0" height="15.0" fill="rgb(212,81,29)" rx="2" ry="2" />
+<text  x="839.00" y="175.5" >Outlin..</text>
+</g>
+<g >
+<title>SfxObjectShell::ExportTo (3 samples, 15.00%)</title><rect x="718.0" y="565" width="177.0" height="15.0" fill="rgb(234,132,24)" rx="2" ry="2" />
+<text  x="721.00" y="575.5" >SfxObjectShell::ExportTo</text>
+</g>
+<g >
+<title>SVGFilter::implExport (3 samples, 15.00%)</title><rect x="718.0" y="517" width="177.0" height="15.0" fill="rgb(232,64,23)" rx="2" ry="2" />
+<text  x="721.00" y="527.5" >SVGFilter::implExport</text>
+</g>
+<g >
+<title>clock_gettime (3 samples, 15.00%)</title><rect x="954.0" y="149" width="177.0" height="15.0" fill="rgb(231,187,50)" rx="2" ry="2" />
+<text  x="957.00" y="159.5" >clock_gettime</text>
+</g>
+<g >
+<title>DocumentBroker::addSession (5 samples, 25.00%)</title><rect x="10.0" y="885" width="295.0" height="15.0" fill="rgb(253,2,32)" rx="2" ry="2" />
+<text  x="13.00" y="895.5" >DocumentBroker::addSession</text>
+</g>
+<g >
+<title>SvxUnoTextRangeBase::GetPropertyValueHelper (1 samples, 5.00%)</title><rect x="836.0" y="309" width="59.0" height="15.0" fill="rgb(238,76,7)" rx="2" ry="2" />
+<text  x="839.00" y="319.5" >SvxUno..</text>
+</g>
+<g >
+<title>Outliner::Clear (1 samples, 5.00%)</title><rect x="718.0" y="277" width="59.0" height="15.0" fill="rgb(227,170,25)" rx="2" ry="2" />
+<text  x="721.00" y="287.5" >Outlin..</text>
+</g>
+<g >
+<title>startMainLoop (7 samples, 35.00%)</title><rect x="718.0" y="933" width="413.0" height="15.0" fill="rgb(211,99,11)" rx="2" ry="2" />
+<text  x="721.00" y="943.5" >startMainLoop</text>
+</g>
+<g >
+<title>RequestVettingStation::createClientSession (5 samples, 25.00%)</title><rect x="10.0" y="901" width="295.0" height="15.0" fill="rgb(232,68,53)" rx="2" ry="2" />
+<text  x="13.00" y="911.5" >RequestVettingStation::createClientSess..</text>
+</g>
+<g >
+<title>kitbroker (14 samples, 70.00%)</title><rect x="305.0" y="1045" width="826.0" height="15.0" fill="rgb(219,45,10)" rx="2" ry="2" />
+<text  x="308.00" y="1055.5" >kitbroker</text>
+</g>
+<g >
+<title>SdrPaintView::CompleteRedraw (3 samples, 15.00%)</title><rect x="954.0" y="661" width="177.0" height="15.0" fill="rgb(245,74,40)" rx="2" ry="2" />
+<text  x="957.00" y="671.5" >SdrPaintView::CompleteR..</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatDoc (1 samples, 5.00%)</title><rect x="777.0" y="245" width="59.0" height="15.0" fill="rgb(249,205,14)" rx="2" ry="2" />
+<text  x="780.00" y="255.5" >ImpEdi..</text>
+</g>
+<g >
+<title>syscall (5 samples, 25.00%)</title><rect x="10.0" y="725" width="295.0" height="15.0" fill="rgb(253,190,7)" rx="2" ry="2" />
+<text  x="13.00" y="735.5" >syscall</text>
+</g>
+<g >
+<title>SVGFilter::implExportShapes (3 samples, 15.00%)</title><rect x="718.0" y="453" width="177.0" height="15.0" fill="rgb(208,42,46)" rx="2" ry="2" />
+<text  x="721.00" y="463.5" >SVGFilter::implExportSh..</text>
+</g>
+<g >
+<title>general_composite_rect (7 samples, 35.00%)</title><rect x="305.0" y="933" width="413.0" height="15.0" fill="rgb(242,200,1)" rx="2" ry="2" />
+<text  x="308.00" y="943.5" >general_composite_rect</text>
+</g>
+<g >
+<title>Document::drainQueue (3 samples, 15.00%)</title><rect x="718.0" y="773" width="177.0" height="15.0" fill="rgb(241,59,45)" rx="2" ry="2" />
+<text  x="721.00" y="783.5" >Document::drainQueue</text>
+</g>
+<g >
+<title>sd::slidesorter::cache::QueueProcessor::ProcessRequests (3 samples, 15.00%)</title><rect x="954.0" y="757" width="177.0" height="15.0" fill="rgb(233,46,2)" rx="2" ry="2" />
+<text  x="957.00" y="767.5" >sd::slidesorter::cache:..</text>
+</g>
+<g >
+<title>Document::forwardToChild (3 samples, 15.00%)</title><rect x="718.0" y="757" width="177.0" height="15.0" fill="rgb(239,14,3)" rx="2" ry="2" />
+<text  x="721.00" y="767.5" >Document::forwardToChild</text>
+</g>
+<g >
+<title>OutlinerView::DrawText_ToEditView (3 samples, 15.00%)</title><rect x="954.0" y="533" width="177.0" height="15.0" fill="rgb(239,181,38)" rx="2" ry="2" />
+<text  x="957.00" y="543.5" >OutlinerView::DrawText_..</text>
+</g>
+<g >
+<title>Outliner::ImplGetBulletSize (1 samples, 5.00%)</title><rect x="777.0" y="165" width="59.0" height="15.0" fill="rgb(233,36,45)" rx="2" ry="2" />
+<text  x="780.00" y="175.5" >Outlin..</text>
+</g>
+<g >
+<title>RemoteJSONPoll::pollingThread (1 samples, 5.00%)</title><rect x="1131.0" y="965" width="59.0" height="15.0" fill="rgb(224,127,16)" rx="2" ry="2" />
+<text  x="1134.00" y="975.5" >Remote..</text>
+</g>
+<g >
+<title>SvxTextEditSourceImpl::GetBackgroundTextForwarder (1 samples, 5.00%)</title><rect x="777.0" y="325" width="59.0" height="15.0" fill="rgb(245,144,29)" rx="2" ry="2" />
+<text  x="780.00" y="335.5" >SvxTex..</text>
+</g>
+<g >
+<title>DocumentBroker::download (5 samples, 25.00%)</title><rect x="10.0" y="869" width="295.0" height="15.0" fill="rgb(227,160,20)" rx="2" ry="2" />
+<text  x="13.00" y="879.5" >DocumentBroker::download</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatDoc (1 samples, 5.00%)</title><rect x="836.0" y="213" width="59.0" height="15.0" fill="rgb(246,106,19)" rx="2" ry="2" />
+<text  x="839.00" y="223.5" >ImpEdi..</text>
+</g>
+<g >
+<title>ppoll (5 samples, 25.00%)</title><rect x="10.0" y="773" width="295.0" height="15.0" fill="rgb(213,196,27)" rx="2" ry="2" />
+<text  x="13.00" y="783.5" >ppoll</text>
+</g>
+<g >
+<title>Scheduler::CallbackTaskScheduling (3 samples, 15.00%)</title><rect x="954.0" y="773" width="177.0" height="15.0" fill="rgb(234,182,54)" rx="2" ry="2" />
+<text  x="957.00" y="783.5" >Scheduler::CallbackTask..</text>
+</g>
+<g >
+<title>doc_renderShapeSelection (3 samples, 15.00%)</title><rect x="718.0" y="677" width="177.0" height="15.0" fill="rgb(240,56,10)" rx="2" ry="2" />
+<text  x="721.00" y="687.5" >doc_renderShapeSelection</text>
+</g>
+<g >
+<title>desktop::COKitImpl::runLoop (7 samples, 35.00%)</title><rect x="718.0" y="917" width="413.0" height="15.0" fill="rgb(206,28,54)" rx="2" ry="2" />
+<text  x="721.00" y="927.5" >desktop::COKitImpl::runLoop</text>
+</g>
+<g >
+<title>cairo_recording_surface_get_extents (7 samples, 35.00%)</title><rect x="305.0" y="997" width="413.0" height="15.0" fill="rgb(234,208,6)" rx="2" ry="2" />
+<text  x="308.00" y="1007.5" >cairo_recording_surface_get_extents</text>
+</g>
+<g >
+<title>std::_Function_handler&lt;bool  (3 samples, 15.00%)</title><rect x="954.0" y="581" width="177.0" height="15.0" fill="rgb(210,159,25)" rx="2" ry="2" />
+<text  x="957.00" y="591.5" >std::_Function_handler&lt;..</text>
+</g>
+<g >
+<title>SvpSalInstance::ProcessEvent (1 samples, 5.00%)</title><rect x="895.0" y="773" width="59.0" height="15.0" fill="rgb(233,81,16)" rx="2" ry="2" />
+<text  x="898.00" y="783.5" >SvpSal..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 5.00%)</title><rect x="777.0" y="53" width="59.0" height="15.0" fill="rgb(207,195,8)" rx="2" ry="2" />
+<text  x="780.00" y="63.5" >handle..</text>
+</g>
+<g >
+<title>http::Session::syncRequest (1 samples, 5.00%)</title><rect x="1131.0" y="949" width="59.0" height="15.0" fill="rgb(239,74,11)" rx="2" ry="2" />
+<text  x="1134.00" y="959.5" >http::..</text>
+</g>
+<g >
+<title>docbroker (5 samples, 25.00%)</title><rect x="10.0" y="1045" width="295.0" height="15.0" fill="rgb(207,24,19)" rx="2" ry="2" />
+<text  x="13.00" y="1055.5" >docbroker</text>
+</g>
+<g >
+<title>DocumentBroker::getBrowserSettingSync (5 samples, 25.00%)</title><rect x="10.0" y="853" width="295.0" height="15.0" fill="rgb(232,104,4)" rx="2" ry="2" />
+<text  x="13.00" y="863.5" >DocumentBroker::getBrowserSettingSync</text>
+</g>
+<g >
+<title>SVGFilter::implExportShape (3 samples, 15.00%)</title><rect x="718.0" y="437" width="177.0" height="15.0" fill="rgb(233,198,35)" rx="2" ry="2" />
+<text  x="721.00" y="447.5" >SVGFilter::implExportSh..</text>
+</g>
+<g >
+<title>SVGFilter::filterImpressOrDraw (3 samples, 15.00%)</title><rect x="718.0" y="533" width="177.0" height="15.0" fill="rgb(242,143,35)" rx="2" ry="2" />
+<text  x="721.00" y="543.5" >SVGFilter::filterImpres..</text>
+</g>
+<g >
+<title>FmFormView::EndCompleteRedraw (3 samples, 15.00%)</title><rect x="954.0" y="645" width="177.0" height="15.0" fill="rgb(229,86,18)" rx="2" ry="2" />
+<text  x="957.00" y="655.5" >FmFormView::EndComplete..</text>
+</g>
+<g >
+<title>SocketPoll::poll (5 samples, 25.00%)</title><rect x="10.0" y="933" width="295.0" height="15.0" fill="rgb(231,186,43)" rx="2" ry="2" />
+<text  x="13.00" y="943.5" >SocketPoll::poll</text>
+</g>
+<g >
+<title>_start (7 samples, 35.00%)</title><rect x="718.0" y="1029" width="413.0" height="15.0" fill="rgb(232,142,24)" rx="2" ry="2" />
+<text  x="721.00" y="1039.5" >_start</text>
+</g>
+<g >
+<title>ImplWindowFrameProc (1 samples, 5.00%)</title><rect x="895.0" y="757" width="59.0" height="15.0" fill="rgb(246,225,10)" rx="2" ry="2" />
+<text  x="898.00" y="767.5" >ImplWi..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::getB2DRangeFromPrimitive2DReference (3 samples, 15.00%)</title><rect x="954.0" y="373" width="177.0" height="15.0" fill="rgb(230,108,1)" rx="2" ry="2" />
+<text  x="957.00" y="383.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatAndLayout (1 samples, 5.00%)</title><rect x="777.0" y="261" width="59.0" height="15.0" fill="rgb(245,12,33)" rx="2" ry="2" />
+<text  x="780.00" y="271.5" >ImpEdi..</text>
+</g>
+<g >
+<title>tools::Time::GetSystemTicks (3 samples, 15.00%)</title><rect x="954.0" y="181" width="177.0" height="15.0" fill="rgb(247,80,35)" rx="2" ry="2" />
+<text  x="957.00" y="191.5" >tools::Time::GetSystemT..</text>
+</g>
+<g >
+<title>ImpEditEngine::Clear (1 samples, 5.00%)</title><rect x="718.0" y="261" width="59.0" height="15.0" fill="rgb(232,202,44)" rx="2" ry="2" />
+<text  x="721.00" y="271.5" >ImpEdi..</text>
+</g>
+<g >
+<title>DocumentBroker::DocumentBrokerPoll::pollingThread (5 samples, 25.00%)</title><rect x="10.0" y="965" width="295.0" height="15.0" fill="rgb(211,218,24)" rx="2" ry="2" />
+<text  x="13.00" y="975.5" >DocumentBroker::DocumentBrokerPoll::pol..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 5.00%)</title><rect x="777.0" y="69" width="59.0" height="15.0" fill="rgb(205,186,47)" rx="2" ry="2" />
+<text  x="780.00" y="79.5" >_IO_fu..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::Primitive2DContainer::getB2DRange (3 samples, 15.00%)</title><rect x="954.0" y="261" width="177.0" height="15.0" fill="rgb(206,73,0)" rx="2" ry="2" />
+<text  x="957.00" y="271.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>tools::Time::GetMonotonicTicks (3 samples, 15.00%)</title><rect x="954.0" y="165" width="177.0" height="15.0" fill="rgb(232,31,42)" rx="2" ry="2" />
+<text  x="957.00" y="175.5" >tools::Time::GetMonoton..</text>
+</g>
+<g >
+<title>EditEngine::GetAttribs (1 samples, 5.00%)</title><rect x="777.0" y="133" width="59.0" height="15.0" fill="rgb(218,177,2)" rx="2" ry="2" />
+<text  x="780.00" y="143.5" >EditEn..</text>
+</g>
+<g >
+<title>__libc_start_main (7 samples, 35.00%)</title><rect x="718.0" y="1013" width="413.0" height="15.0" fill="rgb(246,199,9)" rx="2" ry="2" />
+<text  x="721.00" y="1023.5" >__libc_start_main</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 15.00%)</title><rect x="954.0" y="101" width="177.0" height="15.0" fill="rgb(211,18,33)" rx="2" ry="2" />
+<text  x="957.00" y="111.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>handleUserProfileSignal (5 samples, 25.00%)</title><rect x="10.0" y="741" width="295.0" height="15.0" fill="rgb(215,62,25)" rx="2" ry="2" />
+<text  x="13.00" y="751.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 15.00%)</title><rect x="541.0" y="869" width="177.0" height="15.0" fill="rgb(254,152,10)" rx="2" ry="2" />
+<text  x="544.00" y="879.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>execute_native_thread_routine (1 samples, 5.00%)</title><rect x="1131.0" y="997" width="59.0" height="15.0" fill="rgb(210,125,5)" rx="2" ry="2" />
+<text  x="1134.00" y="1007.5" >execut..</text>
+</g>
+<g >
+<title>SvxUnoTextRangeBase::_getPropertyValue (2 samples, 10.00%)</title><rect x="777.0" y="341" width="118.0" height="15.0" fill="rgb(207,156,6)" rx="2" ry="2" />
+<text  x="780.00" y="351.5" >SvxUnoTextRang..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::TextLayouterDevice::~TextLayouterDevice (3 samples, 15.00%)</title><rect x="954.0" y="213" width="177.0" height="15.0" fill="rgb(252,95,22)" rx="2" ry="2" />
+<text  x="957.00" y="223.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>EditEngine::SetUpdateLayout (1 samples, 5.00%)</title><rect x="777.0" y="293" width="59.0" height="15.0" fill="rgb(221,215,9)" rx="2" ry="2" />
+<text  x="780.00" y="303.5" >EditEn..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::Primitive2DContainer::getB2DRange (3 samples, 15.00%)</title><rect x="954.0" y="453" width="177.0" height="15.0" fill="rgb(243,83,46)" rx="2" ry="2" />
+<text  x="957.00" y="463.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>SocketPoll::pollingThreadEntry (5 samples, 25.00%)</title><rect x="10.0" y="981" width="295.0" height="15.0" fill="rgb(240,9,5)" rx="2" ry="2" />
+<text  x="13.00" y="991.5" >SocketPoll::pollingThreadEntry</text>
+</g>
+<g >
+<title>ImpEditEngine::SetUpdateLayout (1 samples, 5.00%)</title><rect x="836.0" y="245" width="59.0" height="15.0" fill="rgb(245,125,50)" rx="2" ry="2" />
+<text  x="839.00" y="255.5" >ImpEdi..</text>
+</g>
+<g >
+<title>syscall (1 samples, 5.00%)</title><rect x="836.0" y="53" width="59.0" height="15.0" fill="rgb(251,87,36)" rx="2" ry="2" />
+<text  x="839.00" y="63.5" >syscall</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::Primitive2DContainer::getB2DRange (3 samples, 15.00%)</title><rect x="954.0" y="501" width="177.0" height="15.0" fill="rgb(230,99,38)" rx="2" ry="2" />
+<text  x="957.00" y="511.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>ChildSession::_handleInput (3 samples, 15.00%)</title><rect x="718.0" y="725" width="177.0" height="15.0" fill="rgb(229,73,14)" rx="2" ry="2" />
+<text  x="721.00" y="735.5" >ChildSession::_handleIn..</text>
+</g>
+<g >
+<title>desktop::Desktop::Main (7 samples, 35.00%)</title><rect x="718.0" y="869" width="413.0" height="15.0" fill="rgb(208,102,33)" rx="2" ry="2" />
+<text  x="721.00" y="879.5" >desktop::Desktop::Main</text>
+</g>
+<g >
+<title>__clone (5 samples, 25.00%)</title><rect x="10.0" y="1029" width="295.0" height="15.0" fill="rgb(239,79,30)" rx="2" ry="2" />
+<text  x="13.00" y="1039.5" >__clone</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::TextSimplePortionPrimitive2D::getB2DRange (3 samples, 15.00%)</title><rect x="954.0" y="229" width="177.0" height="15.0" fill="rgb(234,143,40)" rx="2" ry="2" />
+<text  x="957.00" y="239.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>syscall (1 samples, 5.00%)</title><rect x="718.0" y="165" width="59.0" height="15.0" fill="rgb(223,189,40)" rx="2" ry="2" />
+<text  x="721.00" y="175.5" >syscall</text>
+</g>
+<g >
+<title>ImplSVMain (7 samples, 35.00%)</title><rect x="718.0" y="885" width="413.0" height="15.0" fill="rgb(210,79,26)" rx="2" ry="2" />
+<text  x="721.00" y="895.5" >ImplSVMain</text>
+</g>
+<g >
+<title>[unknown] (7 samples, 35.00%)</title><rect x="305.0" y="1029" width="413.0" height="15.0" fill="rgb(234,163,44)" rx="2" ry="2" />
+<text  x="308.00" y="1039.5" >[unknown]</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::Primitive2DContainer::getB2DRange (3 samples, 15.00%)</title><rect x="954.0" y="389" width="177.0" height="15.0" fill="rgb(212,119,23)" rx="2" ry="2" />
+<text  x="957.00" y="399.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>_IO_funlockfile (4 samples, 20.00%)</title><rect x="305.0" y="901" width="236.0" height="15.0" fill="rgb(227,71,29)" rx="2" ry="2" />
+<text  x="308.00" y="911.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>SfxBroadcaster::ForAllListeners (3 samples, 15.00%)</title><rect x="954.0" y="597" width="177.0" height="15.0" fill="rgb(227,227,27)" rx="2" ry="2" />
+<text  x="957.00" y="607.5" >SfxBroadcaster::ForAllL..</text>
+</g>
+<g >
+<title>SocketPoll::poll (5 samples, 25.00%)</title><rect x="10.0" y="789" width="295.0" height="15.0" fill="rgb(219,128,38)" rx="2" ry="2" />
+<text  x="13.00" y="799.5" >SocketPoll::poll</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 5.00%)</title><rect x="1131.0" y="869" width="59.0" height="15.0" fill="rgb(235,113,22)" rx="2" ry="2" />
+<text  x="1134.00" y="879.5" >handle..</text>
+</g>
+<g >
+<title>http::Session::syncRequest (5 samples, 25.00%)</title><rect x="10.0" y="821" width="295.0" height="15.0" fill="rgb(205,85,5)" rx="2" ry="2" />
+<text  x="13.00" y="831.5" >http::Session::syncRequest</text>
+</g>
+<g >
+<title>ImpEditEngine::CreateLines (1 samples, 5.00%)</title><rect x="777.0" y="213" width="59.0" height="15.0" fill="rgb(231,105,53)" rx="2" ry="2" />
+<text  x="780.00" y="223.5" >ImpEdi..</text>
+</g>
+<g >
+<title>Outliner::SetText (1 samples, 5.00%)</title><rect x="836.0" y="277" width="59.0" height="15.0" fill="rgb(233,185,6)" rx="2" ry="2" />
+<text  x="839.00" y="287.5" >Outlin..</text>
+</g>
+<g >
+<title>ImpEditEngine::InitDoc (1 samples, 5.00%)</title><rect x="718.0" y="245" width="59.0" height="15.0" fill="rgb(217,133,8)" rx="2" ry="2" />
+<text  x="721.00" y="255.5" >ImpEdi..</text>
+</g>
+<g >
+<title>ChildSession::renderShapeSelection (3 samples, 15.00%)</title><rect x="718.0" y="709" width="177.0" height="15.0" fill="rgb(213,94,26)" rx="2" ry="2" />
+<text  x="721.00" y="719.5" >ChildSession::renderSha..</text>
+</g>
+<g >
+<title>fetch_pixel_b8g8r8 (3 samples, 15.00%)</title><rect x="541.0" y="885" width="177.0" height="15.0" fill="rgb(213,59,32)" rx="2" ry="2" />
+<text  x="544.00" y="895.5" >fetch_pixel_b8g8r8</text>
+</g>
+<g >
+<title>SvpSalInstance::ImplYield (7 samples, 35.00%)</title><rect x="718.0" y="805" width="413.0" height="15.0" fill="rgb(234,125,39)" rx="2" ry="2" />
+<text  x="721.00" y="815.5" >SvpSalInstance::ImplYield</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::BasePrimitive2D::getB2DRange (3 samples, 15.00%)</title><rect x="954.0" y="421" width="177.0" height="15.0" fill="rgb(220,3,30)" rx="2" ry="2" />
+<text  x="957.00" y="431.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>KitSocketPoll::kitPoll (3 samples, 15.00%)</title><rect x="718.0" y="789" width="177.0" height="15.0" fill="rgb(207,188,40)" rx="2" ry="2" />
+<text  x="721.00" y="799.5" >KitSocketPoll::kitPoll</text>
+</g>
+<g >
+<title>SalUserEventList::DispatchUserEvents (1 samples, 5.00%)</title><rect x="895.0" y="789" width="59.0" height="15.0" fill="rgb(232,77,10)" rx="2" ry="2" />
+<text  x="898.00" y="799.5" >SalUse..</text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (5 samples, 25.00%)</title><rect x="10.0" y="917" width="295.0" height="15.0" fill="rgb(210,46,40)" rx="2" ry="2" />
+<text  x="13.00" y="927.5" >std::_Function_handler&lt;void </text>
+</g>
+<g >
+<title>Outliner::ImplHasNumberFormat (1 samples, 5.00%)</title><rect x="836.0" y="149" width="59.0" height="15.0" fill="rgb(217,173,29)" rx="2" ry="2" />
+<text  x="839.00" y="159.5" >Outlin..</text>
+</g>
+<g >
+<title>sd::slidesorter::cache::QueueProcessor::ProcessOneRequest (3 samples, 15.00%)</title><rect x="954.0" y="741" width="177.0" height="15.0" fill="rgb(213,51,14)" rx="2" ry="2" />
+<text  x="957.00" y="751.5" >sd::slidesorter::cache:..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 15.00%)</title><rect x="541.0" y="853" width="177.0" height="15.0" fill="rgb(232,203,45)" rx="2" ry="2" />
+<text  x="544.00" y="863.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>SdrObjEditView::TextEditDrawing (3 samples, 15.00%)</title><rect x="954.0" y="565" width="177.0" height="15.0" fill="rgb(226,94,37)" rx="2" ry="2" />
+<text  x="957.00" y="575.5" >SdrObjEditView::TextEdi..</text>
+</g>
+<g >
+<title>syscall (1 samples, 5.00%)</title><rect x="895.0" y="629" width="59.0" height="15.0" fill="rgb(251,77,28)" rx="2" ry="2" />
+<text  x="898.00" y="639.5" >syscall</text>
+</g>
+<g >
+<title>syscall (1 samples, 5.00%)</title><rect x="1131.0" y="853" width="59.0" height="15.0" fill="rgb(234,34,0)" rx="2" ry="2" />
+<text  x="1134.00" y="863.5" >syscall</text>
+</g>
+<g >
+<title>SdNavigatorWin::ClickObjectHdl (1 samples, 5.00%)</title><rect x="895.0" y="741" width="59.0" height="15.0" fill="rgb(227,31,23)" rx="2" ry="2" />
+<text  x="898.00" y="751.5" >SdNavi..</text>
+</g>
+<g >
+<title>InnerYield (7 samples, 35.00%)</title><rect x="718.0" y="837" width="413.0" height="15.0" fill="rgb(246,83,18)" rx="2" ry="2" />
+<text  x="721.00" y="847.5" >InnerYield</text>
+</g>
+<g >
+<title>SfxObjectShell::PreDoSaveAs_Impl (3 samples, 15.00%)</title><rect x="718.0" y="597" width="177.0" height="15.0" fill="rgb(252,211,37)" rx="2" ry="2" />
+<text  x="721.00" y="607.5" >SfxObjectShell::PreDoSa..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 5.00%)</title><rect x="895.0" y="645" width="59.0" height="15.0" fill="rgb(225,158,22)" rx="2" ry="2" />
+<text  x="898.00" y="655.5" >handle..</text>
+</g>
+<g >
+<title>SfxBaseModel::impl_store (3 samples, 15.00%)</title><rect x="718.0" y="645" width="177.0" height="15.0" fill="rgb(252,200,4)" rx="2" ry="2" />
+<text  x="721.00" y="655.5" >SfxBaseModel::impl_store</text>
+</g>
+<g >
+<title>SvpSalInstance::DoYield (7 samples, 35.00%)</title><rect x="718.0" y="821" width="413.0" height="15.0" fill="rgb(213,37,35)" rx="2" ry="2" />
+<text  x="721.00" y="831.5" >SvpSalInstance::DoYield</text>
+</g>
+<g >
+<title>SocketPoll::poll (1 samples, 5.00%)</title><rect x="1131.0" y="917" width="59.0" height="15.0" fill="rgb(224,81,0)" rx="2" ry="2" />
+<text  x="1134.00" y="927.5" >Socket..</text>
+</g>
+<g >
+<title>sd::slidesorter::cache::BitmapFactory::CreateBitmap (3 samples, 15.00%)</title><rect x="954.0" y="725" width="177.0" height="15.0" fill="rgb(228,177,49)" rx="2" ry="2" />
+<text  x="957.00" y="735.5" >sd::slidesorter::cache:..</text>
+</g>
+<g >
+<title>Application::Execute (7 samples, 35.00%)</title><rect x="718.0" y="853" width="413.0" height="15.0" fill="rgb(229,198,51)" rx="2" ry="2" />
+<text  x="721.00" y="863.5" >Application::Execute</text>
+</g>
+<g >
+<title>SvxUnoTextRangeBase::getPropertyValue (1 samples, 5.00%)</title><rect x="718.0" y="357" width="59.0" height="15.0" fill="rgb(218,217,15)" rx="2" ry="2" />
+<text  x="721.00" y="367.5" >SvxUno..</text>
+</g>
+<g >
+<title>cairo_recording_surface_get_extents (7 samples, 35.00%)</title><rect x="305.0" y="981" width="413.0" height="15.0" fill="rgb(226,80,4)" rx="2" ry="2" />
+<text  x="308.00" y="991.5" >cairo_recording_surface_get_extents</text>
+</g>
+<g >
+<title>DocumentBroker::sendHttpSyncRequest (5 samples, 25.00%)</title><rect x="10.0" y="837" width="295.0" height="15.0" fill="rgb(221,68,17)" rx="2" ry="2" />
+<text  x="13.00" y="847.5" >DocumentBroker::sendHttpSyncRequest</text>
+</g>
+<g >
+<title>Task::StartTimer (3 samples, 15.00%)</title><rect x="954.0" y="197" width="177.0" height="15.0" fill="rgb(235,164,35)" rx="2" ry="2" />
+<text  x="957.00" y="207.5" >Task::StartTimer</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::BasePrimitive2D::getB2DRange (3 samples, 15.00%)</title><rect x="954.0" y="357" width="177.0" height="15.0" fill="rgb(234,165,28)" rx="2" ry="2" />
+<text  x="957.00" y="367.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>Outliner::GetNumberFormat (1 samples, 5.00%)</title><rect x="836.0" y="133" width="59.0" height="15.0" fill="rgb(240,10,2)" rx="2" ry="2" />
+<text  x="839.00" y="143.5" >Outlin..</text>
+</g>
+<g >
+<title>SvxUnoTextRangeBase::_getPropertyValue (1 samples, 5.00%)</title><rect x="718.0" y="341" width="59.0" height="15.0" fill="rgb(248,188,24)" rx="2" ry="2" />
+<text  x="721.00" y="351.5" >SvxUno..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::getB2DRangeFromPrimitive2DReference (3 samples, 15.00%)</title><rect x="954.0" y="245" width="177.0" height="15.0" fill="rgb(230,227,20)" rx="2" ry="2" />
+<text  x="957.00" y="255.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>SVGTextWriter::startTextParagraph (2 samples, 10.00%)</title><rect x="777.0" y="389" width="118.0" height="15.0" fill="rgb(236,215,15)" rx="2" ry="2" />
+<text  x="780.00" y="399.5" >SVGTextWriter:..</text>
+</g>
+<g >
+<title>OutlinerEditEng::GetBulletArea (1 samples, 5.00%)</title><rect x="777.0" y="197" width="59.0" height="15.0" fill="rgb(211,76,46)" rx="2" ry="2" />
+<text  x="780.00" y="207.5" >Outlin..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::getB2DRangeFromPrimitive2DReference (3 samples, 15.00%)</title><rect x="954.0" y="309" width="177.0" height="15.0" fill="rgb(222,0,47)" rx="2" ry="2" />
+<text  x="957.00" y="319.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>SVGTextWriter::setTextPosition (1 samples, 5.00%)</title><rect x="718.0" y="389" width="59.0" height="15.0" fill="rgb(230,210,14)" rx="2" ry="2" />
+<text  x="721.00" y="399.5" >SVGTex..</text>
+</g>
+<g >
+<title>Session::handleMessage (3 samples, 15.00%)</title><rect x="718.0" y="741" width="177.0" height="15.0" fill="rgb(235,225,17)" rx="2" ry="2" />
+<text  x="721.00" y="751.5" >Session::handleMessage</text>
+</g>
+<g >
+<title>SfxStateCache::GetSlotServer (1 samples, 5.00%)</title><rect x="895.0" y="677" width="59.0" height="15.0" fill="rgb(234,92,17)" rx="2" ry="2" />
+<text  x="898.00" y="687.5" >SfxSta..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 5.00%)</title><rect x="836.0" y="85" width="59.0" height="15.0" fill="rgb(253,165,39)" rx="2" ry="2" />
+<text  x="839.00" y="95.5" >_IO_fu..</text>
+</g>
+<g >
+<title>lokit_main (7 samples, 35.00%)</title><rect x="718.0" y="949" width="413.0" height="15.0" fill="rgb(217,103,12)" rx="2" ry="2" />
+<text  x="721.00" y="959.5" >lokit_main</text>
+</g>
+<g >
+<title>ImpEditEngine::CreateLines (1 samples, 5.00%)</title><rect x="836.0" y="181" width="59.0" height="15.0" fill="rgb(233,10,14)" rx="2" ry="2" />
+<text  x="839.00" y="191.5" >ImpEdi..</text>
+</g>
+<g >
+<title>__clone (1 samples, 5.00%)</title><rect x="1131.0" y="1029" width="59.0" height="15.0" fill="rgb(213,92,0)" rx="2" ry="2" />
+<text  x="1134.00" y="1039.5" >__clone</text>
+</g>
+<g >
+<title>SVGFilter::filter (3 samples, 15.00%)</title><rect x="718.0" y="549" width="177.0" height="15.0" fill="rgb(236,33,49)" rx="2" ry="2" />
+<text  x="721.00" y="559.5" >SVGFilter::filter</text>
+</g>
+<g >
+<title>remotefontconfi (1 samples, 5.00%)</title><rect x="1131.0" y="1045" width="59.0" height="15.0" fill="rgb(241,55,38)" rx="2" ry="2" />
+<text  x="1134.00" y="1055.5" >remote..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 5.00%)</title><rect x="836.0" y="69" width="59.0" height="15.0" fill="rgb(222,65,19)" rx="2" ry="2" />
+<text  x="839.00" y="79.5" >handle..</text>
+</g>
+<g >
+<title>cairo_scaled_font_get_font_options (7 samples, 35.00%)</title><rect x="305.0" y="1013" width="413.0" height="15.0" fill="rgb(233,10,10)" rx="2" ry="2" />
+<text  x="308.00" y="1023.5" >cairo_scaled_font_get_font_options</text>
+</g>
+<g >
+<title>start_thread (5 samples, 25.00%)</title><rect x="10.0" y="1013" width="295.0" height="15.0" fill="rgb(209,203,6)" rx="2" ry="2" />
+<text  x="13.00" y="1023.5" >start_thread</text>
+</g>
+<g >
+<title>SdrObjEditView::ImpPaintOutlinerView (3 samples, 15.00%)</title><rect x="954.0" y="549" width="177.0" height="15.0" fill="rgb(236,167,50)" rx="2" ry="2" />
+<text  x="957.00" y="559.5" >SdrObjEditView::ImpPain..</text>
+</g>
+<g >
+<title>SfxBindings::NextJob_Impl (1 samples, 5.00%)</title><rect x="895.0" y="709" width="59.0" height="15.0" fill="rgb(236,220,41)" rx="2" ry="2" />
+<text  x="898.00" y="719.5" >SfxBin..</text>
+</g>
+<g >
+<title>non-virtual thunk to SvxUnoTextContent::getPropertyValue (2 samples, 10.00%)</title><rect x="777.0" y="357" width="118.0" height="15.0" fill="rgb(235,151,1)" rx="2" ry="2" />
+<text  x="780.00" y="367.5" >non-virtual th..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;unsigned short, std::pair&lt;unsigned short const, SfxPoolItem const*&gt;, std::allocator&lt;std::pair&lt;unsigned short const, SfxPoolItem const*&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;unsigned short&gt;, std::hash&lt;unsigned short&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::find (1 samples, 5.00%)</title><rect x="777.0" y="85" width="59.0" height="15.0" fill="rgb(218,189,9)" rx="2" ry="2" />
+<text  x="780.00" y="95.5" >std::_..</text>
+</g>
+<g >
+<title>SvxTextEditSourceImpl::GetBackgroundTextForwarder (1 samples, 5.00%)</title><rect x="836.0" y="293" width="59.0" height="15.0" fill="rgb(226,52,52)" rx="2" ry="2" />
+<text  x="839.00" y="303.5" >SvxTex..</text>
+</g>
+<g >
+<title>SVGFilter::implExportPage (3 samples, 15.00%)</title><rect x="718.0" y="469" width="177.0" height="15.0" fill="rgb(244,31,37)" rx="2" ry="2" />
+<text  x="721.00" y="479.5" >SVGFilter::implExportPage</text>
+</g>
+<g >
+<title>SfxObjectShell::SaveTo_Impl (3 samples, 15.00%)</title><rect x="718.0" y="581" width="177.0" height="15.0" fill="rgb(227,90,25)" rx="2" ry="2" />
+<text  x="721.00" y="591.5" >SfxObjectShell::SaveTo_..</text>
+</g>
+<g >
+<title>SVGFilter::implExportDocument (3 samples, 15.00%)</title><rect x="718.0" y="485" width="177.0" height="15.0" fill="rgb(249,88,37)" rx="2" ry="2" />
+<text  x="721.00" y="495.5" >SVGFilter::implExportDo..</text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::(anonymous namespace)::B2DRangeVisitor::visit (3 samples, 15.00%)</title><rect x="954.0" y="405" width="177.0" height="15.0" fill="rgb(252,150,34)" rx="2" ry="2" />
+<text  x="957.00" y="415.5" >drawinglayer::primitive..</text>
+</g>
+<g >
+<title>syscall (3 samples, 15.00%)</title><rect x="541.0" y="837" width="177.0" height="15.0" fill="rgb(209,15,51)" rx="2" ry="2" />
+<text  x="544.00" y="847.5" >syscall</text>
+</g>
+<g >
+<title>SfxBindings::Update (1 samples, 5.00%)</title><rect x="895.0" y="725" width="59.0" height="15.0" fill="rgb(234,86,48)" rx="2" ry="2" />
+<text  x="898.00" y="735.5" >SfxBin..</text>
+</g>
+<g >
+<title>Outliner::SetText (1 samples, 5.00%)</title><rect x="777.0" y="309" width="59.0" height="15.0" fill="rgb(210,199,38)" rx="2" ry="2" />
+<text  x="780.00" y="319.5" >Outlin..</text>
+</g>
+<g >
+<title>syscall (1 samples, 5.00%)</title><rect x="777.0" y="37" width="59.0" height="15.0" fill="rgb(226,169,43)" rx="2" ry="2" />
+<text  x="780.00" y="47.5" >syscall</text>
+</g>
+<g >
+<title>ImpEditEngine::DrawText_ToEditView (3 samples, 15.00%)</title><rect x="954.0" y="517" width="177.0" height="15.0" fill="rgb(212,144,48)" rx="2" ry="2" />
+<text  x="957.00" y="527.5" >ImpEditEngine::DrawText..</text>
+</g>
+<g >
+<title>forkit_main (7 samples, 35.00%)</title><rect x="718.0" y="997" width="413.0" height="15.0" fill="rgb(219,7,8)" rx="2" ry="2" />
+<text  x="721.00" y="1007.5" >forkit_main</text>
+</g>
+<g >
+<title>SVGActionWriter::WriteMetaFile (3 samples, 15.00%)</title><rect x="718.0" y="421" width="177.0" height="15.0" fill="rgb(228,62,8)" rx="2" ry="2" />
+<text  x="721.00" y="431.5" >SVGActionWriter::WriteM..</text>
+</g>
+<g >
+<title>cairo_font_options_get_custom_palette_color (7 samples, 35.00%)</title><rect x="305.0" y="965" width="413.0" height="15.0" fill="rgb(251,107,49)" rx="2" ry="2" />
+<text  x="308.00" y="975.5" >cairo_font_options_get_custom_palette_color</text>
+</g>
+<g >
+<title>ImpEditEngine::SetUpdateLayout (1 samples, 5.00%)</title><rect x="777.0" y="277" width="59.0" height="15.0" fill="rgb(222,140,20)" rx="2" ry="2" />
+<text  x="780.00" y="287.5" >ImpEdi..</text>
+</g>
+<g >
+<title>ImpEditEngine::FormatParagraphs (1 samples, 5.00%)</title><rect x="836.0" y="197" width="59.0" height="15.0" fill="rgb(250,121,17)" rx="2" ry="2" />
+<text  x="839.00" y="207.5" >ImpEdi..</text>
+</g>
+</g>
+</svg>
