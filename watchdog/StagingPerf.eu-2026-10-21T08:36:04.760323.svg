@@ -1,0 +1,1133 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="1126" onload="init(evt)" viewBox="0 0 1200 1126" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="1126.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >StagingPerf.eu Watchdog Profile (2026-10-20T11:00:01.481182)</text>
+<text id="details" x="10.00" y="1109" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="1109" > </text>
+<g id="frames">
+<g >
+<title>syscall (1 samples, 5.00%)</title><rect x="954.0" y="85" width="59.0" height="15.0" fill="rgb(243,197,29)" rx="2" ry="2" />
+<text  x="957.00" y="95.5" >syscall</text>
+</g>
+<g >
+<title>RequestVettingStation::createClientSession (10 samples, 50.00%)</title><rect x="187.0" y="917" width="590.0" height="15.0" fill="rgb(246,188,49)" rx="2" ry="2" />
+<text  x="190.00" y="927.5" >RequestVettingStation::createClientSession</text>
+</g>
+<g >
+<title>SslStreamSocket::readIncomingData (3 samples, 15.00%)</title><rect x="305.0" y="757" width="177.0" height="15.0" fill="rgb(229,35,3)" rx="2" ry="2" />
+<text  x="308.00" y="767.5" >SslStreamSocket::readIn..</text>
+</g>
+<g >
+<title>addStyleEntry (1 samples, 5.00%)</title><rect x="836.0" y="677" width="59.0" height="15.0" fill="rgb(238,209,29)" rx="2" ry="2" />
+<text  x="839.00" y="687.5" >addSty..</text>
+</g>
+<g >
+<title>syscall (1 samples, 5.00%)</title><rect x="836.0" y="565" width="59.0" height="15.0" fill="rgb(205,226,9)" rx="2" ry="2" />
+<text  x="839.00" y="575.5" >syscall</text>
+</g>
+<g >
+<title>DocumentBroker::sendHttpSyncRequest (8 samples, 40.00%)</title><rect x="305.0" y="853" width="472.0" height="15.0" fill="rgb(237,170,42)" rx="2" ry="2" />
+<text  x="308.00" y="863.5" >DocumentBroker::sendHttpSyncRequest</text>
+</g>
+<g >
+<title>syscall (1 samples, 5.00%)</title><rect x="777.0" y="565" width="59.0" height="15.0" fill="rgb(235,70,38)" rx="2" ry="2" />
+<text  x="780.00" y="575.5" >syscall</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 15.00%)</title><rect x="305.0" y="533" width="177.0" height="15.0" fill="rgb(253,65,1)" rx="2" ry="2" />
+<text  x="308.00" y="543.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>desktop::COKitImpl::runLoop (7 samples, 35.00%)</title><rect x="777.0" y="933" width="413.0" height="15.0" fill="rgb(228,39,22)" rx="2" ry="2" />
+<text  x="780.00" y="943.5" >desktop::COKitImpl::runLoop</text>
+</g>
+<g >
+<title>createBitmapFromColorAndAlpha (1 samples, 5.00%)</title><rect x="895.0" y="117" width="59.0" height="15.0" fill="rgb(225,183,27)" rx="2" ry="2" />
+<text  x="898.00" y="127.5" >create..</text>
+</g>
+<g >
+<title>EVP_DecryptUpdate (2 samples, 10.00%)</title><rect x="187.0" y="613" width="118.0" height="15.0" fill="rgb(206,75,29)" rx="2" ry="2" />
+<text  x="190.00" y="623.5" >EVP_DecryptUpd..</text>
+</g>
+<g >
+<title>syscall (3 samples, 15.00%)</title><rect x="10.0" y="693" width="177.0" height="15.0" fill="rgb(251,84,45)" rx="2" ry="2" />
+<text  x="13.00" y="703.5" >syscall</text>
+</g>
+<g >
+<title>ssl_derive (3 samples, 15.00%)</title><rect x="305.0" y="661" width="177.0" height="15.0" fill="rgb(210,53,5)" rx="2" ry="2" />
+<text  x="308.00" y="671.5" >ssl_derive</text>
+</g>
+<g >
+<title>state_machine (3 samples, 15.00%)</title><rect x="305.0" y="725" width="177.0" height="15.0" fill="rgb(231,108,35)" rx="2" ry="2" />
+<text  x="308.00" y="735.5" >state_machine</text>
+</g>
+<g >
+<title>forkCOKit (7 samples, 35.00%)</title><rect x="777.0" y="997" width="413.0" height="15.0" fill="rgb(212,7,46)" rx="2" ry="2" />
+<text  x="780.00" y="1007.5" >forkCOKit</text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (10 samples, 50.00%)</title><rect x="187.0" y="933" width="590.0" height="15.0" fill="rgb(240,200,49)" rx="2" ry="2" />
+<text  x="190.00" y="943.5" >std::_Function_handler&lt;void </text>
+</g>
+<g >
+<title>oox::drawingml::BlipFillContext::onCreateContext (5 samples, 25.00%)</title><rect x="895.0" y="229" width="295.0" height="15.0" fill="rgb(241,136,15)" rx="2" ry="2" />
+<text  x="898.00" y="239.5" >oox::drawingml::BlipFillContext::onCrea..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 5.00%)</title><rect x="895.0" y="53" width="59.0" height="15.0" fill="rgb(232,210,20)" rx="2" ry="2" />
+<text  x="898.00" y="63.5" >handle..</text>
+</g>
+<g >
+<title>Application::Execute (7 samples, 35.00%)</title><rect x="777.0" y="869" width="413.0" height="15.0" fill="rgb(211,7,26)" rx="2" ry="2" />
+<text  x="780.00" y="879.5" >Application::Execute</text>
+</g>
+<g >
+<title>BitmapReadAccess::SetPixelForN8BitPal (1 samples, 5.00%)</title><rect x="954.0" y="133" width="59.0" height="15.0" fill="rgb(213,195,9)" rx="2" ry="2" />
+<text  x="957.00" y="143.5" >Bitmap..</text>
+</g>
+<g >
+<title>ssl3_read (2 samples, 10.00%)</title><rect x="187.0" y="693" width="118.0" height="15.0" fill="rgb(231,35,10)" rx="2" ry="2" />
+<text  x="190.00" y="703.5" >ssl3_read</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (5 samples, 25.00%)</title><rect x="895.0" y="341" width="295.0" height="15.0" fill="rgb(241,134,50)" rx="2" ry="2" />
+<text  x="898.00" y="351.5" >oox::core::XmlFilterBase::importFragment</text>
+</g>
+<g >
+<title>sha512_block_data_order (3 samples, 15.00%)</title><rect x="305.0" y="549" width="177.0" height="15.0" fill="rgb(209,189,1)" rx="2" ry="2" />
+<text  x="308.00" y="559.5" >sha512_block_data_order</text>
+</g>
+<g >
+<title>framework::LoadEnv::loadComponentFromURL (5 samples, 25.00%)</title><rect x="895.0" y="645" width="295.0" height="15.0" fill="rgb(209,109,53)" rx="2" ry="2" />
+<text  x="898.00" y="655.5" >framework::LoadEnv::loadComponentFromURL</text>
+</g>
+<g >
+<title>generic_aes_gcm_cipher_update (2 samples, 10.00%)</title><rect x="187.0" y="581" width="118.0" height="15.0" fill="rgb(234,160,23)" rx="2" ry="2" />
+<text  x="190.00" y="591.5" >generic_aes_gc..</text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 5.00%)</title><rect x="777.0" y="613" width="59.0" height="15.0" fill="rgb(242,176,13)" rx="2" ry="2" />
+<text  x="780.00" y="623.5" >_int_m..</text>
+</g>
+<g >
+<title>oox::drawingml::BlipContext::BlipContext (5 samples, 25.00%)</title><rect x="895.0" y="213" width="295.0" height="15.0" fill="rgb(250,154,41)" rx="2" ry="2" />
+<text  x="898.00" y="223.5" >oox::drawingml::BlipContext::BlipContext</text>
+</g>
+<g >
+<title>AES_encrypt (2 samples, 10.00%)</title><rect x="187.0" y="549" width="118.0" height="15.0" fill="rgb(217,201,21)" rx="2" ry="2" />
+<text  x="190.00" y="559.5" >AES_encrypt</text>
+</g>
+<g >
+<title>syscall (3 samples, 15.00%)</title><rect x="305.0" y="501" width="177.0" height="15.0" fill="rgb(222,173,14)" rx="2" ry="2" />
+<text  x="308.00" y="511.5" >syscall</text>
+</g>
+<g >
+<title>SslStreamSocket::readData (2 samples, 10.00%)</title><rect x="187.0" y="725" width="118.0" height="15.0" fill="rgb(245,116,19)" rx="2" ry="2" />
+<text  x="190.00" y="735.5" >SslStreamSocke..</text>
+</g>
+<g >
+<title>start_thread (13 samples, 65.00%)</title><rect x="10.0" y="1029" width="767.0" height="15.0" fill="rgb(234,97,2)" rx="2" ry="2" />
+<text  x="13.00" y="1039.5" >start_thread</text>
+</g>
+<g >
+<title>framework::LoadEnv::impl_loadContent (5 samples, 25.00%)</title><rect x="895.0" y="597" width="295.0" height="15.0" fill="rgb(237,70,34)" rx="2" ry="2" />
+<text  x="898.00" y="607.5" >framework::LoadEnv::impl_loadContent</text>
+</g>
+<g >
+<title>tls_parse_all_extensions (3 samples, 15.00%)</title><rect x="305.0" y="693" width="177.0" height="15.0" fill="rgb(249,180,42)" rx="2" ry="2" />
+<text  x="308.00" y="703.5" >tls_parse_all_extensions</text>
+</g>
+<g >
+<title>soffice_main (7 samples, 35.00%)</title><rect x="777.0" y="917" width="413.0" height="15.0" fill="rgb(253,146,38)" rx="2" ry="2" />
+<text  x="780.00" y="927.5" >soffice_main</text>
+</g>
+<g >
+<title>StreamSocket::handlePoll (3 samples, 15.00%)</title><rect x="10.0" y="933" width="177.0" height="15.0" fill="rgb(247,32,33)" rx="2" ry="2" />
+<text  x="13.00" y="943.5" >StreamSocket::handlePoll</text>
+</g>
+<g >
+<title>framework::LoadEnv::start (5 samples, 25.00%)</title><rect x="895.0" y="613" width="295.0" height="15.0" fill="rgb(252,70,21)" rx="2" ry="2" />
+<text  x="898.00" y="623.5" >framework::LoadEnv::start</text>
+</g>
+<g >
+<title>http::Session::syncDownload (2 samples, 10.00%)</title><rect x="187.0" y="821" width="118.0" height="15.0" fill="rgb(234,124,20)" rx="2" ry="2" />
+<text  x="190.00" y="831.5" >http::Session:..</text>
+</g>
+<g >
+<title>framework::Desktop::loadComponentFromURL (5 samples, 25.00%)</title><rect x="895.0" y="661" width="295.0" height="15.0" fill="rgb(219,159,10)" rx="2" ry="2" />
+<text  x="898.00" y="671.5" >framework::Desktop::loadComponentFromURL</text>
+</g>
+<g >
+<title>http::Session::syncRequest (3 samples, 15.00%)</title><rect x="10.0" y="821" width="177.0" height="15.0" fill="rgb(220,76,20)" rx="2" ry="2" />
+<text  x="13.00" y="831.5" >http::Session::syncRequ..</text>
+</g>
+<g >
+<title>desktop::Desktop::Main (7 samples, 35.00%)</title><rect x="777.0" y="885" width="413.0" height="15.0" fill="rgb(233,93,16)" rx="2" ry="2" />
+<text  x="780.00" y="895.5" >desktop::Desktop::Main</text>
+</g>
+<g >
+<title>oox::GraphicHelper::importGraphic (5 samples, 25.00%)</title><rect x="895.0" y="181" width="295.0" height="15.0" fill="rgb(249,56,7)" rx="2" ry="2" />
+<text  x="898.00" y="191.5" >oox::GraphicHelper::importGraphic</text>
+</g>
+<g >
+<title>http::Session::syncRequestImpl (3 samples, 15.00%)</title><rect x="10.0" y="789" width="177.0" height="15.0" fill="rgb(234,129,54)" rx="2" ry="2" />
+<text  x="13.00" y="799.5" >http::Session::syncRequ..</text>
+</g>
+<g >
+<title>http::Session::syncRequest (8 samples, 40.00%)</title><rect x="305.0" y="821" width="472.0" height="15.0" fill="rgb(241,227,9)" rx="2" ry="2" />
+<text  x="308.00" y="831.5" >http::Session::syncRequest</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 5.00%)</title><rect x="777.0" y="597" width="59.0" height="15.0" fill="rgb(243,165,20)" rx="2" ry="2" />
+<text  x="780.00" y="607.5" >_IO_fu..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 5.00%)</title><rect x="836.0" y="581" width="59.0" height="15.0" fill="rgb(232,21,54)" rx="2" ry="2" />
+<text  x="839.00" y="591.5" >handle..</text>
+</g>
+<g >
+<title>vcl::bitmap::premultiply (1 samples, 5.00%)</title><rect x="895.0" y="85" width="59.0" height="15.0" fill="rgb(241,5,13)" rx="2" ry="2" />
+<text  x="898.00" y="95.5" >vcl::b..</text>
+</g>
+<g >
+<title>Document::forwardToChild (7 samples, 35.00%)</title><rect x="777.0" y="773" width="413.0" height="15.0" fill="rgb(214,55,24)" rx="2" ry="2" />
+<text  x="780.00" y="783.5" >Document::forwardToChild</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 5.00%)</title><rect x="777.0" y="581" width="59.0" height="15.0" fill="rgb(239,224,51)" rx="2" ry="2" />
+<text  x="780.00" y="591.5" >handle..</text>
+</g>
+<g >
+<title>ChildSession::_handleInput (7 samples, 35.00%)</title><rect x="777.0" y="741" width="413.0" height="15.0" fill="rgb(238,187,17)" rx="2" ry="2" />
+<text  x="780.00" y="751.5" >ChildSession::_handleInput</text>
+</g>
+<g >
+<title>oox::ppt::PresentationFragmentHandler::importSlide (5 samples, 25.00%)</title><rect x="895.0" y="373" width="295.0" height="15.0" fill="rgb(242,54,3)" rx="2" ry="2" />
+<text  x="898.00" y="383.5" >oox::ppt::PresentationFragmentHandler::..</text>
+</g>
+<g >
+<title>BitmapReadAccess::SetPixelForN32BitTcRgba (1 samples, 5.00%)</title><rect x="895.0" y="101" width="59.0" height="15.0" fill="rgb(227,132,46)" rx="2" ry="2" />
+<text  x="898.00" y="111.5" >Bitmap..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 5.00%)</title><rect x="954.0" y="117" width="59.0" height="15.0" fill="rgb(251,17,28)" rx="2" ry="2" />
+<text  x="957.00" y="127.5" >_IO_fu..</text>
+</g>
+<g >
+<title>WopiStorage::updateLockState (3 samples, 15.00%)</title><rect x="10.0" y="837" width="177.0" height="15.0" fill="rgb(225,35,27)" rx="2" ry="2" />
+<text  x="13.00" y="847.5" >WopiStorage::updateLock..</text>
+</g>
+<g >
+<title>DocumentBroker::addSession (10 samples, 50.00%)</title><rect x="187.0" y="901" width="590.0" height="15.0" fill="rgb(205,224,36)" rx="2" ry="2" />
+<text  x="190.00" y="911.5" >DocumentBroker::addSession</text>
+</g>
+<g >
+<title>getComponentStyles (1 samples, 5.00%)</title><rect x="836.0" y="693" width="59.0" height="15.0" fill="rgb(212,79,49)" rx="2" ry="2" />
+<text  x="839.00" y="703.5" >getCom..</text>
+</g>
+<g >
+<title>DocumentBroker::DocumentBrokerPoll::pollingThread (13 samples, 65.00%)</title><rect x="10.0" y="981" width="767.0" height="15.0" fill="rgb(227,175,15)" rx="2" ry="2" />
+<text  x="13.00" y="991.5" >DocumentBroker::DocumentBrokerPoll::pollingThread</text>
+</g>
+<g >
+<title>StreamSocket::handlePoll (2 samples, 10.00%)</title><rect x="187.0" y="757" width="118.0" height="15.0" fill="rgb(254,97,14)" rx="2" ry="2" />
+<text  x="190.00" y="767.5" >StreamSocket::..</text>
+</g>
+<g >
+<title>_start (7 samples, 35.00%)</title><rect x="777.0" y="1045" width="413.0" height="15.0" fill="rgb(227,78,51)" rx="2" ry="2" />
+<text  x="780.00" y="1055.5" >_start</text>
+</g>
+<g >
+<title>SocketPoll::poll (13 samples, 65.00%)</title><rect x="10.0" y="949" width="767.0" height="15.0" fill="rgb(233,109,45)" rx="2" ry="2" />
+<text  x="13.00" y="959.5" >SocketPoll::poll</text>
+</g>
+<g >
+<title>StreamSocket::ensureDisconnected (3 samples, 15.00%)</title><rect x="10.0" y="917" width="177.0" height="15.0" fill="rgb(242,46,9)" rx="2" ry="2" />
+<text  x="13.00" y="927.5" >StreamSocket::ensureDis..</text>
+</g>
+<g >
+<title>InnerYield (7 samples, 35.00%)</title><rect x="777.0" y="853" width="413.0" height="15.0" fill="rgb(248,187,2)" rx="2" ry="2" />
+<text  x="780.00" y="863.5" >InnerYield</text>
+</g>
+<g >
+<title>tls_get_more_records (2 samples, 10.00%)</title><rect x="187.0" y="645" width="118.0" height="15.0" fill="rgb(217,66,45)" rx="2" ry="2" />
+<text  x="190.00" y="655.5" >tls_get_more_r..</text>
+</g>
+<g >
+<title>DocumentBroker::download (10 samples, 50.00%)</title><rect x="187.0" y="885" width="590.0" height="15.0" fill="rgb(227,59,40)" rx="2" ry="2" />
+<text  x="190.00" y="895.5" >DocumentBroker::download</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 15.00%)</title><rect x="10.0" y="725" width="177.0" height="15.0" fill="rgb(254,134,53)" rx="2" ry="2" />
+<text  x="13.00" y="735.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (5 samples, 25.00%)</title><rect x="895.0" y="469" width="295.0" height="15.0" fill="rgb(210,6,15)" rx="2" ry="2" />
+<text  x="898.00" y="479.5" >oox::core::XmlFilterBase::importFragment</text>
+</g>
+<g >
+<title>EVP_Q_mac (3 samples, 15.00%)</title><rect x="305.0" y="597" width="177.0" height="15.0" fill="rgb(229,62,44)" rx="2" ry="2" />
+<text  x="308.00" y="607.5" >EVP_Q_mac</text>
+</g>
+<g >
+<title>oox::core::ContextHandler2::createFastChildContext (5 samples, 25.00%)</title><rect x="895.0" y="261" width="295.0" height="15.0" fill="rgb(221,165,40)" rx="2" ry="2" />
+<text  x="898.00" y="271.5" >oox::core::ContextHandler2::createFastC..</text>
+</g>
+<g >
+<title>ChildSession::getCommandValues (2 samples, 10.00%)</title><rect x="777.0" y="725" width="118.0" height="15.0" fill="rgb(242,157,9)" rx="2" ry="2" />
+<text  x="780.00" y="735.5" >ChildSession::..</text>
+</g>
+<g >
+<title>lo_documentLoadWithOptions (5 samples, 25.00%)</title><rect x="895.0" y="677" width="295.0" height="15.0" fill="rgb(212,158,10)" rx="2" ry="2" />
+<text  x="898.00" y="687.5" >lo_documentLoadWithOptions</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (5 samples, 25.00%)</title><rect x="895.0" y="437" width="295.0" height="15.0" fill="rgb(220,100,9)" rx="2" ry="2" />
+<text  x="898.00" y="447.5" >oox::core::FastParser::parseStream</text>
+</g>
+<g >
+<title>ppoll (3 samples, 15.00%)</title><rect x="10.0" y="741" width="177.0" height="15.0" fill="rgb(248,30,49)" rx="2" ry="2" />
+<text  x="13.00" y="751.5" >ppoll</text>
+</g>
+<g >
+<title>_IO_funlockfile (3 samples, 15.00%)</title><rect x="1013.0" y="117" width="177.0" height="15.0" fill="rgb(246,109,15)" rx="2" ry="2" />
+<text  x="1016.00" y="127.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>HMAC_Init_ex (3 samples, 15.00%)</title><rect x="305.0" y="581" width="177.0" height="15.0" fill="rgb(229,218,11)" rx="2" ry="2" />
+<text  x="308.00" y="591.5" >HMAC_Init_ex</text>
+</g>
+<g >
+<title>Document::onLoad (5 samples, 25.00%)</title><rect x="895.0" y="709" width="295.0" height="15.0" fill="rgb(209,161,26)" rx="2" ry="2" />
+<text  x="898.00" y="719.5" >Document::onLoad</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 15.00%)</title><rect x="1013.0" y="101" width="177.0" height="15.0" fill="rgb(241,75,22)" rx="2" ry="2" />
+<text  x="1016.00" y="111.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>framework::LoadEnv::startLoading (5 samples, 25.00%)</title><rect x="895.0" y="629" width="295.0" height="15.0" fill="rgb(253,197,42)" rx="2" ry="2" />
+<text  x="898.00" y="639.5" >framework::LoadEnv::startLoading</text>
+</g>
+<g >
+<title>Bitmap::Bitmap (1 samples, 5.00%)</title><rect x="895.0" y="133" width="59.0" height="15.0" fill="rgb(243,200,9)" rx="2" ry="2" />
+<text  x="898.00" y="143.5" >Bitmap..</text>
+</g>
+<g >
+<title>oox::ppt::PresentationFragmentHandler::importSlide (5 samples, 25.00%)</title><rect x="895.0" y="357" width="295.0" height="15.0" fill="rgb(240,80,54)" rx="2" ry="2" />
+<text  x="898.00" y="367.5" >oox::ppt::PresentationFragmentHandler::..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 5.00%)</title><rect x="954.0" y="101" width="59.0" height="15.0" fill="rgb(209,159,37)" rx="2" ry="2" />
+<text  x="957.00" y="111.5" >handle..</text>
+</g>
+<g >
+<title>syscall (1 samples, 5.00%)</title><rect x="895.0" y="37" width="59.0" height="15.0" fill="rgb(207,161,30)" rx="2" ry="2" />
+<text  x="898.00" y="47.5" >syscall</text>
+</g>
+<g >
+<title>StreamSocket::handlePoll (3 samples, 15.00%)</title><rect x="305.0" y="773" width="177.0" height="15.0" fill="rgb(227,71,19)" rx="2" ry="2" />
+<text  x="308.00" y="783.5" >StreamSocket::handlePoll</text>
+</g>
+<g >
+<title>SwXTextCellStyle::getPropertyValue (1 samples, 5.00%)</title><rect x="836.0" y="661" width="59.0" height="15.0" fill="rgb(244,194,27)" rx="2" ry="2" />
+<text  x="839.00" y="671.5" >SwXTex..</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 5.00%)</title><rect x="836.0" y="597" width="59.0" height="15.0" fill="rgb(245,3,12)" rx="2" ry="2" />
+<text  x="839.00" y="607.5" >_IO_fu..</text>
+</g>
+<g >
+<title>_Unwind_Resume (1 samples, 5.00%)</title><rect x="836.0" y="645" width="59.0" height="15.0" fill="rgb(242,98,26)" rx="2" ry="2" />
+<text  x="839.00" y="655.5" >_Unwin..</text>
+</g>
+<g >
+<title>lokit_main (7 samples, 35.00%)</title><rect x="777.0" y="965" width="413.0" height="15.0" fill="rgb(248,78,25)" rx="2" ry="2" />
+<text  x="780.00" y="975.5" >lokit_main</text>
+</g>
+<g >
+<title>Document::load (5 samples, 25.00%)</title><rect x="895.0" y="693" width="295.0" height="15.0" fill="rgb(252,123,48)" rx="2" ry="2" />
+<text  x="898.00" y="703.5" >Document::load</text>
+</g>
+<g >
+<title>oox::core::FilterBase::filter (5 samples, 25.00%)</title><rect x="895.0" y="501" width="295.0" height="15.0" fill="rgb(245,174,17)" rx="2" ry="2" />
+<text  x="898.00" y="511.5" >oox::core::FilterBase::filter</text>
+</g>
+<g >
+<title>boost::property_tree::basic_ptree&lt;std::string, std::string, std::less&lt;std::string&gt; &gt;::basic_ptree (1 samples, 5.00%)</title><rect x="777.0" y="677" width="59.0" height="15.0" fill="rgb(221,41,45)" rx="2" ry="2" />
+<text  x="780.00" y="687.5" >boost:..</text>
+</g>
+<g >
+<title>http::Session::syncRequest (3 samples, 15.00%)</title><rect x="10.0" y="805" width="177.0" height="15.0" fill="rgb(247,195,36)" rx="2" ry="2" />
+<text  x="13.00" y="815.5" >http::Session::syncRequ..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (5 samples, 25.00%)</title><rect x="895.0" y="293" width="295.0" height="15.0" fill="rgb(213,50,0)" rx="2" ry="2" />
+<text  x="898.00" y="303.5" >oox::core::FastParser::parseStream</text>
+</g>
+<g >
+<title>DocumentBroker::doDownloadDocument (2 samples, 10.00%)</title><rect x="187.0" y="869" width="118.0" height="15.0" fill="rgb(239,122,10)" rx="2" ry="2" />
+<text  x="190.00" y="879.5" >DocumentBroker..</text>
+</g>
+<g >
+<title>SSL_read (2 samples, 10.00%)</title><rect x="187.0" y="709" width="118.0" height="15.0" fill="rgb(240,210,6)" rx="2" ry="2" />
+<text  x="190.00" y="719.5" >SSL_read</text>
+</g>
+<g >
+<title>net::pollDescriptors (5 samples, 25.00%)</title><rect x="482.0" y="773" width="295.0" height="15.0" fill="rgb(206,180,30)" rx="2" ry="2" />
+<text  x="485.00" y="783.5" >net::pollDescriptors</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (5 samples, 25.00%)</title><rect x="895.0" y="405" width="295.0" height="15.0" fill="rgb(245,12,7)" rx="2" ry="2" />
+<text  x="898.00" y="415.5" >sax_fastparser::FastSaxParserImpl::pars..</text>
+</g>
+<g >
+<title>ossl_gcm_stream_update (2 samples, 10.00%)</title><rect x="187.0" y="597" width="118.0" height="15.0" fill="rgb(245,151,33)" rx="2" ry="2" />
+<text  x="190.00" y="607.5" >ossl_gcm_strea..</text>
+</g>
+<g >
+<title>_IO_funlockfile (5 samples, 25.00%)</title><rect x="482.0" y="741" width="295.0" height="15.0" fill="rgb(242,43,25)" rx="2" ry="2" />
+<text  x="485.00" y="751.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (7 samples, 35.00%)</title><rect x="777.0" y="981" width="413.0" height="15.0" fill="rgb(236,193,19)" rx="2" ry="2" />
+<text  x="780.00" y="991.5" >std::_Function_handler&lt;void </text>
+</g>
+<g >
+<title>_IO_funlockfile (2 samples, 10.00%)</title><rect x="187.0" y="533" width="118.0" height="15.0" fill="rgb(222,10,12)" rx="2" ry="2" />
+<text  x="190.00" y="543.5" >_IO_funlockfile</text>
+</g>
+<g >
+<title>startMainLoop (7 samples, 35.00%)</title><rect x="777.0" y="949" width="413.0" height="15.0" fill="rgb(241,151,19)" rx="2" ry="2" />
+<text  x="780.00" y="959.5" >startMainLoop</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (5 samples, 25.00%)</title><rect x="895.0" y="421" width="295.0" height="15.0" fill="rgb(246,168,20)" rx="2" ry="2" />
+<text  x="898.00" y="431.5" >oox::core::FastParser::parseStream</text>
+</g>
+<g >
+<title>ChildSession::loadDocument (5 samples, 25.00%)</title><rect x="895.0" y="725" width="295.0" height="15.0" fill="rgb(238,16,30)" rx="2" ry="2" />
+<text  x="898.00" y="735.5" >ChildSession::loadDocument</text>
+</g>
+<g >
+<title>kdf_tls1_3_derive (3 samples, 15.00%)</title><rect x="305.0" y="613" width="177.0" height="15.0" fill="rgb(223,178,34)" rx="2" ry="2" />
+<text  x="308.00" y="623.5" >kdf_tls1_3_derive</text>
+</g>
+<g >
+<title>http::Session::syncRequestImpl (8 samples, 40.00%)</title><rect x="305.0" y="805" width="472.0" height="15.0" fill="rgb(218,227,16)" rx="2" ry="2" />
+<text  x="308.00" y="815.5" >http::Session::syncRequestImpl</text>
+</g>
+<g >
+<title>http::Session::syncDownload (2 samples, 10.00%)</title><rect x="187.0" y="805" width="118.0" height="15.0" fill="rgb(210,49,4)" rx="2" ry="2" />
+<text  x="190.00" y="815.5" >http::Session:..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 15.00%)</title><rect x="305.0" y="517" width="177.0" height="15.0" fill="rgb(205,216,44)" rx="2" ry="2" />
+<text  x="308.00" y="527.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>ClientSession::onDisconnect (3 samples, 15.00%)</title><rect x="10.0" y="901" width="177.0" height="15.0" fill="rgb(223,166,53)" rx="2" ry="2" />
+<text  x="13.00" y="911.5" >ClientSession::onDiscon..</text>
+</g>
+<g >
+<title>KitSocketPoll::kitPoll (7 samples, 35.00%)</title><rect x="777.0" y="805" width="413.0" height="15.0" fill="rgb(253,65,13)" rx="2" ry="2" />
+<text  x="780.00" y="815.5" >KitSocketPoll::kitPoll</text>
+</g>
+<g >
+<title>operator new (1 samples, 5.00%)</title><rect x="777.0" y="645" width="59.0" height="15.0" fill="rgb(238,9,33)" rx="2" ry="2" />
+<text  x="780.00" y="655.5" >operat..</text>
+</g>
+<g >
+<title>IsGIFAnimated (5 samples, 25.00%)</title><rect x="895.0" y="149" width="295.0" height="15.0" fill="rgb(210,90,2)" rx="2" ry="2" />
+<text  x="898.00" y="159.5" >IsGIFAnimated</text>
+</g>
+<g >
+<title>tls13_cipher (2 samples, 10.00%)</title><rect x="187.0" y="629" width="118.0" height="15.0" fill="rgb(211,187,24)" rx="2" ry="2" />
+<text  x="190.00" y="639.5" >tls13_cipher</text>
+</g>
+<g >
+<title>forkit_main (7 samples, 35.00%)</title><rect x="777.0" y="1013" width="413.0" height="15.0" fill="rgb(254,192,49)" rx="2" ry="2" />
+<text  x="780.00" y="1023.5" >forkit_main</text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 15.00%)</title><rect x="10.0" y="709" width="177.0" height="15.0" fill="rgb(222,206,49)" rx="2" ry="2" />
+<text  x="13.00" y="719.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>CRYPTO_gcm128_decrypt (2 samples, 10.00%)</title><rect x="187.0" y="565" width="118.0" height="15.0" fill="rgb(240,162,6)" rx="2" ry="2" />
+<text  x="190.00" y="575.5" >CRYPTO_gcm128_..</text>
+</g>
+<g >
+<title>net::pollDescriptors (3 samples, 15.00%)</title><rect x="10.0" y="757" width="177.0" height="15.0" fill="rgb(216,65,53)" rx="2" ry="2" />
+<text  x="13.00" y="767.5" >net::pollDescriptors</text>
+</g>
+<g >
+<title>SfxObjectShell::ImportFrom (5 samples, 25.00%)</title><rect x="895.0" y="533" width="295.0" height="15.0" fill="rgb(231,108,9)" rx="2" ry="2" />
+<text  x="898.00" y="543.5" >SfxObjectShell::ImportFrom</text>
+</g>
+<g >
+<title>SfxBaseModel::load (5 samples, 25.00%)</title><rect x="895.0" y="581" width="295.0" height="15.0" fill="rgb(236,177,7)" rx="2" ry="2" />
+<text  x="898.00" y="591.5" >SfxBaseModel::load</text>
+</g>
+<g >
+<title>execute_native_thread_routine (13 samples, 65.00%)</title><rect x="10.0" y="1013" width="767.0" height="15.0" fill="rgb(248,191,37)" rx="2" ry="2" />
+<text  x="13.00" y="1023.5" >execute_native_thread_routine</text>
+</g>
+<g >
+<title>ssl_gensecret (3 samples, 15.00%)</title><rect x="305.0" y="645" width="177.0" height="15.0" fill="rgb(253,33,37)" rx="2" ry="2" />
+<text  x="308.00" y="655.5" >ssl_gensecret</text>
+</g>
+<g >
+<title>__libc_start_main (7 samples, 35.00%)</title><rect x="777.0" y="1029" width="413.0" height="15.0" fill="rgb(222,116,42)" rx="2" ry="2" />
+<text  x="780.00" y="1039.5" >__libc_start_main</text>
+</g>
+<g >
+<title>GIFLZWDecompressor::DecompressBlock (3 samples, 15.00%)</title><rect x="1013.0" y="133" width="177.0" height="15.0" fill="rgb(209,144,43)" rx="2" ry="2" />
+<text  x="1016.00" y="143.5" >GIFLZWDecompressor::Dec..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 10.00%)</title><rect x="187.0" y="517" width="118.0" height="15.0" fill="rgb(206,9,48)" rx="2" ry="2" />
+<text  x="190.00" y="527.5" >handleUserProf..</text>
+</g>
+<g >
+<title>oox::core::FastParser::parseStream (5 samples, 25.00%)</title><rect x="895.0" y="309" width="295.0" height="15.0" fill="rgb(207,44,5)" rx="2" ry="2" />
+<text  x="898.00" y="319.5" >oox::core::FastParser::parseStream</text>
+</g>
+<g >
+<title>syscall (2 samples, 10.00%)</title><rect x="187.0" y="501" width="118.0" height="15.0" fill="rgb(244,210,50)" rx="2" ry="2" />
+<text  x="190.00" y="511.5" >syscall</text>
+</g>
+<g >
+<title>SHA384_Update (3 samples, 15.00%)</title><rect x="305.0" y="565" width="177.0" height="15.0" fill="rgb(238,82,12)" rx="2" ry="2" />
+<text  x="308.00" y="575.5" >SHA384_Update</text>
+</g>
+<g >
+<title>desktop::COKitDocumentImpl::getCommandValues (2 samples, 10.00%)</title><rect x="777.0" y="709" width="118.0" height="15.0" fill="rgb(224,56,54)" rx="2" ry="2" />
+<text  x="780.00" y="719.5" >desktop::COKit..</text>
+</g>
+<g >
+<title>Document::drainQueue (7 samples, 35.00%)</title><rect x="777.0" y="789" width="413.0" height="15.0" fill="rgb(215,18,45)" rx="2" ry="2" />
+<text  x="780.00" y="799.5" >Document::drainQueue</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (5 samples, 25.00%)</title><rect x="895.0" y="277" width="295.0" height="15.0" fill="rgb(223,114,39)" rx="2" ry="2" />
+<text  x="898.00" y="287.5" >sax_fastparser::FastSaxParserImpl::pars..</text>
+</g>
+<g >
+<title>oox::ppt::PowerPointImport::filter (5 samples, 25.00%)</title><rect x="895.0" y="517" width="295.0" height="15.0" fill="rgb(205,37,21)" rx="2" ry="2" />
+<text  x="898.00" y="527.5" >oox::ppt::PowerPointImport::filter</text>
+</g>
+<g >
+<title>http::Session::syncRequestImpl (2 samples, 10.00%)</title><rect x="187.0" y="789" width="118.0" height="15.0" fill="rgb(223,62,0)" rx="2" ry="2" />
+<text  x="190.00" y="799.5" >http::Session:..</text>
+</g>
+<g >
+<title>docbroker (13 samples, 65.00%)</title><rect x="10.0" y="1061" width="767.0" height="15.0" fill="rgb(247,125,1)" rx="2" ry="2" />
+<text  x="13.00" y="1071.5" >docbroker</text>
+</g>
+<g >
+<title>handleUserProfileSignal (5 samples, 25.00%)</title><rect x="482.0" y="725" width="295.0" height="15.0" fill="rgb(240,88,48)" rx="2" ry="2" />
+<text  x="485.00" y="735.5" >handleUserProfileSignal</text>
+</g>
+<g >
+<title>Session::handleMessage (7 samples, 35.00%)</title><rect x="777.0" y="757" width="413.0" height="15.0" fill="rgb(246,106,37)" rx="2" ry="2" />
+<text  x="780.00" y="767.5" >Session::handleMessage</text>
+</g>
+<g >
+<title>syscall (3 samples, 15.00%)</title><rect x="1013.0" y="85" width="177.0" height="15.0" fill="rgb(244,122,28)" rx="2" ry="2" />
+<text  x="1016.00" y="95.5" >syscall</text>
+</g>
+<g >
+<title>tls13_generate_secret (3 samples, 15.00%)</title><rect x="305.0" y="629" width="177.0" height="15.0" fill="rgb(208,146,13)" rx="2" ry="2" />
+<text  x="308.00" y="639.5" >tls13_generate_secret</text>
+</g>
+<g >
+<title>DocumentBroker::disconnectSessionInternal (3 samples, 15.00%)</title><rect x="10.0" y="869" width="177.0" height="15.0" fill="rgb(248,67,25)" rx="2" ry="2" />
+<text  x="13.00" y="879.5" >DocumentBroker::disconn..</text>
+</g>
+<g >
+<title>SocketPoll::poll (2 samples, 10.00%)</title><rect x="187.0" y="773" width="118.0" height="15.0" fill="rgb(214,205,47)" rx="2" ry="2" />
+<text  x="190.00" y="783.5" >SocketPoll::poll</text>
+</g>
+<g >
+<title>tls_process_server_hello (3 samples, 15.00%)</title><rect x="305.0" y="709" width="177.0" height="15.0" fill="rgb(223,77,7)" rx="2" ry="2" />
+<text  x="308.00" y="719.5" >tls_process_server_hello</text>
+</g>
+<g >
+<title>SvpSalInstance::ImplYield (7 samples, 35.00%)</title><rect x="777.0" y="821" width="413.0" height="15.0" fill="rgb(217,89,28)" rx="2" ry="2" />
+<text  x="780.00" y="831.5" >SvpSalInstance::ImplYield</text>
+</g>
+<g >
+<title>boost::property_tree::basic_ptree&lt;std::string, std::string, std::less&lt;std::string&gt; &gt;::add_child (1 samples, 5.00%)</title><rect x="777.0" y="693" width="59.0" height="15.0" fill="rgb(254,90,50)" rx="2" ry="2" />
+<text  x="780.00" y="703.5" >boost:..</text>
+</g>
+<g >
+<title>WopiStorage::downloadDocument (2 samples, 10.00%)</title><rect x="187.0" y="837" width="118.0" height="15.0" fill="rgb(254,4,25)" rx="2" ry="2" />
+<text  x="190.00" y="847.5" >WopiStorage::d..</text>
+</g>
+<g >
+<title>WopiStorage::downloadStorageFileToLocal (2 samples, 10.00%)</title><rect x="187.0" y="853" width="118.0" height="15.0" fill="rgb(211,21,38)" rx="2" ry="2" />
+<text  x="190.00" y="863.5" >WopiStorage::d..</text>
+</g>
+<g >
+<title>GraphicFilter::ImportUnloadedGraphic (5 samples, 25.00%)</title><rect x="895.0" y="165" width="295.0" height="15.0" fill="rgb(211,149,21)" rx="2" ry="2" />
+<text  x="898.00" y="175.5" >GraphicFilter::ImportUnloadedGraphic</text>
+</g>
+<g >
+<title>_IO_funlockfile (1 samples, 5.00%)</title><rect x="895.0" y="69" width="59.0" height="15.0" fill="rgb(239,47,3)" rx="2" ry="2" />
+<text  x="898.00" y="79.5" >_IO_fu..</text>
+</g>
+<g >
+<title>oox::core::ContextHandler2Helper::implCreateChildContext (5 samples, 25.00%)</title><rect x="895.0" y="245" width="295.0" height="15.0" fill="rgb(210,220,18)" rx="2" ry="2" />
+<text  x="898.00" y="255.5" >oox::core::ContextHandler2Helper::implC..</text>
+</g>
+<g >
+<title>tls_read_record (2 samples, 10.00%)</title><rect x="187.0" y="661" width="118.0" height="15.0" fill="rgb(231,130,25)" rx="2" ry="2" />
+<text  x="190.00" y="671.5" >tls_read_record</text>
+</g>
+<g >
+<title>all (20 samples, 100%)</title><rect x="10.0" y="1077" width="1180.0" height="15.0" fill="rgb(207,168,6)" rx="2" ry="2" />
+<text  x="13.00" y="1087.5" ></text>
+</g>
+<g >
+<title>ssl3_read_bytes (2 samples, 10.00%)</title><rect x="187.0" y="677" width="118.0" height="15.0" fill="rgb(209,68,12)" rx="2" ry="2" />
+<text  x="190.00" y="687.5" >ssl3_read_bytes</text>
+</g>
+<g >
+<title>_Unwind_GetTextRelBase (1 samples, 5.00%)</title><rect x="836.0" y="629" width="59.0" height="15.0" fill="rgb(239,49,50)" rx="2" ry="2" />
+<text  x="839.00" y="639.5" >_Unwin..</text>
+</g>
+<g >
+<title>oox::ppt::PresentationFragmentHandler::finalizeImport (5 samples, 25.00%)</title><rect x="895.0" y="389" width="295.0" height="15.0" fill="rgb(222,153,38)" rx="2" ry="2" />
+<text  x="898.00" y="399.5" >oox::ppt::PresentationFragmentHandler::..</text>
+</g>
+<g >
+<title>syscall (5 samples, 25.00%)</title><rect x="482.0" y="709" width="295.0" height="15.0" fill="rgb(253,226,49)" rx="2" ry="2" />
+<text  x="485.00" y="719.5" >syscall</text>
+</g>
+<g >
+<title>DocumentBroker::removeSession (3 samples, 15.00%)</title><rect x="10.0" y="885" width="177.0" height="15.0" fill="rgb(243,33,32)" rx="2" ry="2" />
+<text  x="13.00" y="895.5" >DocumentBroker::removeS..</text>
+</g>
+<g >
+<title>oox::ppt::PowerPointImport::importDocument (5 samples, 25.00%)</title><rect x="895.0" y="485" width="295.0" height="15.0" fill="rgb(209,59,47)" rx="2" ry="2" />
+<text  x="898.00" y="495.5" >oox::ppt::PowerPointImport::importDocum..</text>
+</g>
+<g >
+<title>boost::multi_index::multi_index_container&lt;std::pair&lt;std::string const, boost::property_tree::basic_ptree&lt;std::string, std::string, std::less&lt;std::string&gt; &gt; &gt;, boost::multi_index::indexed_by&lt;boost::multi_index::sequenced&lt;boost::multi_index::tag&lt;&gt; &gt;, boost::multi_index::ordered_non_unique&lt;boost::multi_index::tag&lt;boost::property_tree::basic_ptree&lt;std::string, std::string, std::less&lt;std::string&gt; &gt;::subs::by_name&gt;, boost::multi_index::member&lt;std::pair&lt;std::string const, boost::property_tree::basic_ptree&lt;std::string, std::string, std::less&lt;std::string&gt; &gt; &gt;, std::string const, &amp;std::pair&lt;std::string const, boost::property_tree::basic_ptree&lt;std::string, std::string, std::less&lt;std::string&gt; &gt; &gt;::first&gt;, std::less&lt;std::string&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;std::string const, boost::property_tree::basic_ptree&lt;std::string, std::string, std::less&lt;std::string&gt; &gt; &gt; &gt; &gt;::copy_construct_from (1 samples, 5.00%)</title><rect x="777.0" y="661" width="59.0" height="15.0" fill="rgb(244,188,2)" rx="2" ry="2" />
+<text  x="780.00" y="671.5" >boost:..</text>
+</g>
+<g >
+<title>DocumentBroker::updateStorageLockState (3 samples, 15.00%)</title><rect x="10.0" y="853" width="177.0" height="15.0" fill="rgb(233,133,18)" rx="2" ry="2" />
+<text  x="13.00" y="863.5" >DocumentBroker::updateS..</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (5 samples, 25.00%)</title><rect x="895.0" y="325" width="295.0" height="15.0" fill="rgb(209,171,27)" rx="2" ry="2" />
+<text  x="898.00" y="335.5" >oox::core::XmlFilterBase::importFragment</text>
+</g>
+<g >
+<title>SocketPoll::poll (8 samples, 40.00%)</title><rect x="305.0" y="789" width="472.0" height="15.0" fill="rgb(246,183,29)" rx="2" ry="2" />
+<text  x="308.00" y="799.5" >SocketPoll::poll</text>
+</g>
+<g >
+<title>DocumentBroker::pollThread (13 samples, 65.00%)</title><rect x="10.0" y="965" width="767.0" height="15.0" fill="rgb(242,10,18)" rx="2" ry="2" />
+<text  x="13.00" y="975.5" >DocumentBroker::pollThread</text>
+</g>
+<g >
+<title>oox::core::XmlFilterBase::importFragment (5 samples, 25.00%)</title><rect x="895.0" y="453" width="295.0" height="15.0" fill="rgb(218,62,23)" rx="2" ry="2" />
+<text  x="898.00" y="463.5" >oox::core::XmlFilterBase::importFragment</text>
+</g>
+<g >
+<title>SslStreamSocket::doHandshake (3 samples, 15.00%)</title><rect x="305.0" y="741" width="177.0" height="15.0" fill="rgb(209,224,17)" rx="2" ry="2" />
+<text  x="308.00" y="751.5" >SslStreamSocket::doHand..</text>
+</g>
+<g >
+<title>__clone (13 samples, 65.00%)</title><rect x="10.0" y="1045" width="767.0" height="15.0" fill="rgb(223,173,49)" rx="2" ry="2" />
+<text  x="13.00" y="1055.5" >__clone</text>
+</g>
+<g >
+<title>__gxx_personality_v0 (1 samples, 5.00%)</title><rect x="836.0" y="613" width="59.0" height="15.0" fill="rgb(245,2,19)" rx="2" ry="2" />
+<text  x="839.00" y="623.5" >__gxx_..</text>
+</g>
+<g >
+<title>ppoll (5 samples, 25.00%)</title><rect x="482.0" y="757" width="295.0" height="15.0" fill="rgb(248,146,14)" rx="2" ry="2" />
+<text  x="485.00" y="767.5" >ppoll</text>
+</g>
+<g >
+<title>kitbroker (7 samples, 35.00%)</title><rect x="777.0" y="1061" width="413.0" height="15.0" fill="rgb(231,48,46)" rx="2" ry="2" />
+<text  x="780.00" y="1071.5" >kitbroker</text>
+</g>
+<g >
+<title>SfxObjectShell::DoLoad (5 samples, 25.00%)</title><rect x="895.0" y="565" width="295.0" height="15.0" fill="rgb(232,21,27)" rx="2" ry="2" />
+<text  x="898.00" y="575.5" >SfxObjectShell::DoLoad</text>
+</g>
+<g >
+<title>SocketPoll::pollingThreadEntry (13 samples, 65.00%)</title><rect x="10.0" y="997" width="767.0" height="15.0" fill="rgb(248,222,10)" rx="2" ry="2" />
+<text  x="13.00" y="1007.5" >SocketPoll::pollingThreadEntry</text>
+</g>
+<g >
+<title>http::Session::syncRequest (8 samples, 40.00%)</title><rect x="305.0" y="837" width="472.0" height="15.0" fill="rgb(234,60,7)" rx="2" ry="2" />
+<text  x="308.00" y="847.5" >http::Session::syncRequest</text>
+</g>
+<g >
+<title>DocumentBroker::getBrowserSettingSync (8 samples, 40.00%)</title><rect x="305.0" y="869" width="472.0" height="15.0" fill="rgb(236,143,54)" rx="2" ry="2" />
+<text  x="308.00" y="879.5" >DocumentBroker::getBrowserSettingSync</text>
+</g>
+<g >
+<title>SocketPoll::poll (3 samples, 15.00%)</title><rect x="10.0" y="773" width="177.0" height="15.0" fill="rgb(226,218,30)" rx="2" ry="2" />
+<text  x="13.00" y="783.5" >SocketPoll::poll</text>
+</g>
+<g >
+<title>StreamSocket::readIncomingData (2 samples, 10.00%)</title><rect x="187.0" y="741" width="118.0" height="15.0" fill="rgb(205,189,19)" rx="2" ry="2" />
+<text  x="190.00" y="751.5" >StreamSocket::..</text>
+</g>
+<g >
+<title>malloc (1 samples, 5.00%)</title><rect x="777.0" y="629" width="59.0" height="15.0" fill="rgb(214,211,44)" rx="2" ry="2" />
+<text  x="780.00" y="639.5" >malloc</text>
+</g>
+<g >
+<title>sd::DrawDocShell::ImportFrom (5 samples, 25.00%)</title><rect x="895.0" y="549" width="295.0" height="15.0" fill="rgb(215,229,39)" rx="2" ry="2" />
+<text  x="898.00" y="559.5" >sd::DrawDocShell::ImportFrom</text>
+</g>
+<g >
+<title>SvpSalInstance::DoYield (7 samples, 35.00%)</title><rect x="777.0" y="837" width="413.0" height="15.0" fill="rgb(249,122,48)" rx="2" ry="2" />
+<text  x="780.00" y="847.5" >SvpSalInstance::DoYield</text>
+</g>
+<g >
+<title>oox::GraphicHelper::importEmbeddedGraphic (5 samples, 25.00%)</title><rect x="895.0" y="197" width="295.0" height="15.0" fill="rgb(223,58,20)" rx="2" ry="2" />
+<text  x="898.00" y="207.5" >oox::GraphicHelper::importEmbeddedGraphic</text>
+</g>
+<g >
+<title>tls_parse_stoc_key_share (3 samples, 15.00%)</title><rect x="305.0" y="677" width="177.0" height="15.0" fill="rgb(234,36,11)" rx="2" ry="2" />
+<text  x="308.00" y="687.5" >tls_parse_stoc_key_share</text>
+</g>
+<g >
+<title>ImplSVMain (7 samples, 35.00%)</title><rect x="777.0" y="901" width="413.0" height="15.0" fill="rgb(248,156,11)" rx="2" ry="2" />
+<text  x="780.00" y="911.5" >ImplSVMain</text>
+</g>
+</g>
+</svg>
