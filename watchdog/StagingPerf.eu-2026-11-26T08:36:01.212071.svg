@@ -1,0 +1,2549 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="406" onload="init(evt)" viewBox="0 0 1200 406" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="406.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >StagingPerf.eu Watchdog Profile (2026-11-25T11:00:00.182970)</text>
+<text id="details" x="10.00" y="389" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="389" > </text>
+<g id="frames">
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="675.2" y="213" width="8.0" height="15.0" fill="rgb(209,84,48)" rx="2" ry="2" />
+<text  x="678.23" y="223.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="184.2" y="277" width="7.9" height="15.0" fill="rgb(208,189,4)" rx="2" ry="2" />
+<text  x="187.23" y="287.5" ></text>
+</g>
+<g >
+<title>ScOutputData::LayoutStringsImpl (1 samples, 0.67%)</title><rect x="271.3" y="325" width="8.0" height="15.0" fill="rgb(233,125,18)" rx="2" ry="2" />
+<text  x="274.34" y="335.5" ></text>
+</g>
+<g >
+<title>GenericSalLayout::ApplyJustificationData (1 samples, 0.67%)</title><rect x="208.0" y="325" width="7.9" height="15.0" fill="rgb(228,105,43)" rx="2" ry="2" />
+<text  x="210.99" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="580.2" y="229" width="7.9" height="15.0" fill="rgb(252,168,3)" rx="2" ry="2" />
+<text  x="583.20" y="239.5" ></text>
+</g>
+<g >
+<title>__restore_rt (2 samples, 1.34%)</title><rect x="659.4" y="261" width="15.8" height="15.0" fill="rgb(244,25,19)" rx="2" ry="2" />
+<text  x="662.40" y="271.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="801.9" y="309" width="8.0" height="15.0" fill="rgb(250,91,27)" rx="2" ry="2" />
+<text  x="804.95" y="319.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="200.1" y="133" width="7.9" height="15.0" fill="rgb(229,215,34)" rx="2" ry="2" />
+<text  x="203.07" y="143.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="786.1" y="245" width="7.9" height="15.0" fill="rgb(231,221,48)" rx="2" ry="2" />
+<text  x="789.11" y="255.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 1.34%)</title><rect x="889.1" y="277" width="15.8" height="15.0" fill="rgb(244,177,25)" rx="2" ry="2" />
+<text  x="892.06" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 1.34%)</title><rect x="635.6" y="69" width="15.9" height="15.0" fill="rgb(215,46,20)" rx="2" ry="2" />
+<text  x="638.64" y="79.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="295.1" y="293" width="7.9" height="15.0" fill="rgb(243,146,12)" rx="2" ry="2" />
+<text  x="298.10" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 1.34%)</title><rect x="635.6" y="85" width="15.9" height="15.0" fill="rgb(212,27,15)" rx="2" ry="2" />
+<text  x="638.64" y="95.5" ></text>
+</g>
+<g >
+<title>syscall (4 samples, 2.68%)</title><rect x="136.7" y="309" width="31.7" height="15.0" fill="rgb(248,109,41)" rx="2" ry="2" />
+<text  x="139.71" y="319.5" >sy..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="255.5" y="293" width="7.9" height="15.0" fill="rgb(235,145,25)" rx="2" ry="2" />
+<text  x="258.50" y="303.5" ></text>
+</g>
+<g >
+<title>__memmove_avx_unaligned_erms (5 samples, 3.36%)</title><rect x="738.6" y="101" width="39.6" height="15.0" fill="rgb(226,204,33)" rx="2" ry="2" />
+<text  x="741.59" y="111.5" >__m..</text>
+</g>
+<g >
+<title>osl_writeFile (1 samples, 0.67%)</title><rect x="524.8" y="293" width="7.9" height="15.0" fill="rgb(243,193,41)" rx="2" ry="2" />
+<text  x="527.77" y="303.5" ></text>
+</g>
+<g >
+<title>ScDPSaveData::BuildAllDimensionMembers (1 samples, 0.67%)</title><rect x="263.4" y="325" width="7.9" height="15.0" fill="rgb(239,187,32)" rx="2" ry="2" />
+<text  x="266.42" y="335.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="1118.7" y="293" width="7.9" height="15.0" fill="rgb(250,156,0)" rx="2" ry="2" />
+<text  x="1121.72" y="303.5" ></text>
+</g>
+<g >
+<title>vcl::bitmap::loadFromSvg (3 samples, 2.01%)</title><rect x="1142.5" y="325" width="23.7" height="15.0" fill="rgb(250,202,24)" rx="2" ry="2" />
+<text  x="1145.48" y="335.5" >v..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="801.9" y="293" width="8.0" height="15.0" fill="rgb(247,70,50)" rx="2" ry="2" />
+<text  x="804.95" y="303.5" ></text>
+</g>
+<g >
+<title>WebSocketHandler::sendFrame (1 samples, 0.67%)</title><rect x="318.9" y="133" width="7.9" height="15.0" fill="rgb(235,173,50)" rx="2" ry="2" />
+<text  x="321.86" y="143.5" ></text>
+</g>
+<g >
+<title>syscall (16 samples, 10.74%)</title><rect x="10.0" y="293" width="126.7" height="15.0" fill="rgb(235,123,22)" rx="2" ry="2" />
+<text  x="13.00" y="303.5" >syscall</text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="413.9" y="261" width="7.9" height="15.0" fill="rgb(238,175,44)" rx="2" ry="2" />
+<text  x="416.89" y="271.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="263.4" y="261" width="7.9" height="15.0" fill="rgb(221,213,23)" rx="2" ry="2" />
+<text  x="266.42" y="271.5" ></text>
+</g>
+<g >
+<title>Document::postMessage (1 samples, 0.67%)</title><rect x="730.7" y="197" width="7.9" height="15.0" fill="rgb(254,8,25)" rx="2" ry="2" />
+<text  x="733.67" y="207.5" ></text>
+</g>
+<g >
+<title>__restore_rt (5 samples, 3.36%)</title><rect x="1039.5" y="277" width="39.6" height="15.0" fill="rgb(228,4,53)" rx="2" ry="2" />
+<text  x="1042.53" y="287.5" >__r..</text>
+</g>
+<g >
+<title>SdrObjCustomShape::RestoreGeoData (1 samples, 0.67%)</title><rect x="287.2" y="325" width="7.9" height="15.0" fill="rgb(208,66,49)" rx="2" ry="2" />
+<text  x="290.18" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="1182.1" y="293" width="7.9" height="15.0" fill="rgb(227,62,32)" rx="2" ry="2" />
+<text  x="1185.08" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (5 samples, 3.36%)</title><rect x="1039.5" y="261" width="39.6" height="15.0" fill="rgb(233,102,13)" rx="2" ry="2" />
+<text  x="1042.53" y="271.5" >han..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="548.5" y="261" width="7.9" height="15.0" fill="rgb(210,136,28)" rx="2" ry="2" />
+<text  x="551.52" y="271.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="849.5" y="277" width="7.9" height="15.0" fill="rgb(209,156,20)" rx="2" ry="2" />
+<text  x="852.46" y="287.5" ></text>
+</g>
+<g >
+<title>[libmergedlo.so] (11 samples, 7.38%)</title><rect x="342.6" y="325" width="87.1" height="15.0" fill="rgb(223,44,4)" rx="2" ry="2" />
+<text  x="345.62" y="335.5" >[libmerged..</text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="287.2" y="309" width="7.9" height="15.0" fill="rgb(225,228,32)" rx="2" ry="2" />
+<text  x="290.18" y="319.5" ></text>
+</g>
+<g >
+<title>af_cjk_hints_apply (1 samples, 0.67%)</title><rect x="413.9" y="293" width="7.9" height="15.0" fill="rgb(238,129,40)" rx="2" ry="2" />
+<text  x="416.89" y="303.5" ></text>
+</g>
+<g >
+<title>ScDPFilteredCache::filterTable (1 samples, 0.67%)</title><rect x="255.5" y="325" width="7.9" height="15.0" fill="rgb(227,169,22)" rx="2" ry="2" />
+<text  x="258.50" y="335.5" ></text>
+</g>
+<g >
+<title>std::condition_variable::wait (8 samples, 5.37%)</title><rect x="904.9" y="293" width="63.4" height="15.0" fill="rgb(243,171,4)" rx="2" ry="2" />
+<text  x="907.90" y="303.5" >std::c..</text>
+</g>
+<g >
+<title>[libz.so.1.2.13] (2 samples, 1.34%)</title><rect x="675.2" y="261" width="15.9" height="15.0" fill="rgb(251,37,1)" rx="2" ry="2" />
+<text  x="678.23" y="271.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="192.1" y="261" width="8.0" height="15.0" fill="rgb(210,81,37)" rx="2" ry="2" />
+<text  x="195.15" y="271.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2 (2 samples, 1.34%)</title><rect x="596.0" y="245" width="15.9" height="15.0" fill="rgb(230,27,11)" rx="2" ry="2" />
+<text  x="599.04" y="255.5" ></text>
+</g>
+<g >
+<title>ContentNode::Erase (1 samples, 0.67%)</title><rect x="215.9" y="309" width="7.9" height="15.0" fill="rgb(219,112,16)" rx="2" ry="2" />
+<text  x="218.91" y="319.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="334.7" y="261" width="7.9" height="15.0" fill="rgb(235,111,4)" rx="2" ry="2" />
+<text  x="337.70" y="271.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="651.5" y="293" width="7.9" height="15.0" fill="rgb(217,167,30)" rx="2" ry="2" />
+<text  x="654.48" y="303.5" ></text>
+</g>
+<g >
+<title>OutputDevice::GetCaretPositions (1 samples, 0.67%)</title><rect x="453.5" y="309" width="7.9" height="15.0" fill="rgb(224,121,49)" rx="2" ry="2" />
+<text  x="456.49" y="319.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="794.0" y="261" width="7.9" height="15.0" fill="rgb(238,115,37)" rx="2" ry="2" />
+<text  x="797.03" y="271.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="683.2" y="213" width="7.9" height="15.0" fill="rgb(225,211,7)" rx="2" ry="2" />
+<text  x="686.15" y="223.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 2.01%)</title><rect x="1142.5" y="293" width="23.7" height="15.0" fill="rgb(227,172,33)" rx="2" ry="2" />
+<text  x="1145.48" y="303.5" >h..</text>
+</g>
+<g >
+<title>cairo_paint (2 samples, 1.34%)</title><rect x="857.4" y="309" width="15.8" height="15.0" fill="rgb(253,171,6)" rx="2" ry="2" />
+<text  x="860.38" y="319.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="1126.6" y="309" width="8.0" height="15.0" fill="rgb(226,179,17)" rx="2" ry="2" />
+<text  x="1129.64" y="319.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="580.2" y="245" width="7.9" height="15.0" fill="rgb(234,132,20)" rx="2" ry="2" />
+<text  x="583.20" y="255.5" ></text>
+</g>
+<g >
+<title>drawinglayer::processor2d::CairoPixelProcessor2D::processPolygonStrokePrimitive2D (1 samples, 0.67%)</title><rect x="873.2" y="325" width="7.9" height="15.0" fill="rgb(212,69,36)" rx="2" ry="2" />
+<text  x="876.22" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="619.8" y="101" width="7.9" height="15.0" fill="rgb(205,199,44)" rx="2" ry="2" />
+<text  x="622.80" y="111.5" ></text>
+</g>
+<g >
+<title>__bits_image_fetch_affine_no_alpha (1 samples, 0.67%)</title><rect x="192.1" y="165" width="8.0" height="15.0" fill="rgb(206,156,4)" rx="2" ry="2" />
+<text  x="195.15" y="175.5" ></text>
+</g>
+<g >
+<title>Buffer::eraseFirst (5 samples, 3.36%)</title><rect x="738.6" y="117" width="39.6" height="15.0" fill="rgb(243,174,39)" rx="2" ry="2" />
+<text  x="741.59" y="127.5" >Buf..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="714.8" y="261" width="8.0" height="15.0" fill="rgb(219,168,3)" rx="2" ry="2" />
+<text  x="717.83" y="271.5" ></text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 0.67%)</title><rect x="263.4" y="277" width="7.9" height="15.0" fill="rgb(240,203,9)" rx="2" ry="2" />
+<text  x="266.42" y="287.5" ></text>
+</g>
+<g >
+<title>rtl_crc32 (1 samples, 0.67%)</title><rect x="706.9" y="277" width="7.9" height="15.0" fill="rgb(245,116,7)" rx="2" ry="2" />
+<text  x="709.91" y="287.5" ></text>
+</g>
+<g >
+<title>MultiSalLayout::HasFontKashidaPositions (1 samples, 0.67%)</title><rect x="223.8" y="325" width="7.9" height="15.0" fill="rgb(217,152,45)" rx="2" ry="2" />
+<text  x="226.83" y="335.5" ></text>
+</g>
+<g >
+<title>OutputDevice::GetTextRect (1 samples, 0.67%)</title><rect x="453.5" y="293" width="7.9" height="15.0" fill="rgb(208,98,19)" rx="2" ry="2" />
+<text  x="456.49" y="303.5" ></text>
+</g>
+<g >
+<title>__memmove_avx_unaligned_erms (1 samples, 0.67%)</title><rect x="730.7" y="133" width="7.9" height="15.0" fill="rgb(238,142,38)" rx="2" ry="2" />
+<text  x="733.67" y="143.5" ></text>
+</g>
+<g >
+<title>Document::postMessage (1 samples, 0.67%)</title><rect x="318.9" y="149" width="7.9" height="15.0" fill="rgb(239,169,25)" rx="2" ry="2" />
+<text  x="321.86" y="159.5" ></text>
+</g>
+<g >
+<title>SfxItemSet::MergeRange (1 samples, 0.67%)</title><rect x="215.9" y="293" width="7.9" height="15.0" fill="rgb(237,68,27)" rx="2" ry="2" />
+<text  x="218.91" y="303.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="231.7" y="309" width="8.0" height="15.0" fill="rgb(231,16,40)" rx="2" ry="2" />
+<text  x="234.74" y="319.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="192.1" y="229" width="8.0" height="15.0" fill="rgb(235,132,16)" rx="2" ry="2" />
+<text  x="195.15" y="239.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="683.2" y="197" width="7.9" height="15.0" fill="rgb(217,88,51)" rx="2" ry="2" />
+<text  x="686.15" y="207.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="445.6" y="229" width="7.9" height="15.0" fill="rgb(232,76,30)" rx="2" ry="2" />
+<text  x="448.57" y="239.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="722.8" y="245" width="7.9" height="15.0" fill="rgb(252,221,22)" rx="2" ry="2" />
+<text  x="725.75" y="255.5" ></text>
+</g>
+<g >
+<title>cairo_paint (1 samples, 0.67%)</title><rect x="873.2" y="309" width="7.9" height="15.0" fill="rgb(246,5,20)" rx="2" ry="2" />
+<text  x="876.22" y="319.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="572.3" y="277" width="7.9" height="15.0" fill="rgb(247,182,30)" rx="2" ry="2" />
+<text  x="575.28" y="287.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="968.3" y="309" width="7.9" height="15.0" fill="rgb(217,155,41)" rx="2" ry="2" />
+<text  x="971.26" y="319.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="794.0" y="277" width="7.9" height="15.0" fill="rgb(254,190,5)" rx="2" ry="2" />
+<text  x="797.03" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="279.3" y="197" width="7.9" height="15.0" fill="rgb(250,173,16)" rx="2" ry="2" />
+<text  x="282.26" y="207.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="501.0" y="85" width="7.9" height="15.0" fill="rgb(206,46,0)" rx="2" ry="2" />
+<text  x="504.01" y="95.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="501.0" y="101" width="7.9" height="15.0" fill="rgb(228,135,7)" rx="2" ry="2" />
+<text  x="504.01" y="111.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="524.8" y="245" width="7.9" height="15.0" fill="rgb(211,147,23)" rx="2" ry="2" />
+<text  x="527.77" y="255.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="413.9" y="245" width="7.9" height="15.0" fill="rgb(231,223,15)" rx="2" ry="2" />
+<text  x="416.89" y="255.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="200.1" y="149" width="7.9" height="15.0" fill="rgb(214,91,0)" rx="2" ry="2" />
+<text  x="203.07" y="159.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="778.2" y="293" width="7.9" height="15.0" fill="rgb(212,35,22)" rx="2" ry="2" />
+<text  x="781.19" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="326.8" y="133" width="7.9" height="15.0" fill="rgb(242,57,19)" rx="2" ry="2" />
+<text  x="329.78" y="143.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="445.6" y="245" width="7.9" height="15.0" fill="rgb(236,194,43)" rx="2" ry="2" />
+<text  x="448.57" y="255.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;SalLayoutGlyphsCache::CachedGlyphsKey, std::pair&lt;SalLayoutGlyphsCache::CachedGlyphsKey const, std::_List_iterator&lt;std::pair&lt;SalLayoutGlyphsCache::CachedGlyphsKey, SalLayoutGlyphs&gt; &gt; &gt;, std::pmr::polymorphic_allocator&lt;std::pair&lt;SalLayoutGlyphsCache::CachedGlyphsKey const, std::_List_iterator&lt;std::pair&lt;SalLayoutGlyphsCache::CachedGlyphsKey, SalLayoutGlyphs&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;SalLayoutGlyphsCache::CachedGlyphsKey&gt;, SalLayoutGlyphsCache::CachedGlyphsHash, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt;, true&gt;::operator[] (1 samples, 0.67%)</title><rect x="1102.9" y="325" width="7.9" height="15.0" fill="rgb(245,68,7)" rx="2" ry="2" />
+<text  x="1105.89" y="335.5" ></text>
+</g>
+<g >
+<title>cppu::ImplInheritanceHelper&lt;sax_fastparser::FastTokenHandlerBase, com::sun::star::lang::XServiceInfo&gt;::getImplementationId (3 samples, 2.01%)</title><rect x="588.1" y="309" width="23.8" height="15.0" fill="rgb(213,78,27)" rx="2" ry="2" />
+<text  x="591.12" y="319.5" >c..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="208.0" y="293" width="7.9" height="15.0" fill="rgb(251,193,51)" rx="2" ry="2" />
+<text  x="210.99" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="564.4" y="213" width="7.9" height="15.0" fill="rgb(245,97,7)" rx="2" ry="2" />
+<text  x="567.36" y="223.5" ></text>
+</g>
+<g >
+<title>ScAttrArray::GetPatternRange (1 samples, 0.67%)</title><rect x="247.6" y="325" width="7.9" height="15.0" fill="rgb(236,25,25)" rx="2" ry="2" />
+<text  x="250.58" y="335.5" ></text>
+</g>
+<g >
+<title>__memmove_avx_unaligned_erms (1 samples, 0.67%)</title><rect x="976.2" y="309" width="7.9" height="15.0" fill="rgb(247,153,37)" rx="2" ry="2" />
+<text  x="979.17" y="319.5" ></text>
+</g>
+<g >
+<title>Document::sendFrame (1 samples, 0.67%)</title><rect x="318.9" y="165" width="7.9" height="15.0" fill="rgb(216,147,18)" rx="2" ry="2" />
+<text  x="321.86" y="175.5" ></text>
+</g>
+<g >
+<title>syscall (6 samples, 4.03%)</title><rect x="366.4" y="261" width="47.5" height="15.0" fill="rgb(239,45,54)" rx="2" ry="2" />
+<text  x="369.38" y="271.5" >sysc..</text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="873.2" y="133" width="7.9" height="15.0" fill="rgb(217,185,22)" rx="2" ry="2" />
+<text  x="876.22" y="143.5" ></text>
+</g>
+<g >
+<title>syscall (3 samples, 2.01%)</title><rect x="342.6" y="261" width="23.8" height="15.0" fill="rgb(209,174,48)" rx="2" ry="2" />
+<text  x="345.62" y="271.5" >s..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="271.3" y="277" width="8.0" height="15.0" fill="rgb(247,136,0)" rx="2" ry="2" />
+<text  x="274.34" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 1.34%)</title><rect x="596.0" y="181" width="15.9" height="15.0" fill="rgb(251,35,16)" rx="2" ry="2" />
+<text  x="599.04" y="191.5" ></text>
+</g>
+<g >
+<title>[libz.so.1.2.13] (2 samples, 1.34%)</title><rect x="659.4" y="277" width="15.8" height="15.0" fill="rgb(226,20,19)" rx="2" ry="2" />
+<text  x="662.40" y="287.5" ></text>
+</g>
+<g >
+<title>__memmove_avx_unaligned_erms (1 samples, 0.67%)</title><rect x="326.8" y="181" width="7.9" height="15.0" fill="rgb(248,167,41)" rx="2" ry="2" />
+<text  x="329.78" y="191.5" ></text>
+</g>
+<g >
+<title>drawinglayer::processor2d::CairoPixelProcessor2D::paintBitmapAlpha (2 samples, 1.34%)</title><rect x="857.4" y="325" width="15.8" height="15.0" fill="rgb(223,152,32)" rx="2" ry="2" />
+<text  x="860.38" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (5 samples, 3.36%)</title><rect x="809.9" y="277" width="39.6" height="15.0" fill="rgb(208,81,52)" rx="2" ry="2" />
+<text  x="812.87" y="287.5" >sys..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="1095.0" y="277" width="7.9" height="15.0" fill="rgb(247,138,13)" rx="2" ry="2" />
+<text  x="1097.97" y="287.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="619.8" y="133" width="7.9" height="15.0" fill="rgb(233,211,12)" rx="2" ry="2" />
+<text  x="622.80" y="143.5" ></text>
+</g>
+<g >
+<title>std::set&lt;rtl::OString, std::less&lt;rtl::OString&gt;, std::allocator&lt;rtl::OString&gt; &gt;::set&lt;char const* const*&gt; (1 samples, 0.67%)</title><rect x="1110.8" y="325" width="7.9" height="15.0" fill="rgb(210,145,33)" rx="2" ry="2" />
+<text  x="1113.81" y="335.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="192.1" y="213" width="8.0" height="15.0" fill="rgb(254,142,12)" rx="2" ry="2" />
+<text  x="195.15" y="223.5" ></text>
+</g>
+<g >
+<title>ChildSession::_handleInput (5 samples, 3.36%)</title><rect x="738.6" y="229" width="39.6" height="15.0" fill="rgb(251,178,10)" rx="2" ry="2" />
+<text  x="741.59" y="239.5" >Chi..</text>
+</g>
+<g >
+<title>SfxItemSet::PutExtended (1 samples, 0.67%)</title><rect x="295.1" y="325" width="7.9" height="15.0" fill="rgb(211,27,41)" rx="2" ry="2" />
+<text  x="298.10" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="295.1" y="277" width="7.9" height="15.0" fill="rgb(239,94,9)" rx="2" ry="2" />
+<text  x="298.10" y="287.5" ></text>
+</g>
+<g >
+<title>sal_detail_log_report (1 samples, 0.67%)</title><rect x="564.4" y="245" width="7.9" height="15.0" fill="rgb(207,219,28)" rx="2" ry="2" />
+<text  x="567.36" y="255.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="1102.9" y="261" width="7.9" height="15.0" fill="rgb(206,135,1)" rx="2" ry="2" />
+<text  x="1105.89" y="271.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="200.1" y="245" width="7.9" height="15.0" fill="rgb(243,210,43)" rx="2" ry="2" />
+<text  x="203.07" y="255.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="334.7" y="325" width="7.9" height="15.0" fill="rgb(210,30,17)" rx="2" ry="2" />
+<text  x="337.70" y="335.5" ></text>
+</g>
+<g >
+<title>pixman_image_composite32 (2 samples, 1.34%)</title><rect x="857.4" y="197" width="15.8" height="15.0" fill="rgb(227,26,40)" rx="2" ry="2" />
+<text  x="860.38" y="207.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="714.8" y="277" width="8.0" height="15.0" fill="rgb(254,184,15)" rx="2" ry="2" />
+<text  x="717.83" y="287.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="429.7" y="277" width="8.0" height="15.0" fill="rgb(244,51,47)" rx="2" ry="2" />
+<text  x="432.73" y="287.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="532.7" y="261" width="7.9" height="15.0" fill="rgb(241,125,2)" rx="2" ry="2" />
+<text  x="535.68" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="1166.2" y="261" width="8.0" height="15.0" fill="rgb(207,47,23)" rx="2" ry="2" />
+<text  x="1169.24" y="271.5" ></text>
+</g>
+<g >
+<title>__libc_calloc (1 samples, 0.67%)</title><rect x="200.1" y="181" width="7.9" height="15.0" fill="rgb(242,56,0)" rx="2" ry="2" />
+<text  x="203.07" y="191.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="794.0" y="293" width="7.9" height="15.0" fill="rgb(243,110,16)" rx="2" ry="2" />
+<text  x="797.03" y="303.5" ></text>
+</g>
+<g >
+<title>chart::(anonymous namespace)::changePositionOfAxisTitle (1 samples, 0.67%)</title><rect x="801.9" y="325" width="8.0" height="15.0" fill="rgb(221,192,39)" rx="2" ry="2" />
+<text  x="804.95" y="335.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_unlock_usercnt (6 samples, 4.03%)</title><rect x="730.7" y="325" width="47.5" height="15.0" fill="rgb(207,137,50)" rx="2" ry="2" />
+<text  x="733.67" y="335.5" >__GI..</text>
+</g>
+<g >
+<title>std::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; std::operator+&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; (1 samples, 0.67%)</title><rect x="326.8" y="197" width="7.9" height="15.0" fill="rgb(242,177,54)" rx="2" ry="2" />
+<text  x="329.78" y="207.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="421.8" y="245" width="7.9" height="15.0" fill="rgb(232,17,5)" rx="2" ry="2" />
+<text  x="424.81" y="255.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="231.7" y="293" width="8.0" height="15.0" fill="rgb(244,76,11)" rx="2" ry="2" />
+<text  x="234.74" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="968.3" y="293" width="7.9" height="15.0" fill="rgb(209,126,19)" rx="2" ry="2" />
+<text  x="971.26" y="303.5" ></text>
+</g>
+<g >
+<title>icu_78::PropNameData::findProperty (1 samples, 0.67%)</title><rect x="881.1" y="293" width="8.0" height="15.0" fill="rgb(222,121,45)" rx="2" ry="2" />
+<text  x="884.14" y="303.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="200.1" y="293" width="7.9" height="15.0" fill="rgb(214,108,14)" rx="2" ry="2" />
+<text  x="203.07" y="303.5" ></text>
+</g>
+<g >
+<title>pixman_image_composite32 (1 samples, 0.67%)</title><rect x="192.1" y="197" width="8.0" height="15.0" fill="rgb(228,37,22)" rx="2" ry="2" />
+<text  x="195.15" y="207.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="1110.8" y="309" width="7.9" height="15.0" fill="rgb(233,161,42)" rx="2" ry="2" />
+<text  x="1113.81" y="319.5" ></text>
+</g>
+<g >
+<title>clock_gettime@@GLIBC_2.17 (1 samples, 0.67%)</title><rect x="176.3" y="293" width="7.9" height="15.0" fill="rgb(231,199,34)" rx="2" ry="2" />
+<text  x="179.31" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (8 samples, 5.37%)</title><rect x="904.9" y="213" width="63.4" height="15.0" fill="rgb(232,174,5)" rx="2" ry="2" />
+<text  x="907.90" y="223.5" >syscall</text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="192.1" y="277" width="8.0" height="15.0" fill="rgb(219,117,8)" rx="2" ry="2" />
+<text  x="195.15" y="287.5" ></text>
+</g>
+<g >
+<title>SvpSalYieldMutex::doAcquire (6 samples, 4.03%)</title><rect x="730.7" y="309" width="47.5" height="15.0" fill="rgb(237,185,36)" rx="2" ry="2" />
+<text  x="733.67" y="319.5" >SvpS..</text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="192.1" y="133" width="8.0" height="15.0" fill="rgb(232,216,37)" rx="2" ry="2" />
+<text  x="195.15" y="143.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="200.1" y="197" width="7.9" height="15.0" fill="rgb(212,56,32)" rx="2" ry="2" />
+<text  x="203.07" y="207.5" ></text>
+</g>
+<g >
+<title>pixman_image_composite32 (6 samples, 4.03%)</title><rect x="461.4" y="181" width="47.5" height="15.0" fill="rgb(219,166,7)" rx="2" ry="2" />
+<text  x="464.41" y="191.5" >pixm..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="1110.8" y="293" width="7.9" height="15.0" fill="rgb(218,65,22)" rx="2" ry="2" />
+<text  x="1113.81" y="303.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="437.7" y="309" width="7.9" height="15.0" fill="rgb(211,89,51)" rx="2" ry="2" />
+<text  x="440.65" y="319.5" ></text>
+</g>
+<g >
+<title>[libsallo.so] (1 samples, 0.67%)</title><rect x="548.5" y="309" width="7.9" height="15.0" fill="rgb(253,45,39)" rx="2" ry="2" />
+<text  x="551.52" y="319.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="1118.7" y="261" width="7.9" height="15.0" fill="rgb(227,100,24)" rx="2" ry="2" />
+<text  x="1121.72" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="303.0" y="245" width="7.9" height="15.0" fill="rgb(246,114,14)" rx="2" ry="2" />
+<text  x="306.02" y="255.5" ></text>
+</g>
+<g >
+<title>OutputDevice::ImplLayout (1 samples, 0.67%)</title><rect x="453.5" y="277" width="7.9" height="15.0" fill="rgb(224,46,26)" rx="2" ry="2" />
+<text  x="456.49" y="287.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_unlock_usercnt (1 samples, 0.67%)</title><rect x="279.3" y="245" width="7.9" height="15.0" fill="rgb(229,145,50)" rx="2" ry="2" />
+<text  x="282.26" y="255.5" ></text>
+</g>
+<g >
+<title>SvpSalVirtualDevice::AcquireGraphics (1 samples, 0.67%)</title><rect x="540.6" y="309" width="7.9" height="15.0" fill="rgb(236,145,51)" rx="2" ry="2" />
+<text  x="543.60" y="319.5" ></text>
+</g>
+<g >
+<title>__vdso_clock_gettime (1 samples, 0.67%)</title><rect x="445.6" y="277" width="7.9" height="15.0" fill="rgb(232,169,9)" rx="2" ry="2" />
+<text  x="448.57" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (5 samples, 3.36%)</title><rect x="738.6" y="53" width="39.6" height="15.0" fill="rgb(218,208,14)" rx="2" ry="2" />
+<text  x="741.59" y="63.5" >sys..</text>
+</g>
+<g >
+<title>fetch_pixel_x8b8g8r8 (2 samples, 1.34%)</title><rect x="635.6" y="117" width="15.9" height="15.0" fill="rgb(231,42,37)" rx="2" ry="2" />
+<text  x="638.64" y="127.5" ></text>
+</g>
+<g >
+<title>i18npool::CalendarImpl::getImplementationName (1 samples, 0.67%)</title><rect x="429.7" y="309" width="8.0" height="15.0" fill="rgb(251,176,39)" rx="2" ry="2" />
+<text  x="432.73" y="319.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (4 samples, 2.68%)</title><rect x="619.8" y="277" width="31.7" height="15.0" fill="rgb(248,118,42)" rx="2" ry="2" />
+<text  x="622.80" y="287.5" >[l..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="429.7" y="245" width="8.0" height="15.0" fill="rgb(211,7,1)" rx="2" ry="2" />
+<text  x="432.73" y="255.5" ></text>
+</g>
+<g >
+<title>all (149 samples, 100%)</title><rect x="10.0" y="357" width="1180.0" height="15.0" fill="rgb(216,29,7)" rx="2" ry="2" />
+<text  x="13.00" y="367.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="215.9" y="277" width="7.9" height="15.0" fill="rgb(211,159,5)" rx="2" ry="2" />
+<text  x="218.91" y="287.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="326.8" y="165" width="7.9" height="15.0" fill="rgb(233,184,36)" rx="2" ry="2" />
+<text  x="329.78" y="175.5" ></text>
+</g>
+<g >
+<title>decltype  (1 samples, 0.67%)</title><rect x="176.3" y="261" width="7.9" height="15.0" fill="rgb(208,84,42)" rx="2" ry="2" />
+<text  x="179.31" y="271.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (6 samples, 4.03%)</title><rect x="461.4" y="245" width="47.5" height="15.0" fill="rgb(214,5,30)" rx="2" ry="2" />
+<text  x="464.41" y="255.5" >[lib..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="168.4" y="245" width="7.9" height="15.0" fill="rgb(236,139,37)" rx="2" ry="2" />
+<text  x="171.39" y="255.5" ></text>
+</g>
+<g >
+<title>__munmap (1 samples, 0.67%)</title><rect x="239.7" y="293" width="7.9" height="15.0" fill="rgb(226,37,21)" rx="2" ry="2" />
+<text  x="242.66" y="303.5" ></text>
+</g>
+<g >
+<title>auto jkj::dragonbox::to_decimal&lt;double, jkj::dragonbox::default_float_traits&lt;double&gt;, jkj::dragonbox::detail::policy_impl::sign::ignore, jkj::dragonbox::detail::policy_impl::trailing_zero::ignore&gt; (1 samples, 0.67%)</title><rect x="794.0" y="325" width="7.9" height="15.0" fill="rgb(248,170,2)" rx="2" ry="2" />
+<text  x="797.03" y="335.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="873.2" y="277" width="7.9" height="15.0" fill="rgb(239,140,40)" rx="2" ry="2" />
+<text  x="876.22" y="287.5" ></text>
+</g>
+<g >
+<title>__bits_image_fetch_affine_no_alpha (6 samples, 4.03%)</title><rect x="461.4" y="149" width="47.5" height="15.0" fill="rgb(249,107,34)" rx="2" ry="2" />
+<text  x="464.41" y="159.5" >__bi..</text>
+</g>
+<g >
+<title>osl_readFile (1 samples, 0.67%)</title><rect x="303.0" y="309" width="7.9" height="15.0" fill="rgb(214,27,48)" rx="2" ry="2" />
+<text  x="306.02" y="319.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="976.2" y="277" width="7.9" height="15.0" fill="rgb(241,116,27)" rx="2" ry="2" />
+<text  x="979.17" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="611.9" y="261" width="7.9" height="15.0" fill="rgb(212,40,15)" rx="2" ry="2" />
+<text  x="614.88" y="271.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="627.7" y="101" width="7.9" height="15.0" fill="rgb(243,169,48)" rx="2" ry="2" />
+<text  x="630.72" y="111.5" ></text>
+</g>
+<g >
+<title>Document::drainQueue (6 samples, 4.03%)</title><rect x="730.7" y="277" width="47.5" height="15.0" fill="rgb(212,5,9)" rx="2" ry="2" />
+<text  x="733.67" y="287.5" >Docu..</text>
+</g>
+<g >
+<title>__bits_image_fetch_affine_no_alpha (4 samples, 2.68%)</title><rect x="619.8" y="149" width="31.7" height="15.0" fill="rgb(205,172,8)" rx="2" ry="2" />
+<text  x="622.80" y="159.5" >__..</text>
+</g>
+<g >
+<title>SdXMLStylesContext::ImpSetGraphicStyles (1 samples, 0.67%)</title><rect x="279.3" y="309" width="7.9" height="15.0" fill="rgb(236,43,13)" rx="2" ry="2" />
+<text  x="282.26" y="319.5" ></text>
+</g>
+<g >
+<title>vcl::convertUnoBinaryDataContainer (1 samples, 0.67%)</title><rect x="706.9" y="293" width="7.9" height="15.0" fill="rgb(248,209,7)" rx="2" ry="2" />
+<text  x="709.91" y="303.5" ></text>
+</g>
+<g >
+<title>fetch_pixel_no_alpha_32 (1 samples, 0.67%)</title><rect x="501.0" y="133" width="7.9" height="15.0" fill="rgb(223,25,35)" rx="2" ry="2" />
+<text  x="504.01" y="143.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="310.9" y="293" width="8.0" height="15.0" fill="rgb(250,5,52)" rx="2" ry="2" />
+<text  x="313.94" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="508.9" y="261" width="7.9" height="15.0" fill="rgb(254,14,21)" rx="2" ry="2" />
+<text  x="511.93" y="271.5" ></text>
+</g>
+<g >
+<title>cppu::_destructAny (1 samples, 0.67%)</title><rect x="611.9" y="309" width="7.9" height="15.0" fill="rgb(237,9,8)" rx="2" ry="2" />
+<text  x="614.88" y="319.5" ></text>
+</g>
+<g >
+<title>__memset_avx2_unaligned_erms (1 samples, 0.67%)</title><rect x="1166.2" y="309" width="8.0" height="15.0" fill="rgb(248,105,12)" rx="2" ry="2" />
+<text  x="1169.24" y="319.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="722.8" y="277" width="7.9" height="15.0" fill="rgb(219,186,31)" rx="2" ry="2" />
+<text  x="725.75" y="287.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="508.9" y="277" width="7.9" height="15.0" fill="rgb(217,118,36)" rx="2" ry="2" />
+<text  x="511.93" y="287.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="691.1" y="245" width="7.9" height="15.0" fill="rgb(237,229,9)" rx="2" ry="2" />
+<text  x="694.07" y="255.5" ></text>
+</g>
+<g >
+<title>cairo_show_glyphs (1 samples, 0.67%)</title><rect x="200.1" y="309" width="7.9" height="15.0" fill="rgb(213,170,9)" rx="2" ry="2" />
+<text  x="203.07" y="319.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="691.1" y="261" width="7.9" height="15.0" fill="rgb(245,92,0)" rx="2" ry="2" />
+<text  x="694.07" y="271.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="873.2" y="229" width="7.9" height="15.0" fill="rgb(233,62,13)" rx="2" ry="2" />
+<text  x="876.22" y="239.5" ></text>
+</g>
+<g >
+<title>hb_buffer_t::verify (1 samples, 0.67%)</title><rect x="881.1" y="325" width="8.0" height="15.0" fill="rgb(225,2,36)" rx="2" ry="2" />
+<text  x="884.14" y="335.5" ></text>
+</g>
+<g >
+<title>Document::drainCallbacks (1 samples, 0.67%)</title><rect x="730.7" y="261" width="7.9" height="15.0" fill="rgb(246,168,40)" rx="2" ry="2" />
+<text  x="733.67" y="271.5" ></text>
+</g>
+<g >
+<title>non-virtual thunk to (anonymous namespace)::FastLocatorImpl::getColumnNumber (2 samples, 1.34%)</title><rect x="889.1" y="325" width="15.8" height="15.0" fill="rgb(252,125,10)" rx="2" ry="2" />
+<text  x="892.06" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="1110.8" y="277" width="7.9" height="15.0" fill="rgb(234,100,40)" rx="2" ry="2" />
+<text  x="1113.81" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="184.2" y="261" width="7.9" height="15.0" fill="rgb(211,117,44)" rx="2" ry="2" />
+<text  x="187.23" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 1.34%)</title><rect x="1079.1" y="277" width="15.9" height="15.0" fill="rgb(231,221,47)" rx="2" ry="2" />
+<text  x="1082.13" y="287.5" ></text>
+</g>
+<g >
+<title>af_autofitter_load_glyph (1 samples, 0.67%)</title><rect x="413.9" y="309" width="7.9" height="15.0" fill="rgb(217,184,25)" rx="2" ry="2" />
+<text  x="416.89" y="319.5" ></text>
+</g>
+<g >
+<title>Session::handleMessage (5 samples, 3.36%)</title><rect x="738.6" y="245" width="39.6" height="15.0" fill="rgb(239,115,18)" rx="2" ry="2" />
+<text  x="741.59" y="255.5" >Ses..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="255.5" y="277" width="7.9" height="15.0" fill="rgb(250,150,43)" rx="2" ry="2" />
+<text  x="258.50" y="287.5" ></text>
+</g>
+<g >
+<title>__restore_rt (2 samples, 1.34%)</title><rect x="889.1" y="309" width="15.8" height="15.0" fill="rgb(227,192,10)" rx="2" ry="2" />
+<text  x="892.06" y="319.5" ></text>
+</g>
+<g >
+<title>__restore_rt (5 samples, 3.36%)</title><rect x="461.4" y="133" width="39.6" height="15.0" fill="rgb(213,9,3)" rx="2" ry="2" />
+<text  x="464.41" y="143.5" >__r..</text>
+</g>
+<g >
+<title>decltype  (1 samples, 0.67%)</title><rect x="1182.1" y="309" width="7.9" height="15.0" fill="rgb(253,185,6)" rx="2" ry="2" />
+<text  x="1185.08" y="319.5" ></text>
+</g>
+<g >
+<title>void rtl::str::release&lt;_rtl_uString&gt; (1 samples, 0.67%)</title><rect x="1118.7" y="309" width="7.9" height="15.0" fill="rgb(251,173,36)" rx="2" ry="2" />
+<text  x="1121.72" y="319.5" ></text>
+</g>
+<g >
+<title>utl::SearchParam::SearchParam (1 samples, 0.67%)</title><rect x="786.1" y="309" width="7.9" height="15.0" fill="rgb(228,53,14)" rx="2" ry="2" />
+<text  x="789.11" y="319.5" ></text>
+</g>
+<g >
+<title>store_scanline_x8b8g8r8 (2 samples, 1.34%)</title><rect x="857.4" y="149" width="15.8" height="15.0" fill="rgb(219,79,13)" rx="2" ry="2" />
+<text  x="860.38" y="159.5" ></text>
+</g>
+<g >
+<title>osl_getThreadIdentifier (1 samples, 0.67%)</title><rect x="540.6" y="293" width="7.9" height="15.0" fill="rgb(214,172,28)" rx="2" ry="2" />
+<text  x="543.60" y="303.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (4 samples, 2.68%)</title><rect x="619.8" y="213" width="31.7" height="15.0" fill="rgb(228,153,6)" rx="2" ry="2" />
+<text  x="622.80" y="223.5" >[l..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="540.6" y="245" width="7.9" height="15.0" fill="rgb(232,185,41)" rx="2" ry="2" />
+<text  x="543.60" y="255.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="627.7" y="85" width="7.9" height="15.0" fill="rgb(247,110,53)" rx="2" ry="2" />
+<text  x="630.72" y="95.5" ></text>
+</g>
+<g >
+<title>general_composite_rect (6 samples, 4.03%)</title><rect x="461.4" y="165" width="47.5" height="15.0" fill="rgb(228,214,54)" rx="2" ry="2" />
+<text  x="464.41" y="175.5" >gene..</text>
+</g>
+<g >
+<title>af_cjk_hints_detect_features (1 samples, 0.67%)</title><rect x="413.9" y="277" width="7.9" height="15.0" fill="rgb(210,168,36)" rx="2" ry="2" />
+<text  x="416.89" y="287.5" ></text>
+</g>
+<g >
+<title>png_set_cHRM_XYZ_fixed (2 samples, 1.34%)</title><rect x="659.4" y="309" width="15.8" height="15.0" fill="rgb(236,61,30)" rx="2" ry="2" />
+<text  x="662.40" y="319.5" ></text>
+</g>
+<g >
+<title>vcl::graphic::loadFromURL (1 samples, 0.67%)</title><rect x="1166.2" y="325" width="8.0" height="15.0" fill="rgb(235,11,52)" rx="2" ry="2" />
+<text  x="1169.24" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="881.1" y="245" width="8.0" height="15.0" fill="rgb(243,129,26)" rx="2" ry="2" />
+<text  x="884.14" y="255.5" ></text>
+</g>
+<g >
+<title>weld::EntryFormatter::~EntryFormatter (1 samples, 0.67%)</title><rect x="722.8" y="309" width="7.9" height="15.0" fill="rgb(207,59,7)" rx="2" ry="2" />
+<text  x="725.75" y="319.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (4 samples, 2.68%)</title><rect x="619.8" y="229" width="31.7" height="15.0" fill="rgb(205,72,19)" rx="2" ry="2" />
+<text  x="622.80" y="239.5" >[l..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="247.6" y="293" width="7.9" height="15.0" fill="rgb(209,90,34)" rx="2" ry="2" />
+<text  x="250.58" y="303.5" ></text>
+</g>
+<g >
+<title>Document::forwardToChild (5 samples, 3.36%)</title><rect x="738.6" y="261" width="39.6" height="15.0" fill="rgb(208,84,37)" rx="2" ry="2" />
+<text  x="741.59" y="271.5" >Doc..</text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="540.6" y="261" width="7.9" height="15.0" fill="rgb(230,157,26)" rx="2" ry="2" />
+<text  x="543.60" y="271.5" ></text>
+</g>
+<g >
+<title>std::string::_Rep::_M_clone (1 samples, 0.67%)</title><rect x="176.3" y="325" width="7.9" height="15.0" fill="rgb(244,183,13)" rx="2" ry="2" />
+<text  x="179.31" y="335.5" ></text>
+</g>
+<g >
+<title>__restore_rt (2 samples, 1.34%)</title><rect x="1079.1" y="309" width="15.9" height="15.0" fill="rgb(224,7,2)" rx="2" ry="2" />
+<text  x="1082.13" y="319.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="1174.2" y="277" width="7.9" height="15.0" fill="rgb(239,126,25)" rx="2" ry="2" />
+<text  x="1177.16" y="287.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__si_class_type_info::__do_dyncast (1 samples, 0.67%)</title><rect x="786.1" y="277" width="7.9" height="15.0" fill="rgb(247,116,18)" rx="2" ry="2" />
+<text  x="789.11" y="287.5" ></text>
+</g>
+<g >
+<title>[unknown] (16 samples, 10.74%)</title><rect x="10.0" y="325" width="126.7" height="15.0" fill="rgb(221,137,53)" rx="2" ry="2" />
+<text  x="13.00" y="335.5" >[unknown]</text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="873.2" y="213" width="7.9" height="15.0" fill="rgb(240,176,21)" rx="2" ry="2" />
+<text  x="876.22" y="223.5" ></text>
+</g>
+<g >
+<title>SvFileStream::LockFile (1 samples, 0.67%)</title><rect x="524.8" y="309" width="7.9" height="15.0" fill="rgb(239,106,0)" rx="2" ry="2" />
+<text  x="527.77" y="319.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (1 samples, 0.67%)</title><rect x="239.7" y="309" width="7.9" height="15.0" fill="rgb(243,186,25)" rx="2" ry="2" />
+<text  x="242.66" y="319.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="873.2" y="117" width="7.9" height="15.0" fill="rgb(215,57,18)" rx="2" ry="2" />
+<text  x="876.22" y="127.5" ></text>
+</g>
+<g >
+<title>__dynamic_cast (1 samples, 0.67%)</title><rect x="786.1" y="293" width="7.9" height="15.0" fill="rgb(235,224,52)" rx="2" ry="2" />
+<text  x="789.11" y="303.5" ></text>
+</g>
+<g >
+<title>oox::ThemeExport::writeGradientFill (1 samples, 0.67%)</title><rect x="651.5" y="309" width="7.9" height="15.0" fill="rgb(223,190,35)" rx="2" ry="2" />
+<text  x="654.48" y="319.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="722.8" y="261" width="7.9" height="15.0" fill="rgb(224,106,32)" rx="2" ry="2" />
+<text  x="725.75" y="271.5" ></text>
+</g>
+<g >
+<title>ChildSession::sendBinaryFrame (5 samples, 3.36%)</title><rect x="738.6" y="197" width="39.6" height="15.0" fill="rgb(217,90,31)" rx="2" ry="2" />
+<text  x="741.59" y="207.5" >Chi..</text>
+</g>
+<g >
+<title>rtl_uString_assign (1 samples, 0.67%)</title><rect x="421.8" y="309" width="7.9" height="15.0" fill="rgb(230,63,18)" rx="2" ry="2" />
+<text  x="424.81" y="319.5" ></text>
+</g>
+<g >
+<title>rtl_math_approxEqual (1 samples, 0.67%)</title><rect x="580.2" y="277" width="7.9" height="15.0" fill="rgb(245,145,45)" rx="2" ry="2" />
+<text  x="583.20" y="287.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="873.2" y="261" width="7.9" height="15.0" fill="rgb(220,36,0)" rx="2" ry="2" />
+<text  x="876.22" y="271.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="1174.2" y="293" width="7.9" height="15.0" fill="rgb(238,150,43)" rx="2" ry="2" />
+<text  x="1177.16" y="303.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="524.8" y="261" width="7.9" height="15.0" fill="rgb(252,150,46)" rx="2" ry="2" />
+<text  x="527.77" y="271.5" ></text>
+</g>
+<g >
+<title>__libc_pwrite (1 samples, 0.67%)</title><rect x="524.8" y="277" width="7.9" height="15.0" fill="rgb(211,146,17)" rx="2" ry="2" />
+<text  x="527.77" y="287.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="247.6" y="309" width="7.9" height="15.0" fill="rgb(205,173,54)" rx="2" ry="2" />
+<text  x="250.58" y="319.5" ></text>
+</g>
+<g >
+<title>general_composite_rect (2 samples, 1.34%)</title><rect x="857.4" y="181" width="15.8" height="15.0" fill="rgb(205,152,6)" rx="2" ry="2" />
+<text  x="860.38" y="191.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (2 samples, 1.34%)</title><rect x="857.4" y="293" width="15.8" height="15.0" fill="rgb(241,1,6)" rx="2" ry="2" />
+<text  x="860.38" y="303.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (4 samples, 2.68%)</title><rect x="619.8" y="261" width="31.7" height="15.0" fill="rgb(230,47,44)" rx="2" ry="2" />
+<text  x="622.80" y="271.5" >[l..</text>
+</g>
+<g >
+<title>FontMetricData::ImplInitTextLineSize (1 samples, 0.67%)</title><rect x="1102.9" y="309" width="7.9" height="15.0" fill="rgb(237,118,46)" rx="2" ry="2" />
+<text  x="1105.89" y="319.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="1095.0" y="309" width="7.9" height="15.0" fill="rgb(246,21,12)" rx="2" ry="2" />
+<text  x="1097.97" y="319.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="849.5" y="261" width="7.9" height="15.0" fill="rgb(223,10,27)" rx="2" ry="2" />
+<text  x="852.46" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="310.9" y="277" width="8.0" height="15.0" fill="rgb(234,13,17)" rx="2" ry="2" />
+<text  x="313.94" y="287.5" ></text>
+</g>
+<g >
+<title>ChildSession::loKitCallback (1 samples, 0.67%)</title><rect x="730.7" y="245" width="7.9" height="15.0" fill="rgb(228,151,18)" rx="2" ry="2" />
+<text  x="733.67" y="255.5" ></text>
+</g>
+<g >
+<title>cppu::OWeakAggObject::queryAggregation (1 samples, 0.67%)</title><rect x="556.4" y="293" width="8.0" height="15.0" fill="rgb(226,35,34)" rx="2" ry="2" />
+<text  x="559.44" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="619.8" y="117" width="7.9" height="15.0" fill="rgb(222,119,35)" rx="2" ry="2" />
+<text  x="622.80" y="127.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="1126.6" y="293" width="8.0" height="15.0" fill="rgb(221,59,37)" rx="2" ry="2" />
+<text  x="1129.64" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="263.4" y="245" width="7.9" height="15.0" fill="rgb(245,80,47)" rx="2" ry="2" />
+<text  x="266.42" y="255.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="192.1" y="101" width="8.0" height="15.0" fill="rgb(205,183,0)" rx="2" ry="2" />
+<text  x="195.15" y="111.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="564.4" y="229" width="7.9" height="15.0" fill="rgb(217,229,45)" rx="2" ry="2" />
+<text  x="567.36" y="239.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="303.0" y="277" width="7.9" height="15.0" fill="rgb(247,108,45)" rx="2" ry="2" />
+<text  x="306.02" y="287.5" ></text>
+</g>
+<g >
+<title>[libz.so.1.2.13] (2 samples, 1.34%)</title><rect x="675.2" y="245" width="15.9" height="15.0" fill="rgb(209,34,20)" rx="2" ry="2" />
+<text  x="678.23" y="255.5" ></text>
+</g>
+<g >
+<title>WebSocketHandler::buildFrame (1 samples, 0.67%)</title><rect x="318.9" y="117" width="7.9" height="15.0" fill="rgb(211,125,9)" rx="2" ry="2" />
+<text  x="321.86" y="127.5" ></text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 0.67%)</title><rect x="200.1" y="165" width="7.9" height="15.0" fill="rgb(246,155,26)" rx="2" ry="2" />
+<text  x="203.07" y="175.5" ></text>
+</g>
+<g >
+<title>icu_78::PropNameData::getPropertyValueName (1 samples, 0.67%)</title><rect x="881.1" y="309" width="8.0" height="15.0" fill="rgb(221,42,50)" rx="2" ry="2" />
+<text  x="884.14" y="319.5" ></text>
+</g>
+<g >
+<title>Buffer::eraseFirst (1 samples, 0.67%)</title><rect x="730.7" y="149" width="7.9" height="15.0" fill="rgb(235,127,46)" rx="2" ry="2" />
+<text  x="733.67" y="159.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="580.2" y="261" width="7.9" height="15.0" fill="rgb(210,202,52)" rx="2" ry="2" />
+<text  x="583.20" y="271.5" ></text>
+</g>
+<g >
+<title>desktop::CallbackFlushHandler::CallbackData::setJson (1 samples, 0.67%)</title><rect x="564.4" y="293" width="7.9" height="15.0" fill="rgb(210,71,41)" rx="2" ry="2" />
+<text  x="567.36" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="730.7" y="101" width="7.9" height="15.0" fill="rgb(253,68,28)" rx="2" ry="2" />
+<text  x="733.67" y="111.5" ></text>
+</g>
+<g >
+<title>SvNumberformat::ImpGetScientificOutput (1 samples, 0.67%)</title><rect x="310.9" y="325" width="8.0" height="15.0" fill="rgb(236,121,30)" rx="2" ry="2" />
+<text  x="313.94" y="335.5" ></text>
+</g>
+<g >
+<title>__restore_rt (5 samples, 3.36%)</title><rect x="738.6" y="85" width="39.6" height="15.0" fill="rgb(249,218,39)" rx="2" ry="2" />
+<text  x="741.59" y="95.5" >__r..</text>
+</g>
+<g >
+<title>docbroker (22 samples, 14.77%)</title><rect x="10.0" y="341" width="174.2" height="15.0" fill="rgb(250,98,20)" rx="2" ry="2" />
+<text  x="13.00" y="351.5" >docbroker</text>
+</g>
+<g >
+<title>syscall (3 samples, 2.01%)</title><rect x="1142.5" y="277" width="23.7" height="15.0" fill="rgb(223,71,6)" rx="2" ry="2" />
+<text  x="1145.48" y="287.5" >s..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="231.7" y="277" width="8.0" height="15.0" fill="rgb(211,190,38)" rx="2" ry="2" />
+<text  x="234.74" y="287.5" ></text>
+</g>
+<g >
+<title>cairo_paint (4 samples, 2.68%)</title><rect x="619.8" y="293" width="31.7" height="15.0" fill="rgb(238,38,19)" rx="2" ry="2" />
+<text  x="622.80" y="303.5" >ca..</text>
+</g>
+<g >
+<title>ChildSession::getCommandValues (5 samples, 3.36%)</title><rect x="738.6" y="213" width="39.6" height="15.0" fill="rgb(242,50,37)" rx="2" ry="2" />
+<text  x="741.59" y="223.5" >Chi..</text>
+</g>
+<g >
+<title>syscall (5 samples, 3.36%)</title><rect x="1039.5" y="245" width="39.6" height="15.0" fill="rgb(249,115,29)" rx="2" ry="2" />
+<text  x="1042.53" y="255.5" >sys..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="801.9" y="277" width="8.0" height="15.0" fill="rgb(207,146,45)" rx="2" ry="2" />
+<text  x="804.95" y="287.5" ></text>
+</g>
+<g >
+<title>[unknown] (1 samples, 0.67%)</title><rect x="176.3" y="277" width="7.9" height="15.0" fill="rgb(236,2,48)" rx="2" ry="2" />
+<text  x="179.31" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="263.4" y="229" width="7.9" height="15.0" fill="rgb(207,216,18)" rx="2" ry="2" />
+<text  x="266.42" y="239.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (5 samples, 3.36%)</title><rect x="461.4" y="117" width="39.6" height="15.0" fill="rgb(228,99,31)" rx="2" ry="2" />
+<text  x="464.41" y="127.5" >han..</text>
+</g>
+<g >
+<title>basegfx::utils::isPointOnLine (1 samples, 0.67%)</title><rect x="580.2" y="293" width="7.9" height="15.0" fill="rgb(244,86,47)" rx="2" ry="2" />
+<text  x="583.20" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (5 samples, 3.36%)</title><rect x="461.4" y="101" width="39.6" height="15.0" fill="rgb(206,6,16)" rx="2" ry="2" />
+<text  x="464.41" y="111.5" >sys..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="778.2" y="277" width="7.9" height="15.0" fill="rgb(239,101,36)" rx="2" ry="2" />
+<text  x="781.19" y="287.5" ></text>
+</g>
+<g >
+<title>pixman_image_composite32 (4 samples, 2.68%)</title><rect x="619.8" y="181" width="31.7" height="15.0" fill="rgb(232,73,41)" rx="2" ry="2" />
+<text  x="622.80" y="191.5" >pi..</text>
+</g>
+<g >
+<title>kitbroker (126 samples, 84.56%)</title><rect x="184.2" y="341" width="997.9" height="15.0" fill="rgb(232,221,19)" rx="2" ry="2" />
+<text  x="187.23" y="351.5" >kitbroker</text>
+</g>
+<g >
+<title>__memset_avx2_unaligned_erms (6 samples, 4.03%)</title><rect x="366.4" y="309" width="47.5" height="15.0" fill="rgb(205,83,4)" rx="2" ry="2" />
+<text  x="369.38" y="319.5" >__me..</text>
+</g>
+<g >
+<title>png_write_tRNS (3 samples, 2.01%)</title><rect x="675.2" y="309" width="23.8" height="15.0" fill="rgb(237,132,4)" rx="2" ry="2" />
+<text  x="678.23" y="319.5" >p..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="326.8" y="149" width="7.9" height="15.0" fill="rgb(215,227,24)" rx="2" ry="2" />
+<text  x="329.78" y="159.5" ></text>
+</g>
+<g >
+<title>_fini (1 samples, 0.67%)</title><rect x="786.1" y="325" width="7.9" height="15.0" fill="rgb(232,99,11)" rx="2" ry="2" />
+<text  x="789.11" y="335.5" ></text>
+</g>
+<g >
+<title>__restore_rt (2 samples, 1.34%)</title><rect x="635.6" y="101" width="15.9" height="15.0" fill="rgb(209,102,27)" rx="2" ry="2" />
+<text  x="638.64" y="111.5" ></text>
+</g>
+<g >
+<title>ChildSession::_handleInput (2 samples, 1.34%)</title><rect x="318.9" y="229" width="15.8" height="15.0" fill="rgb(210,138,1)" rx="2" ry="2" />
+<text  x="321.86" y="239.5" ></text>
+</g>
+<g >
+<title>FreeTypeTextRenderImpl::FreeTypeTextRenderImpl (1 samples, 0.67%)</title><rect x="200.1" y="325" width="7.9" height="15.0" fill="rgb(208,205,25)" rx="2" ry="2" />
+<text  x="203.07" y="335.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (2 samples, 1.34%)</title><rect x="857.4" y="245" width="15.8" height="15.0" fill="rgb(235,218,4)" rx="2" ry="2" />
+<text  x="860.38" y="255.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="287.2" y="293" width="7.9" height="15.0" fill="rgb(237,119,27)" rx="2" ry="2" />
+<text  x="290.18" y="303.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="675.2" y="229" width="8.0" height="15.0" fill="rgb(239,195,37)" rx="2" ry="2" />
+<text  x="678.23" y="239.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="200.1" y="117" width="7.9" height="15.0" fill="rgb(233,34,2)" rx="2" ry="2" />
+<text  x="203.07" y="127.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="786.1" y="213" width="7.9" height="15.0" fill="rgb(214,226,4)" rx="2" ry="2" />
+<text  x="789.11" y="223.5" ></text>
+</g>
+<g >
+<title>__restore_rt (3 samples, 2.01%)</title><rect x="342.6" y="293" width="23.8" height="15.0" fill="rgb(205,129,38)" rx="2" ry="2" />
+<text  x="345.62" y="303.5" >_..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="1134.6" y="277" width="7.9" height="15.0" fill="rgb(220,93,16)" rx="2" ry="2" />
+<text  x="1137.56" y="287.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="556.4" y="277" width="8.0" height="15.0" fill="rgb(221,157,33)" rx="2" ry="2" />
+<text  x="559.44" y="287.5" ></text>
+</g>
+<g >
+<title>decltype  (4 samples, 2.68%)</title><rect x="136.7" y="325" width="31.7" height="15.0" fill="rgb(216,66,41)" rx="2" ry="2" />
+<text  x="139.71" y="335.5" >de..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="699.0" y="245" width="7.9" height="15.0" fill="rgb(243,102,32)" rx="2" ry="2" />
+<text  x="701.99" y="255.5" ></text>
+</g>
+<g >
+<title>pixman_image_composite32 (1 samples, 0.67%)</title><rect x="873.2" y="197" width="7.9" height="15.0" fill="rgb(239,15,49)" rx="2" ry="2" />
+<text  x="876.22" y="207.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="1126.6" y="277" width="8.0" height="15.0" fill="rgb(241,73,47)" rx="2" ry="2" />
+<text  x="1129.64" y="287.5" ></text>
+</g>
+<g >
+<title>Document::forwardToChild (2 samples, 1.34%)</title><rect x="318.9" y="261" width="15.8" height="15.0" fill="rgb(246,187,15)" rx="2" ry="2" />
+<text  x="321.86" y="271.5" ></text>
+</g>
+<g >
+<title>crc32_z (1 samples, 0.67%)</title><rect x="706.9" y="261" width="7.9" height="15.0" fill="rgb(214,226,33)" rx="2" ry="2" />
+<text  x="709.91" y="271.5" ></text>
+</g>
+<g >
+<title>Document::sendFrame (1 samples, 0.67%)</title><rect x="730.7" y="213" width="7.9" height="15.0" fill="rgb(214,0,39)" rx="2" ry="2" />
+<text  x="733.67" y="223.5" ></text>
+</g>
+<g >
+<title>__memmove_avx_unaligned_erms (3 samples, 2.01%)</title><rect x="342.6" y="309" width="23.8" height="15.0" fill="rgb(227,187,20)" rx="2" ry="2" />
+<text  x="345.62" y="319.5" >_..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="239.7" y="245" width="7.9" height="15.0" fill="rgb(207,193,2)" rx="2" ry="2" />
+<text  x="242.66" y="255.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="730.7" y="117" width="7.9" height="15.0" fill="rgb(234,229,46)" rx="2" ry="2" />
+<text  x="733.67" y="127.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="200.1" y="213" width="7.9" height="15.0" fill="rgb(209,98,25)" rx="2" ry="2" />
+<text  x="203.07" y="223.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="1166.2" y="277" width="8.0" height="15.0" fill="rgb(217,61,9)" rx="2" ry="2" />
+<text  x="1169.24" y="287.5" ></text>
+</g>
+<g >
+<title>SfxViewShell::dumpNotifyState (1 samples, 0.67%)</title><rect x="516.8" y="309" width="8.0" height="15.0" fill="rgb(247,187,26)" rx="2" ry="2" />
+<text  x="519.85" y="319.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="192.1" y="245" width="8.0" height="15.0" fill="rgb(251,206,36)" rx="2" ry="2" />
+<text  x="195.15" y="255.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="200.1" y="229" width="7.9" height="15.0" fill="rgb(215,23,37)" rx="2" ry="2" />
+<text  x="203.07" y="239.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 1.34%)</title><rect x="857.4" y="101" width="15.8" height="15.0" fill="rgb(212,227,36)" rx="2" ry="2" />
+<text  x="860.38" y="111.5" ></text>
+</g>
+<g >
+<title>void rtl::str::doubleToString&lt;_rtl_String&gt; (1 samples, 0.67%)</title><rect x="1174.2" y="325" width="7.9" height="15.0" fill="rgb(211,47,36)" rx="2" ry="2" />
+<text  x="1177.16" y="335.5" ></text>
+</g>
+<g >
+<title>png_handle_PLTE (1 samples, 0.67%)</title><rect x="968.3" y="325" width="7.9" height="15.0" fill="rgb(222,85,40)" rx="2" ry="2" />
+<text  x="971.26" y="335.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="215.9" y="261" width="7.9" height="15.0" fill="rgb(229,82,9)" rx="2" ry="2" />
+<text  x="218.91" y="271.5" ></text>
+</g>
+<g >
+<title>SalGraphicsAutoDelegateToImpl::hasFastDrawTransformedBitmap (6 samples, 4.03%)</title><rect x="461.4" y="309" width="47.5" height="15.0" fill="rgb(235,74,8)" rx="2" ry="2" />
+<text  x="464.41" y="319.5" >SalG..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="706.9" y="229" width="7.9" height="15.0" fill="rgb(236,42,34)" rx="2" ry="2" />
+<text  x="709.91" y="239.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="508.9" y="293" width="7.9" height="15.0" fill="rgb(212,147,17)" rx="2" ry="2" />
+<text  x="511.93" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="873.2" y="101" width="7.9" height="15.0" fill="rgb(218,175,8)" rx="2" ry="2" />
+<text  x="876.22" y="111.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="208.0" y="277" width="7.9" height="15.0" fill="rgb(211,13,47)" rx="2" ry="2" />
+<text  x="210.99" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="564.4" y="197" width="7.9" height="15.0" fill="rgb(220,192,52)" rx="2" ry="2" />
+<text  x="567.36" y="207.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="295.1" y="309" width="7.9" height="15.0" fill="rgb(214,55,41)" rx="2" ry="2" />
+<text  x="298.10" y="319.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="1102.9" y="277" width="7.9" height="15.0" fill="rgb(233,76,4)" rx="2" ry="2" />
+<text  x="1105.89" y="287.5" ></text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::callbackStartElement (1 samples, 0.67%)</title><rect x="588.1" y="293" width="7.9" height="15.0" fill="rgb(225,56,0)" rx="2" ry="2" />
+<text  x="591.12" y="303.5" ></text>
+</g>
+<g >
+<title>ChildSession::getCommandValues (2 samples, 1.34%)</title><rect x="318.9" y="213" width="15.8" height="15.0" fill="rgb(239,193,45)" rx="2" ry="2" />
+<text  x="321.86" y="223.5" ></text>
+</g>
+<g >
+<title>[unknown] (1 samples, 0.67%)</title><rect x="1182.1" y="325" width="7.9" height="15.0" fill="rgb(249,228,12)" rx="2" ry="2" />
+<text  x="1185.08" y="335.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="200.1" y="277" width="7.9" height="15.0" fill="rgb(244,91,10)" rx="2" ry="2" />
+<text  x="203.07" y="287.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="318.9" y="69" width="7.9" height="15.0" fill="rgb(217,8,24)" rx="2" ry="2" />
+<text  x="321.86" y="79.5" ></text>
+</g>
+<g >
+<title>__vsnprintf_internal (1 samples, 0.67%)</title><rect x="516.8" y="277" width="8.0" height="15.0" fill="rgb(211,199,26)" rx="2" ry="2" />
+<text  x="519.85" y="287.5" ></text>
+</g>
+<g >
+<title>general_composite_rect (1 samples, 0.67%)</title><rect x="192.1" y="181" width="8.0" height="15.0" fill="rgb(236,225,9)" rx="2" ry="2" />
+<text  x="195.15" y="191.5" ></text>
+</g>
+<g >
+<title>general_composite_rect (4 samples, 2.68%)</title><rect x="619.8" y="165" width="31.7" height="15.0" fill="rgb(237,220,38)" rx="2" ry="2" />
+<text  x="622.80" y="175.5" >ge..</text>
+</g>
+<g >
+<title>http::Session::performWrites (1 samples, 0.67%)</title><rect x="168.4" y="325" width="7.9" height="15.0" fill="rgb(215,140,17)" rx="2" ry="2" />
+<text  x="171.39" y="335.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="611.9" y="293" width="7.9" height="15.0" fill="rgb(243,30,32)" rx="2" ry="2" />
+<text  x="614.88" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="287.2" y="277" width="7.9" height="15.0" fill="rgb(231,127,23)" rx="2" ry="2" />
+<text  x="290.18" y="287.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="1134.6" y="293" width="7.9" height="15.0" fill="rgb(212,74,48)" rx="2" ry="2" />
+<text  x="1137.56" y="303.5" ></text>
+</g>
+<g >
+<title>SdStyleSheet::getPropertyState (1 samples, 0.67%)</title><rect x="279.3" y="293" width="7.9" height="15.0" fill="rgb(211,192,39)" rx="2" ry="2" />
+<text  x="282.26" y="303.5" ></text>
+</g>
+<g >
+<title>ChildSession::sendBinaryFrame (1 samples, 0.67%)</title><rect x="318.9" y="181" width="7.9" height="15.0" fill="rgb(213,139,41)" rx="2" ry="2" />
+<text  x="321.86" y="191.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="540.6" y="229" width="7.9" height="15.0" fill="rgb(253,123,51)" rx="2" ry="2" />
+<text  x="543.60" y="239.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (5 samples, 3.36%)</title><rect x="809.9" y="293" width="39.6" height="15.0" fill="rgb(243,217,16)" rx="2" ry="2" />
+<text  x="812.87" y="303.5" >han..</text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="208.0" y="309" width="7.9" height="15.0" fill="rgb(230,223,13)" rx="2" ry="2" />
+<text  x="210.99" y="319.5" ></text>
+</g>
+<g >
+<title>KitSocketPoll::kitPoll (2 samples, 1.34%)</title><rect x="318.9" y="293" width="15.8" height="15.0" fill="rgb(210,88,21)" rx="2" ry="2" />
+<text  x="321.86" y="303.5" ></text>
+</g>
+<g >
+<title>__restore_rt (8 samples, 5.37%)</title><rect x="904.9" y="245" width="63.4" height="15.0" fill="rgb(214,7,47)" rx="2" ry="2" />
+<text  x="907.90" y="255.5" >__rest..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="421.8" y="261" width="7.9" height="15.0" fill="rgb(211,75,50)" rx="2" ry="2" />
+<text  x="424.81" y="271.5" ></text>
+</g>
+<g >
+<title>__futex_abstimed_wait_common (8 samples, 5.37%)</title><rect x="904.9" y="261" width="63.4" height="15.0" fill="rgb(251,18,51)" rx="2" ry="2" />
+<text  x="907.90" y="271.5" >__fute..</text>
+</g>
+<g >
+<title>decltype  (16 samples, 10.74%)</title><rect x="10.0" y="309" width="126.7" height="15.0" fill="rgb(234,212,1)" rx="2" ry="2" />
+<text  x="13.00" y="319.5" >decltype </text>
+</g>
+<g >
+<title>adler32_z (1 samples, 0.67%)</title><rect x="683.2" y="229" width="7.9" height="15.0" fill="rgb(206,216,49)" rx="2" ry="2" />
+<text  x="686.15" y="239.5" ></text>
+</g>
+<g >
+<title>__libc_pread (1 samples, 0.67%)</title><rect x="303.0" y="293" width="7.9" height="15.0" fill="rgb(249,121,17)" rx="2" ry="2" />
+<text  x="306.02" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (8 samples, 5.37%)</title><rect x="904.9" y="229" width="63.4" height="15.0" fill="rgb(222,106,20)" rx="2" ry="2" />
+<text  x="907.90" y="239.5" >handle..</text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="192.1" y="293" width="8.0" height="15.0" fill="rgb(227,147,43)" rx="2" ry="2" />
+<text  x="195.15" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="453.5" y="229" width="7.9" height="15.0" fill="rgb(254,11,4)" rx="2" ry="2" />
+<text  x="456.49" y="239.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="318.9" y="37" width="7.9" height="15.0" fill="rgb(221,177,44)" rx="2" ry="2" />
+<text  x="321.86" y="47.5" ></text>
+</g>
+<g >
+<title>cairo_paint (6 samples, 4.03%)</title><rect x="461.4" y="293" width="47.5" height="15.0" fill="rgb(238,221,38)" rx="2" ry="2" />
+<text  x="464.41" y="303.5" >cair..</text>
+</g>
+<g >
+<title>basegfx::B2DPolygon::getB2DRange (1 samples, 0.67%)</title><rect x="849.5" y="309" width="7.9" height="15.0" fill="rgb(227,99,34)" rx="2" ry="2" />
+<text  x="852.46" y="319.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="572.3" y="309" width="7.9" height="15.0" fill="rgb(245,75,40)" rx="2" ry="2" />
+<text  x="575.28" y="319.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="881.1" y="277" width="8.0" height="15.0" fill="rgb(217,51,31)" rx="2" ry="2" />
+<text  x="884.14" y="287.5" ></text>
+</g>
+<g >
+<title>SvpSalVirtualDevice::SetSize (1 samples, 0.67%)</title><rect x="279.3" y="277" width="7.9" height="15.0" fill="rgb(236,23,30)" rx="2" ry="2" />
+<text  x="282.26" y="287.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="437.7" y="293" width="7.9" height="15.0" fill="rgb(212,84,12)" rx="2" ry="2" />
+<text  x="440.65" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="223.8" y="293" width="7.9" height="15.0" fill="rgb(207,229,36)" rx="2" ry="2" />
+<text  x="226.83" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 1.34%)</title><rect x="596.0" y="197" width="15.9" height="15.0" fill="rgb(238,110,22)" rx="2" ry="2" />
+<text  x="599.04" y="207.5" ></text>
+</g>
+<g >
+<title>typelib_typedescription_getByName (1 samples, 0.67%)</title><rect x="714.8" y="309" width="8.0" height="15.0" fill="rgb(217,66,40)" rx="2" ry="2" />
+<text  x="717.83" y="319.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="184.2" y="293" width="7.9" height="15.0" fill="rgb(246,130,40)" rx="2" ry="2" />
+<text  x="187.23" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="778.2" y="261" width="7.9" height="15.0" fill="rgb(229,95,36)" rx="2" ry="2" />
+<text  x="781.19" y="271.5" ></text>
+</g>
+<g >
+<title>SalGraphicsAutoDelegateToImpl::implDrawGradient (1 samples, 0.67%)</title><rect x="239.7" y="325" width="7.9" height="15.0" fill="rgb(245,56,1)" rx="2" ry="2" />
+<text  x="242.66" y="335.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="421.8" y="277" width="7.9" height="15.0" fill="rgb(214,170,8)" rx="2" ry="2" />
+<text  x="424.81" y="287.5" ></text>
+</g>
+<g >
+<title>Session::handleMessage (2 samples, 1.34%)</title><rect x="318.9" y="245" width="15.8" height="15.0" fill="rgb(208,123,27)" rx="2" ry="2" />
+<text  x="321.86" y="255.5" ></text>
+</g>
+<g >
+<title>deflate (3 samples, 2.01%)</title><rect x="675.2" y="293" width="23.8" height="15.0" fill="rgb(235,69,6)" rx="2" ry="2" />
+<text  x="678.23" y="303.5" >d..</text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="223.8" y="309" width="7.9" height="15.0" fill="rgb(215,22,41)" rx="2" ry="2" />
+<text  x="226.83" y="319.5" ></text>
+</g>
+<g >
+<title>vcl::Font::SetPitch (1 samples, 0.67%)</title><rect x="1134.6" y="325" width="7.9" height="15.0" fill="rgb(248,185,16)" rx="2" ry="2" />
+<text  x="1137.56" y="335.5" ></text>
+</g>
+<g >
+<title>__restore_rt (6 samples, 4.03%)</title><rect x="366.4" y="293" width="47.5" height="15.0" fill="rgb(246,88,25)" rx="2" ry="2" />
+<text  x="369.38" y="303.5" >__re..</text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParserImpl::parseStream (2 samples, 1.34%)</title><rect x="596.0" y="293" width="15.9" height="15.0" fill="rgb(206,219,52)" rx="2" ry="2" />
+<text  x="599.04" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="279.3" y="213" width="7.9" height="15.0" fill="rgb(240,128,0)" rx="2" ry="2" />
+<text  x="282.26" y="223.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="310.9" y="309" width="8.0" height="15.0" fill="rgb(209,50,22)" rx="2" ry="2" />
+<text  x="313.94" y="319.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="532.7" y="245" width="7.9" height="15.0" fill="rgb(248,214,10)" rx="2" ry="2" />
+<text  x="535.68" y="255.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="1166.2" y="293" width="8.0" height="15.0" fill="rgb(214,178,11)" rx="2" ry="2" />
+<text  x="1169.24" y="303.5" ></text>
+</g>
+<g >
+<title>SvpSalYieldMutex::doAcquire (2 samples, 1.34%)</title><rect x="318.9" y="309" width="15.8" height="15.0" fill="rgb(250,178,44)" rx="2" ry="2" />
+<text  x="321.86" y="319.5" ></text>
+</g>
+<g >
+<title>non-virtual thunk to (anonymous namespace)::FastLocatorImpl::getLineNumber (8 samples, 5.37%)</title><rect x="904.9" y="325" width="63.4" height="15.0" fill="rgb(233,23,52)" rx="2" ry="2" />
+<text  x="907.90" y="335.5" >non-vi..</text>
+</g>
+<g >
+<title>[libz.so.1.2.13] (7 samples, 4.70%)</title><rect x="984.1" y="293" width="55.4" height="15.0" fill="rgb(241,190,24)" rx="2" ry="2" />
+<text  x="987.09" y="303.5" >[libz..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="303.0" y="261" width="7.9" height="15.0" fill="rgb(226,110,8)" rx="2" ry="2" />
+<text  x="306.02" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="247.6" y="277" width="7.9" height="15.0" fill="rgb(253,99,4)" rx="2" ry="2" />
+<text  x="250.58" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="588.1" y="245" width="7.9" height="15.0" fill="rgb(248,65,8)" rx="2" ry="2" />
+<text  x="591.12" y="255.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="627.7" y="117" width="7.9" height="15.0" fill="rgb(246,21,24)" rx="2" ry="2" />
+<text  x="630.72" y="127.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="318.9" y="53" width="7.9" height="15.0" fill="rgb(233,89,29)" rx="2" ry="2" />
+<text  x="321.86" y="63.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="516.8" y="213" width="8.0" height="15.0" fill="rgb(252,203,21)" rx="2" ry="2" />
+<text  x="519.85" y="223.5" ></text>
+</g>
+<g >
+<title>basegfx::utils::isInside (1 samples, 0.67%)</title><rect x="580.2" y="309" width="7.9" height="15.0" fill="rgb(210,163,17)" rx="2" ry="2" />
+<text  x="583.20" y="319.5" ></text>
+</g>
+<g >
+<title>malloc (1 samples, 0.67%)</title><rect x="263.4" y="293" width="7.9" height="15.0" fill="rgb(247,28,51)" rx="2" ry="2" />
+<text  x="266.42" y="303.5" ></text>
+</g>
+<g >
+<title>desktop::CallbackFlushHandler::processInvalidateTilesEvent (1 samples, 0.67%)</title><rect x="564.4" y="261" width="7.9" height="15.0" fill="rgb(224,199,18)" rx="2" ry="2" />
+<text  x="567.36" y="271.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="714.8" y="293" width="8.0" height="15.0" fill="rgb(226,118,39)" rx="2" ry="2" />
+<text  x="717.83" y="303.5" ></text>
+</g>
+<g >
+<title>Document::drainQueue (2 samples, 1.34%)</title><rect x="318.9" y="277" width="15.8" height="15.0" fill="rgb(209,145,38)" rx="2" ry="2" />
+<text  x="321.86" y="287.5" ></text>
+</g>
+<g >
+<title>std::chrono::_V2::steady_clock::now (1 samples, 0.67%)</title><rect x="168.4" y="309" width="7.9" height="15.0" fill="rgb(215,155,6)" rx="2" ry="2" />
+<text  x="171.39" y="319.5" ></text>
+</g>
+<g >
+<title>__memmove_avx_unaligned_erms (1 samples, 0.67%)</title><rect x="184.2" y="309" width="7.9" height="15.0" fill="rgb(207,167,2)" rx="2" ry="2" />
+<text  x="187.23" y="319.5" ></text>
+</g>
+<g >
+<title>dest_write_back_narrow (2 samples, 1.34%)</title><rect x="857.4" y="165" width="15.8" height="15.0" fill="rgb(214,29,15)" rx="2" ry="2" />
+<text  x="860.38" y="175.5" ></text>
+</g>
+<g >
+<title>__restore_rt (3 samples, 2.01%)</title><rect x="1142.5" y="309" width="23.7" height="15.0" fill="rgb(224,47,8)" rx="2" ry="2" />
+<text  x="1145.48" y="319.5" >_..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (7 samples, 4.70%)</title><rect x="984.1" y="261" width="55.4" height="15.0" fill="rgb(206,148,6)" rx="2" ry="2" />
+<text  x="987.09" y="271.5" >handl..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="675.2" y="197" width="8.0" height="15.0" fill="rgb(246,174,12)" rx="2" ry="2" />
+<text  x="678.23" y="207.5" ></text>
+</g>
+<g >
+<title>StreamSocket::writeOutgoingData (5 samples, 3.36%)</title><rect x="738.6" y="133" width="39.6" height="15.0" fill="rgb(206,180,30)" rx="2" ry="2" />
+<text  x="741.59" y="143.5" >Str..</text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="976.2" y="293" width="7.9" height="15.0" fill="rgb(244,130,28)" rx="2" ry="2" />
+<text  x="979.17" y="303.5" ></text>
+</g>
+<g >
+<title>__libc_pwrite (1 samples, 0.67%)</title><rect x="778.2" y="309" width="7.9" height="15.0" fill="rgb(210,117,7)" rx="2" ry="2" />
+<text  x="781.19" y="319.5" ></text>
+</g>
+<g >
+<title>__strchrnul_avx2 (1 samples, 0.67%)</title><rect x="516.8" y="245" width="8.0" height="15.0" fill="rgb(229,195,24)" rx="2" ry="2" />
+<text  x="519.85" y="255.5" ></text>
+</g>
+<g >
+<title>fetch_pixel_no_alpha_32 (1 samples, 0.67%)</title><rect x="192.1" y="149" width="8.0" height="15.0" fill="rgb(243,148,27)" rx="2" ry="2" />
+<text  x="195.15" y="159.5" ></text>
+</g>
+<g >
+<title>sax_fastparser::FastSaxParser::initialize (2 samples, 1.34%)</title><rect x="1079.1" y="325" width="15.9" height="15.0" fill="rgb(212,183,16)" rx="2" ry="2" />
+<text  x="1082.13" y="335.5" ></text>
+</g>
+<g >
+<title>png_read_filter_row (1 samples, 0.67%)</title><rect x="976.2" y="325" width="7.9" height="15.0" fill="rgb(228,106,39)" rx="2" ry="2" />
+<text  x="979.17" y="335.5" ></text>
+</g>
+<g >
+<title>operator new (1 samples, 0.67%)</title><rect x="263.4" y="309" width="7.9" height="15.0" fill="rgb(215,187,45)" rx="2" ry="2" />
+<text  x="266.42" y="319.5" ></text>
+</g>
+<g >
+<title>syscall (2 samples, 1.34%)</title><rect x="659.4" y="229" width="15.8" height="15.0" fill="rgb(214,47,50)" rx="2" ry="2" />
+<text  x="662.40" y="239.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="200.1" y="261" width="7.9" height="15.0" fill="rgb(232,168,12)" rx="2" ry="2" />
+<text  x="203.07" y="271.5" ></text>
+</g>
+<g >
+<title>ImplFontCache::GetFontInstance (1 samples, 0.67%)</title><rect x="421.8" y="293" width="7.9" height="15.0" fill="rgb(213,217,1)" rx="2" ry="2" />
+<text  x="424.81" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 1.34%)</title><rect x="1079.1" y="293" width="15.9" height="15.0" fill="rgb(207,178,15)" rx="2" ry="2" />
+<text  x="1082.13" y="303.5" ></text>
+</g>
+<g >
+<title>void std::vector&lt;char, std::allocator&lt;char&gt; &gt;::_M_range_insert&lt;char const*&gt; (1 samples, 0.67%)</title><rect x="318.9" y="101" width="7.9" height="15.0" fill="rgb(240,187,10)" rx="2" ry="2" />
+<text  x="321.86" y="111.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (6 samples, 4.03%)</title><rect x="461.4" y="197" width="47.5" height="15.0" fill="rgb(248,42,24)" rx="2" ry="2" />
+<text  x="464.41" y="207.5" >[lib..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="706.9" y="213" width="7.9" height="15.0" fill="rgb(249,123,17)" rx="2" ry="2" />
+<text  x="709.91" y="223.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (6 samples, 4.03%)</title><rect x="366.4" y="277" width="47.5" height="15.0" fill="rgb(251,204,46)" rx="2" ry="2" />
+<text  x="369.38" y="287.5" >hand..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="176.3" y="245" width="7.9" height="15.0" fill="rgb(227,180,21)" rx="2" ry="2" />
+<text  x="179.31" y="255.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="691.1" y="229" width="7.9" height="15.0" fill="rgb(223,188,48)" rx="2" ry="2" />
+<text  x="694.07" y="239.5" ></text>
+</g>
+<g >
+<title>[unknown] (36 samples, 24.16%)</title><rect x="445.6" y="325" width="285.1" height="15.0" fill="rgb(212,106,48)" rx="2" ry="2" />
+<text  x="448.57" y="335.5" >[unknown]</text>
+</g>
+<g >
+<title>ChildSession::sendZstdFrame (1 samples, 0.67%)</title><rect x="318.9" y="197" width="7.9" height="15.0" fill="rgb(253,221,2)" rx="2" ry="2" />
+<text  x="321.86" y="207.5" ></text>
+</g>
+<g >
+<title>INetURLObject::getPrefix (1 samples, 0.67%)</title><rect x="445.6" y="309" width="7.9" height="15.0" fill="rgb(217,42,25)" rx="2" ry="2" />
+<text  x="448.57" y="319.5" ></text>
+</g>
+<g >
+<title>decltype  (1 samples, 0.67%)</title><rect x="168.4" y="261" width="7.9" height="15.0" fill="rgb(252,67,12)" rx="2" ry="2" />
+<text  x="171.39" y="271.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="548.5" y="277" width="7.9" height="15.0" fill="rgb(253,27,23)" rx="2" ry="2" />
+<text  x="551.52" y="287.5" ></text>
+</g>
+<g >
+<title>jkj::dragonbox::decimal_fp&lt;unsigned long, false, false&gt; jkj::dragonbox::detail::impl&lt;double, jkj::dragonbox::default_float_traits&lt;double&gt; &gt;::compute_nearest_normal&lt;jkj::dragonbox::decimal_fp&lt;unsigned long, false, false&gt;, jkj::dragonbox::detail::policy_impl::decimal_to_binary_rounding::interval_type::symmetric_boundary, jkj::dragonbox::detail::policy_impl::trailing_zero::ignore, jkj::dragonbox::detail::policy_impl::binary_to_decimal_rounding::to_even, jkj::dragonbox::detail::policy_impl::cache::full, bool&gt; (1 samples, 0.67%)</title><rect x="794.0" y="309" width="7.9" height="15.0" fill="rgb(205,202,48)" rx="2" ry="2" />
+<text  x="797.03" y="319.5" ></text>
+</g>
+<g >
+<title>[libz.so.1.2.13] (3 samples, 2.01%)</title><rect x="675.2" y="277" width="23.8" height="15.0" fill="rgb(248,151,7)" rx="2" ry="2" />
+<text  x="678.23" y="287.5" >[..</text>
+</g>
+<g >
+<title>ImpEditEngine::CreateAttribUndo (1 samples, 0.67%)</title><rect x="215.9" y="325" width="7.9" height="15.0" fill="rgb(209,40,15)" rx="2" ry="2" />
+<text  x="218.91" y="335.5" ></text>
+</g>
+<g >
+<title>GenericSalLayout::LayoutText (1 samples, 0.67%)</title><rect x="453.5" y="261" width="7.9" height="15.0" fill="rgb(235,212,42)" rx="2" ry="2" />
+<text  x="456.49" y="271.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (2 samples, 1.34%)</title><rect x="857.4" y="277" width="15.8" height="15.0" fill="rgb(244,111,47)" rx="2" ry="2" />
+<text  x="860.38" y="287.5" ></text>
+</g>
+<g >
+<title>inflate (12 samples, 8.05%)</title><rect x="984.1" y="309" width="95.0" height="15.0" fill="rgb(246,101,29)" rx="2" ry="2" />
+<text  x="987.09" y="319.5" >inflate</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="556.4" y="261" width="8.0" height="15.0" fill="rgb(247,30,2)" rx="2" ry="2" />
+<text  x="559.44" y="271.5" ></text>
+</g>
+<g >
+<title>__strcmp_avx2 (1 samples, 0.67%)</title><rect x="786.1" y="261" width="7.9" height="15.0" fill="rgb(243,191,27)" rx="2" ry="2" />
+<text  x="789.11" y="271.5" ></text>
+</g>
+<g >
+<title>osl_waitCondition (2 samples, 1.34%)</title><rect x="596.0" y="277" width="15.9" height="15.0" fill="rgb(205,200,53)" rx="2" ry="2" />
+<text  x="599.04" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="215.9" y="245" width="7.9" height="15.0" fill="rgb(250,12,3)" rx="2" ry="2" />
+<text  x="218.91" y="255.5" ></text>
+</g>
+<g >
+<title>general_composite_rect (1 samples, 0.67%)</title><rect x="873.2" y="181" width="7.9" height="15.0" fill="rgb(254,207,31)" rx="2" ry="2" />
+<text  x="876.22" y="191.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="683.2" y="181" width="7.9" height="15.0" fill="rgb(231,220,15)" rx="2" ry="2" />
+<text  x="686.15" y="191.5" ></text>
+</g>
+<g >
+<title>[unknown] (2 samples, 1.34%)</title><rect x="556.4" y="309" width="15.9" height="15.0" fill="rgb(206,53,21)" rx="2" ry="2" />
+<text  x="559.44" y="319.5" ></text>
+</g>
+<g >
+<title>rtl_math_round (1 samples, 0.67%)</title><rect x="532.7" y="293" width="7.9" height="15.0" fill="rgb(232,118,7)" rx="2" ry="2" />
+<text  x="535.68" y="303.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="501.0" y="117" width="7.9" height="15.0" fill="rgb(253,187,42)" rx="2" ry="2" />
+<text  x="504.01" y="127.5" ></text>
+</g>
+<g >
+<title>OStorage::queryInterface (1 samples, 0.67%)</title><rect x="231.7" y="325" width="8.0" height="15.0" fill="rgb(208,60,51)" rx="2" ry="2" />
+<text  x="234.74" y="335.5" ></text>
+</g>
+<g >
+<title>SvNFLanguageData::GetLangDecimalSep (1 samples, 0.67%)</title><rect x="699.0" y="293" width="7.9" height="15.0" fill="rgb(234,94,42)" rx="2" ry="2" />
+<text  x="701.99" y="303.5" ></text>
+</g>
+<g >
+<title>SdDrawDocument::ForgetUsedBullets (1 samples, 0.67%)</title><rect x="508.9" y="309" width="7.9" height="15.0" fill="rgb(213,101,39)" rx="2" ry="2" />
+<text  x="511.93" y="319.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="192.1" y="117" width="8.0" height="15.0" fill="rgb(243,77,18)" rx="2" ry="2" />
+<text  x="195.15" y="127.5" ></text>
+</g>
+<g >
+<title>KitSocketPoll::kitPoll (6 samples, 4.03%)</title><rect x="730.7" y="293" width="47.5" height="15.0" fill="rgb(233,104,53)" rx="2" ry="2" />
+<text  x="733.67" y="303.5" >KitS..</text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="849.5" y="293" width="7.9" height="15.0" fill="rgb(242,156,26)" rx="2" ry="2" />
+<text  x="852.46" y="303.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="334.7" y="277" width="7.9" height="15.0" fill="rgb(250,188,28)" rx="2" ry="2" />
+<text  x="337.70" y="287.5" ></text>
+</g>
+<g >
+<title>SdXMLMasterStylesContext::createFastChildContext (1 samples, 0.67%)</title><rect x="279.3" y="325" width="7.9" height="15.0" fill="rgb(222,185,5)" rx="2" ry="2" />
+<text  x="282.26" y="335.5" ></text>
+</g>
+<g >
+<title>[libsallo.so] (1 samples, 0.67%)</title><rect x="429.7" y="325" width="8.0" height="15.0" fill="rgb(220,184,7)" rx="2" ry="2" />
+<text  x="432.73" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="524.8" y="229" width="7.9" height="15.0" fill="rgb(236,100,14)" rx="2" ry="2" />
+<text  x="527.77" y="239.5" ></text>
+</g>
+<g >
+<title>__restore_rt (5 samples, 3.36%)</title><rect x="809.9" y="309" width="39.6" height="15.0" fill="rgb(207,168,8)" rx="2" ry="2" />
+<text  x="812.87" y="319.5" >__r..</text>
+</g>
+<g >
+<title>png_set_cHRM_XYZ_fixed (12 samples, 8.05%)</title><rect x="984.1" y="325" width="95.0" height="15.0" fill="rgb(214,119,17)" rx="2" ry="2" />
+<text  x="987.09" y="335.5" >png_set_cHR..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="588.1" y="261" width="7.9" height="15.0" fill="rgb(240,41,29)" rx="2" ry="2" />
+<text  x="591.12" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (7 samples, 4.70%)</title><rect x="984.1" y="245" width="55.4" height="15.0" fill="rgb(218,210,45)" rx="2" ry="2" />
+<text  x="987.09" y="255.5" >syscall</text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (6 samples, 4.03%)</title><rect x="461.4" y="261" width="47.5" height="15.0" fill="rgb(214,69,27)" rx="2" ry="2" />
+<text  x="464.41" y="271.5" >[lib..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="1118.7" y="277" width="7.9" height="15.0" fill="rgb(249,72,18)" rx="2" ry="2" />
+<text  x="1121.72" y="287.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="223.8" y="277" width="7.9" height="15.0" fill="rgb(236,193,44)" rx="2" ry="2" />
+<text  x="226.83" y="287.5" ></text>
+</g>
+<g >
+<title>clock_gettime@@GLIBC_2.17 (1 samples, 0.67%)</title><rect x="445.6" y="293" width="7.9" height="15.0" fill="rgb(235,44,2)" rx="2" ry="2" />
+<text  x="448.57" y="303.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="516.8" y="229" width="8.0" height="15.0" fill="rgb(225,87,48)" rx="2" ry="2" />
+<text  x="519.85" y="239.5" ></text>
+</g>
+<g >
+<title>SvNumberformat::ImpGetDateOutput (1 samples, 0.67%)</title><rect x="532.7" y="309" width="7.9" height="15.0" fill="rgb(220,185,44)" rx="2" ry="2" />
+<text  x="535.68" y="319.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (2 samples, 1.34%)</title><rect x="857.4" y="213" width="15.8" height="15.0" fill="rgb(215,193,54)" rx="2" ry="2" />
+<text  x="860.38" y="223.5" ></text>
+</g>
+<g >
+<title>clock_gettime@@GLIBC_2.17 (1 samples, 0.67%)</title><rect x="168.4" y="293" width="7.9" height="15.0" fill="rgb(234,140,14)" rx="2" ry="2" />
+<text  x="171.39" y="303.5" ></text>
+</g>
+<g >
+<title>std::unordered_map&lt;rtl::OString, std::locale, std::hash&lt;rtl::OString&gt;, std::equal_to&lt;rtl::OString&gt;, std::allocator&lt;std::pair&lt;rtl::OString const, std::locale&gt; &gt; &gt;::~unordered_map (1 samples, 0.67%)</title><rect x="1118.7" y="325" width="7.9" height="15.0" fill="rgb(219,54,9)" rx="2" ry="2" />
+<text  x="1121.72" y="335.5" ></text>
+</g>
+<g >
+<title>[libsclo.so] (1 samples, 0.67%)</title><rect x="437.7" y="325" width="7.9" height="15.0" fill="rgb(245,11,39)" rx="2" ry="2" />
+<text  x="440.65" y="335.5" ></text>
+</g>
+<g >
+<title>WebSocketHandler::sendFrame (1 samples, 0.67%)</title><rect x="730.7" y="181" width="7.9" height="15.0" fill="rgb(213,36,14)" rx="2" ry="2" />
+<text  x="733.67" y="191.5" ></text>
+</g>
+<g >
+<title>__restore_rt (2 samples, 1.34%)</title><rect x="857.4" y="133" width="15.8" height="15.0" fill="rgb(247,207,19)" rx="2" ry="2" />
+<text  x="860.38" y="143.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (2 samples, 1.34%)</title><rect x="857.4" y="229" width="15.8" height="15.0" fill="rgb(241,48,29)" rx="2" ry="2" />
+<text  x="860.38" y="239.5" ></text>
+</g>
+<g >
+<title>SvFileStream::PutData (1 samples, 0.67%)</title><rect x="303.0" y="325" width="7.9" height="15.0" fill="rgb(234,167,42)" rx="2" ry="2" />
+<text  x="306.02" y="335.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="572.3" y="293" width="7.9" height="15.0" fill="rgb(234,22,17)" rx="2" ry="2" />
+<text  x="575.28" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="453.5" y="213" width="7.9" height="15.0" fill="rgb(221,122,37)" rx="2" ry="2" />
+<text  x="456.49" y="223.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="271.3" y="309" width="8.0" height="15.0" fill="rgb(248,206,2)" rx="2" ry="2" />
+<text  x="274.34" y="319.5" ></text>
+</g>
+<g >
+<title>__bits_image_fetch_affine_no_alpha (1 samples, 0.67%)</title><rect x="873.2" y="165" width="7.9" height="15.0" fill="rgb(230,120,23)" rx="2" ry="2" />
+<text  x="876.22" y="175.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="730.7" y="85" width="7.9" height="15.0" fill="rgb(235,168,52)" rx="2" ry="2" />
+<text  x="733.67" y="95.5" ></text>
+</g>
+<g >
+<title>__futex_abstimed_wait_common (2 samples, 1.34%)</title><rect x="596.0" y="229" width="15.9" height="15.0" fill="rgb(250,94,2)" rx="2" ry="2" />
+<text  x="599.04" y="239.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;bool  (1 samples, 0.67%)</title><rect x="564.4" y="277" width="7.9" height="15.0" fill="rgb(216,42,25)" rx="2" ry="2" />
+<text  x="567.36" y="287.5" ></text>
+</g>
+<g >
+<title>sd::slidesorter::controller::SlideSorterController::WindowEventHandler (1 samples, 0.67%)</title><rect x="722.8" y="293" width="7.9" height="15.0" fill="rgb(233,200,34)" rx="2" ry="2" />
+<text  x="725.75" y="303.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;rtl::OUString, std::pair&lt;rtl::OUString const, NameSpaceEntry&gt;, std::allocator&lt;std::pair&lt;rtl::OUString const, NameSpaceEntry&gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;rtl::OUString&gt;, std::hash&lt;rtl::OUString&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, false, true&gt; &gt;::_M_find_before_node (1 samples, 0.67%)</title><rect x="1095.0" y="325" width="7.9" height="15.0" fill="rgb(232,11,9)" rx="2" ry="2" />
+<text  x="1097.97" y="335.5" ></text>
+</g>
+<g >
+<title>svx::vector::ObjectContent::Measurement::~Measurement (1 samples, 0.67%)</title><rect x="706.9" y="309" width="7.9" height="15.0" fill="rgb(238,149,40)" rx="2" ry="2" />
+<text  x="709.91" y="319.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (6 samples, 4.03%)</title><rect x="461.4" y="229" width="47.5" height="15.0" fill="rgb(226,196,32)" rx="2" ry="2" />
+<text  x="464.41" y="239.5" >[lib..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="413.9" y="229" width="7.9" height="15.0" fill="rgb(238,137,15)" rx="2" ry="2" />
+<text  x="416.89" y="239.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="881.1" y="261" width="8.0" height="15.0" fill="rgb(246,176,19)" rx="2" ry="2" />
+<text  x="884.14" y="271.5" ></text>
+</g>
+<g >
+<title>__restore_rt (7 samples, 4.70%)</title><rect x="984.1" y="277" width="55.4" height="15.0" fill="rgb(225,46,14)" rx="2" ry="2" />
+<text  x="987.09" y="287.5" >__res..</text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="279.3" y="229" width="7.9" height="15.0" fill="rgb(236,170,6)" rx="2" ry="2" />
+<text  x="282.26" y="239.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="271.3" y="293" width="8.0" height="15.0" fill="rgb(248,165,8)" rx="2" ry="2" />
+<text  x="274.34" y="303.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="1102.9" y="293" width="7.9" height="15.0" fill="rgb(225,224,36)" rx="2" ry="2" />
+<text  x="1105.89" y="303.5" ></text>
+</g>
+<g >
+<title>adler32_z (5 samples, 3.36%)</title><rect x="1039.5" y="293" width="39.6" height="15.0" fill="rgb(242,154,20)" rx="2" ry="2" />
+<text  x="1042.53" y="303.5" >adl..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="786.1" y="229" width="7.9" height="15.0" fill="rgb(237,81,20)" rx="2" ry="2" />
+<text  x="789.11" y="239.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="588.1" y="277" width="7.9" height="15.0" fill="rgb(215,36,9)" rx="2" ry="2" />
+<text  x="591.12" y="287.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="255.5" y="309" width="7.9" height="15.0" fill="rgb(226,52,1)" rx="2" ry="2" />
+<text  x="258.50" y="319.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="453.5" y="245" width="7.9" height="15.0" fill="rgb(209,56,5)" rx="2" ry="2" />
+<text  x="456.49" y="255.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="651.5" y="277" width="7.9" height="15.0" fill="rgb(235,52,9)" rx="2" ry="2" />
+<text  x="654.48" y="287.5" ></text>
+</g>
+<g >
+<title>drawinglayer::primitive2d::PolygonWavePrimitive2D::create2DDecomposition (1 samples, 0.67%)</title><rect x="849.5" y="325" width="7.9" height="15.0" fill="rgb(238,54,35)" rx="2" ry="2" />
+<text  x="852.46" y="335.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@@GLIBC_2.2.5 (1 samples, 0.67%)</title><rect x="540.6" y="277" width="7.9" height="15.0" fill="rgb(237,18,44)" rx="2" ry="2" />
+<text  x="543.60" y="287.5" ></text>
+</g>
+<g >
+<title>Document::postMessage (5 samples, 3.36%)</title><rect x="738.6" y="165" width="39.6" height="15.0" fill="rgb(210,6,22)" rx="2" ry="2" />
+<text  x="741.59" y="175.5" >Doc..</text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (2 samples, 1.34%)</title><rect x="857.4" y="261" width="15.8" height="15.0" fill="rgb(252,57,12)" rx="2" ry="2" />
+<text  x="860.38" y="271.5" ></text>
+</g>
+<g >
+<title>Document::sendFrame (5 samples, 3.36%)</title><rect x="738.6" y="181" width="39.6" height="15.0" fill="rgb(249,110,35)" rx="2" ry="2" />
+<text  x="741.59" y="191.5" >Doc..</text>
+</g>
+<g >
+<title>std::condition_variable::wait (2 samples, 1.34%)</title><rect x="596.0" y="261" width="15.9" height="15.0" fill="rgb(244,119,8)" rx="2" ry="2" />
+<text  x="599.04" y="271.5" ></text>
+</g>
+<g >
+<title>fetch_pixel_no_alpha_32 (3 samples, 2.01%)</title><rect x="627.7" y="133" width="23.8" height="15.0" fill="rgb(220,14,43)" rx="2" ry="2" />
+<text  x="630.72" y="143.5" >f..</text>
+</g>
+<g >
+<title>osl_waitCondition (8 samples, 5.37%)</title><rect x="904.9" y="309" width="63.4" height="15.0" fill="rgb(242,169,3)" rx="2" ry="2" />
+<text  x="907.90" y="319.5" >osl_wa..</text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (4 samples, 2.68%)</title><rect x="619.8" y="197" width="31.7" height="15.0" fill="rgb(242,80,46)" rx="2" ry="2" />
+<text  x="622.80" y="207.5" >[l..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 1.34%)</title><rect x="857.4" y="117" width="15.8" height="15.0" fill="rgb(208,17,12)" rx="2" ry="2" />
+<text  x="860.38" y="127.5" ></text>
+</g>
+<g >
+<title>ChildSession::sendTextFrame (1 samples, 0.67%)</title><rect x="730.7" y="229" width="7.9" height="15.0" fill="rgb(212,127,6)" rx="2" ry="2" />
+<text  x="733.67" y="239.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="873.2" y="293" width="7.9" height="15.0" fill="rgb(217,12,47)" rx="2" ry="2" />
+<text  x="876.22" y="303.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (6 samples, 4.03%)</title><rect x="461.4" y="213" width="47.5" height="15.0" fill="rgb(246,47,12)" rx="2" ry="2" />
+<text  x="464.41" y="223.5" >[lib..</text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="429.7" y="261" width="8.0" height="15.0" fill="rgb(231,97,48)" rx="2" ry="2" />
+<text  x="432.73" y="271.5" ></text>
+</g>
+<g >
+<title>osl_getThreadIdentifier (1 samples, 0.67%)</title><rect x="279.3" y="261" width="7.9" height="15.0" fill="rgb(214,37,27)" rx="2" ry="2" />
+<text  x="282.26" y="271.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (5 samples, 3.36%)</title><rect x="738.6" y="69" width="39.6" height="15.0" fill="rgb(242,214,29)" rx="2" ry="2" />
+<text  x="741.59" y="79.5" >han..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="976.2" y="261" width="7.9" height="15.0" fill="rgb(214,109,29)" rx="2" ry="2" />
+<text  x="979.17" y="271.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="516.8" y="197" width="8.0" height="15.0" fill="rgb(208,99,22)" rx="2" ry="2" />
+<text  x="519.85" y="207.5" ></text>
+</g>
+<g >
+<title>std::_Rb_tree&lt;rtl::OUString, std::pair&lt;rtl::OUString const, std::unique_ptr&lt;LegacyFuncData, std::default_delete&lt;LegacyFuncData&gt; &gt; &gt;, std::_Select1st&lt;std::pair&lt;rtl::OUString const, std::unique_ptr&lt;LegacyFuncData, std::default_delete&lt;LegacyFuncData&gt; &gt; &gt; &gt;, std::less&lt;rtl::OUString&gt;, std::allocator&lt;std::pair&lt;rtl::OUString const, std::unique_ptr&lt;LegacyFuncData, std::default_delete&lt;LegacyFuncData&gt; &gt; &gt; &gt; &gt;::_M_get_insert_hint_unique_pos (1 samples, 0.67%)</title><rect x="699.0" y="309" width="7.9" height="15.0" fill="rgb(222,51,20)" rx="2" ry="2" />
+<text  x="701.99" y="319.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="1134.6" y="309" width="7.9" height="15.0" fill="rgb(219,72,0)" rx="2" ry="2" />
+<text  x="1137.56" y="319.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 1.34%)</title><rect x="889.1" y="293" width="15.8" height="15.0" fill="rgb(236,155,36)" rx="2" ry="2" />
+<text  x="892.06" y="303.5" ></text>
+</g>
+<g >
+<title>AlphaMask::hasAlpha (1 samples, 0.67%)</title><rect x="184.2" y="325" width="7.9" height="15.0" fill="rgb(251,169,53)" rx="2" ry="2" />
+<text  x="187.23" y="335.5" ></text>
+</g>
+<g >
+<title>std::chrono::_V2::steady_clock::now (1 samples, 0.67%)</title><rect x="176.3" y="309" width="7.9" height="15.0" fill="rgb(232,117,34)" rx="2" ry="2" />
+<text  x="179.31" y="319.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="699.0" y="261" width="7.9" height="15.0" fill="rgb(230,200,13)" rx="2" ry="2" />
+<text  x="701.99" y="271.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="699.0" y="277" width="7.9" height="15.0" fill="rgb(218,209,54)" rx="2" ry="2" />
+<text  x="701.99" y="287.5" ></text>
+</g>
+<g >
+<title>__cxxabiv1::__vmi_class_type_info::__do_dyncast (1 samples, 0.67%)</title><rect x="778.2" y="325" width="7.9" height="15.0" fill="rgb(225,40,1)" rx="2" ry="2" />
+<text  x="781.19" y="335.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (2 samples, 1.34%)</title><rect x="659.4" y="245" width="15.8" height="15.0" fill="rgb(249,36,41)" rx="2" ry="2" />
+<text  x="662.40" y="255.5" ></text>
+</g>
+<g >
+<title>[unknown] (1 samples, 0.67%)</title><rect x="168.4" y="277" width="7.9" height="15.0" fill="rgb(229,176,4)" rx="2" ry="2" />
+<text  x="171.39" y="287.5" ></text>
+</g>
+<g >
+<title>__printf_buffer (1 samples, 0.67%)</title><rect x="516.8" y="261" width="8.0" height="15.0" fill="rgb(217,16,46)" rx="2" ry="2" />
+<text  x="519.85" y="271.5" ></text>
+</g>
+<g >
+<title>CairoCommon::getCairoContext (1 samples, 0.67%)</title><rect x="192.1" y="325" width="8.0" height="15.0" fill="rgb(239,103,14)" rx="2" ry="2" />
+<text  x="195.15" y="335.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="437.7" y="277" width="7.9" height="15.0" fill="rgb(231,59,43)" rx="2" ry="2" />
+<text  x="440.65" y="287.5" ></text>
+</g>
+<g >
+<title>__snprintf_chk (1 samples, 0.67%)</title><rect x="516.8" y="293" width="8.0" height="15.0" fill="rgb(224,80,14)" rx="2" ry="2" />
+<text  x="519.85" y="303.5" ></text>
+</g>
+<g >
+<title>ctuStrtod (5 samples, 3.36%)</title><rect x="809.9" y="325" width="39.6" height="15.0" fill="rgb(249,203,19)" rx="2" ry="2" />
+<text  x="812.87" y="335.5" >ctu..</text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="706.9" y="245" width="7.9" height="15.0" fill="rgb(234,205,19)" rx="2" ry="2" />
+<text  x="709.91" y="255.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2 (8 samples, 5.37%)</title><rect x="904.9" y="277" width="63.4" height="15.0" fill="rgb(228,187,26)" rx="2" ry="2" />
+<text  x="907.90" y="287.5" >pthrea..</text>
+</g>
+<g >
+<title>WebSocketHandler::sendFrame (5 samples, 3.36%)</title><rect x="738.6" y="149" width="39.6" height="15.0" fill="rgb(219,11,26)" rx="2" ry="2" />
+<text  x="741.59" y="159.5" >Web..</text>
+</g>
+<g >
+<title>__memmove_avx_unaligned_erms (1 samples, 0.67%)</title><rect x="318.9" y="85" width="7.9" height="15.0" fill="rgb(206,153,13)" rx="2" ry="2" />
+<text  x="321.86" y="95.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (3 samples, 2.01%)</title><rect x="342.6" y="277" width="23.8" height="15.0" fill="rgb(225,121,44)" rx="2" ry="2" />
+<text  x="345.62" y="287.5" >h..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="556.4" y="245" width="8.0" height="15.0" fill="rgb(235,34,40)" rx="2" ry="2" />
+<text  x="559.44" y="255.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (1 samples, 0.67%)</title><rect x="873.2" y="245" width="7.9" height="15.0" fill="rgb(217,45,6)" rx="2" ry="2" />
+<text  x="876.22" y="255.5" ></text>
+</g>
+<g >
+<title>cairo_paint (1 samples, 0.67%)</title><rect x="192.1" y="309" width="8.0" height="15.0" fill="rgb(214,23,19)" rx="2" ry="2" />
+<text  x="195.15" y="319.5" ></text>
+</g>
+<g >
+<title>__memcmp_avx2_movbe (1 samples, 0.67%)</title><rect x="429.7" y="293" width="8.0" height="15.0" fill="rgb(245,176,9)" rx="2" ry="2" />
+<text  x="432.73" y="303.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="334.7" y="293" width="7.9" height="15.0" fill="rgb(251,210,32)" rx="2" ry="2" />
+<text  x="337.70" y="303.5" ></text>
+</g>
+<g >
+<title>[libc.so.6] (2 samples, 1.34%)</title><rect x="318.9" y="325" width="15.8" height="15.0" fill="rgb(250,78,25)" rx="2" ry="2" />
+<text  x="321.86" y="335.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (6 samples, 4.03%)</title><rect x="461.4" y="277" width="47.5" height="15.0" fill="rgb(210,90,28)" rx="2" ry="2" />
+<text  x="464.41" y="287.5" >[lib..</text>
+</g>
+<g >
+<title>inflate (2 samples, 1.34%)</title><rect x="659.4" y="293" width="15.8" height="15.0" fill="rgb(208,162,34)" rx="2" ry="2" />
+<text  x="662.40" y="303.5" ></text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="651.5" y="261" width="7.9" height="15.0" fill="rgb(251,36,35)" rx="2" ry="2" />
+<text  x="654.48" y="271.5" ></text>
+</g>
+<g >
+<title>StreamSocket::writeOutgoingData (1 samples, 0.67%)</title><rect x="730.7" y="165" width="7.9" height="15.0" fill="rgb(247,229,32)" rx="2" ry="2" />
+<text  x="733.67" y="175.5" ></text>
+</g>
+<g >
+<title>remotedocbroker (1 samples, 0.67%)</title><rect x="1182.1" y="341" width="7.9" height="15.0" fill="rgb(216,181,9)" rx="2" ry="2" />
+<text  x="1185.08" y="351.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="532.7" y="277" width="7.9" height="15.0" fill="rgb(237,24,41)" rx="2" ry="2" />
+<text  x="535.68" y="287.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="611.9" y="277" width="7.9" height="15.0" fill="rgb(221,12,7)" rx="2" ry="2" />
+<text  x="614.88" y="287.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="239.7" y="277" width="7.9" height="15.0" fill="rgb(242,224,12)" rx="2" ry="2" />
+<text  x="242.66" y="287.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;double, std::allocator&lt;double&gt; &gt;::push_back (1 samples, 0.67%)</title><rect x="1126.6" y="325" width="8.0" height="15.0" fill="rgb(210,18,50)" rx="2" ry="2" />
+<text  x="1129.64" y="335.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="1095.0" y="293" width="7.9" height="15.0" fill="rgb(205,223,5)" rx="2" ry="2" />
+<text  x="1097.97" y="303.5" ></text>
+</g>
+<g >
+<title>quicksort (1 samples, 0.67%)</title><rect x="334.7" y="309" width="7.9" height="15.0" fill="rgb(235,214,46)" rx="2" ry="2" />
+<text  x="337.70" y="319.5" ></text>
+</g>
+<g >
+<title>handleUserProfileSignal (1 samples, 0.67%)</title><rect x="239.7" y="261" width="7.9" height="15.0" fill="rgb(222,215,15)" rx="2" ry="2" />
+<text  x="242.66" y="271.5" ></text>
+</g>
+<g >
+<title>fetch_pixel_no_alpha_32 (1 samples, 0.67%)</title><rect x="873.2" y="149" width="7.9" height="15.0" fill="rgb(232,54,40)" rx="2" ry="2" />
+<text  x="876.22" y="159.5" ></text>
+</g>
+<g >
+<title>[libcairo-lo.so.2] (4 samples, 2.68%)</title><rect x="619.8" y="245" width="31.7" height="15.0" fill="rgb(231,212,38)" rx="2" ry="2" />
+<text  x="622.80" y="255.5" >[l..</text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="1174.2" y="309" width="7.9" height="15.0" fill="rgb(252,45,8)" rx="2" ry="2" />
+<text  x="1177.16" y="319.5" ></text>
+</g>
+<g >
+<title>drawinglayer::processor2d::CairoPixelProcessor2D::processPolygonStrokePrimitive2D (4 samples, 2.68%)</title><rect x="619.8" y="309" width="31.7" height="15.0" fill="rgb(220,75,19)" rx="2" ry="2" />
+<text  x="622.80" y="319.5" >dr..</text>
+</g>
+<g >
+<title>syscall (1 samples, 0.67%)</title><rect x="968.3" y="277" width="7.9" height="15.0" fill="rgb(251,172,0)" rx="2" ry="2" />
+<text  x="971.26" y="287.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="445.6" y="261" width="7.9" height="15.0" fill="rgb(223,112,25)" rx="2" ry="2" />
+<text  x="448.57" y="271.5" ></text>
+</g>
+<g >
+<title>__restore_rt (2 samples, 1.34%)</title><rect x="596.0" y="213" width="15.9" height="15.0" fill="rgb(253,86,28)" rx="2" ry="2" />
+<text  x="599.04" y="223.5" ></text>
+</g>
+<g >
+<title>__restore_rt (1 samples, 0.67%)</title><rect x="548.5" y="293" width="7.9" height="15.0" fill="rgb(205,6,38)" rx="2" ry="2" />
+<text  x="551.52" y="303.5" ></text>
+</g>
+</g>
+</svg>
